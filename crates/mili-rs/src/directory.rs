@@ -37,7 +37,7 @@ pub struct Directory {
 }
 
 /// Byte range `[start, end)` within the parent file.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteRange {
     pub start: usize,
     pub end: usize,
