@@ -17,9 +17,13 @@ A mili database with root `R` is a directory containing:
   states are written back-to-back; offsets and times live in the
   `.A` file's `state_map` (`mili_internal.h:109-115`,
   `srec.c:3456-3586`).
-- `R.ATI0`, `R.ATI1`, … — **separate files** for time-independent
-  parameters. Not stored in the main `.A`. Have their own directory,
-  hash table, and roll-over logic (`mili_internal.h:476, 484-496`).
+- `<root>_TI_A`, `<root>_TI_B`, … — **separate files** for
+  time-independent parameters, written **only in directory v1**
+  databases (`mili_util.c:908-911`, base26 suffix). v2+ databases
+  store `TI_PARAM` entries inline in the main `.A` directory; see
+  the "TI_PARAM location" note below. Filenames follow the
+  `<root>_TI_<base26_upper>` convention, **not** the `R.ATI*`
+  pattern an earlier version of this doc claimed.
 - `R.A.tfile` — optional time-state index file (header v3+ only).
   When present, the state count moves out of the directory header
   into this file (`direc.c:443-455, 487-490`).
@@ -268,6 +272,37 @@ in [`entry-payloads.md`](entry-payloads.md).
 separate entry type that defines the `[start_id, stop_id]` range for
 each object class within a mesh. The CLASS_DEF entry alone is not
 enough to know how many elements exist; CLASS_IDENTS is required.
+
+### TI_PARAM location (directory-version-dependent)
+
+`TI_PARAM` is a directory entry **type**, not a separate file
+section. Where the entries physically live depends on the directory
+version:
+
+- **Directory v2 and v3** — every fixture in our corpus — write
+  `TI_PARAM` entries inline in the main `.A` directory. They share
+  the same param hash table as `MILI_PARAM` and `APPLICATION_PARAM`
+  (`direc.c:653-689`: the param-table inclusion condition is
+  `etype == MILI_PARAM || etype == APPLICATION_PARAM ||
+  (DIR_VERSION_IDX >= 2 && etype == TI_PARAM)`). The TI read API
+  short-circuits to the regular reader whenever the directory
+  version is `> 1` (`ti.c:179-212, 298-341`).
+  Verified against the `basic1.pltA` fixture: TI_PARAM entries
+  (indices 21, 22, 25, 26, …) have offsets within the main `.A`
+  file and no `*_TI_*` companion file exists alongside the database.
+
+- **Directory v1** (deferred in the Rust port) writes `TI_PARAM`
+  entries to a separate `<root>_TI_<base26>` family of files
+  (`mili_util.c:908-911`), each with its own trailer-style
+  directory parsed by `tidirc.c:380-643`. The trailer omits
+  `QTY_STATES` (one fewer header word) but is otherwise identical
+  in shape to the main directory.
+
+Consequence for the Rust port: the param-decode and TI accessor
+code paths can target the main directory exclusively for v2+
+databases. A v1-only `ti.rs` path enumerates `<root>_TI_*` files
+and loads their directories via the same parser, but is not
+exercised until v1 support lands.
 
 ### TI_PARAM-as-storage pattern
 
