@@ -10,6 +10,7 @@ pub mod directory;
 mod error;
 pub mod family;
 pub mod header;
+pub mod mesh;
 pub mod param;
 pub mod state;
 pub mod ti;
@@ -18,5 +19,9 @@ pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};
 pub use error::{MiliError, Result};
 pub use family::Database;
 pub use header::{Endianness, Header, PartitionScheme, PrecisionLimit};
+pub use mesh::{
+    decode_elem_conns, decode_nodes, Connectivity, Mesh, MeshId, MeshTable, Nodes, ObjectClass,
+    Superclass,
+};
 pub use param::{AggType, ArrayParam, DataType, ParamTable, ParamValue, ScalarValue};
 pub use state::{StateMapSource, StateMeta};

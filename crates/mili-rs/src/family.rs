@@ -24,6 +24,7 @@ use memmap2::Mmap;
 use crate::directory::Directory;
 use crate::error::{MiliError, Result};
 use crate::header::Header;
+use crate::mesh::{self, Connectivity, MeshId, MeshTable, Nodes};
 use crate::param::{ParamTable, ParamValue, ScalarValue};
 use crate::state::{self, StateMapSource, StateMeta};
 
@@ -35,6 +36,7 @@ pub struct Database {
     header: Header,
     directory: Directory,
     params: ParamTable,
+    meshes: MeshTable,
     states: Vec<StateMeta>,
 }
 
@@ -52,6 +54,9 @@ impl Database {
         let header = Header::parse(&a_mmap)?;
         let directory = Directory::parse(&a_mmap, &header)?;
         let params = ParamTable::build(&directory);
+
+        let mut meshes = MeshTable::build(&directory)?;
+        meshes.load_ident_ranges(&a_mmap, header, &directory)?;
 
         let states = match StateMapSource::pick(&header, &directory) {
             StateMapSource::InlineA(range) => state::parse_inline(&a_mmap, range, &header)?,
@@ -78,6 +83,7 @@ impl Database {
             header,
             directory,
             params,
+            meshes,
             states,
         })
     }
@@ -141,6 +147,46 @@ impl Database {
 
     pub fn state_count(&self) -> usize {
         self.states.len()
+    }
+
+    /// Mesh / class metadata folded from the directory's `CLASS_DEF`,
+    /// `CLASS_IDENTS`, `NODES`, and `ELEM_CONNS` entries.
+    pub fn meshes(&self) -> &MeshTable {
+        &self.meshes
+    }
+
+    /// Decode the `NODES` payload for `(mesh_id, classname)`, returning
+    /// `None` if no such entry is registered.
+    pub fn nodes(&self, mesh_id: MeshId, classname: &str) -> Result<Option<Nodes<'_>>> {
+        let Some(idx) = self.meshes.nodes_entry_index(mesh_id, classname) else {
+            return Ok(None);
+        };
+        let dims = self.mesh_dimensions()?;
+        let entry = &self.directory.entries[idx];
+        Ok(Some(mesh::decode_nodes(
+            &self.a_mmap,
+            entry,
+            self.header,
+            dims,
+        )?))
+    }
+
+    /// Decode the `ELEM_CONNS` payload for `(mesh_id, classname)`,
+    /// returning `None` if no such entry is registered.
+    pub fn connectivity(
+        &self,
+        mesh_id: MeshId,
+        classname: &str,
+    ) -> Result<Option<Connectivity<'_>>> {
+        let Some(idx) = self.meshes.conns_entry_index(mesh_id, classname) else {
+            return Ok(None);
+        };
+        let entry = &self.directory.entries[idx];
+        Ok(Some(mesh::decode_elem_conns(
+            &self.a_mmap,
+            entry,
+            self.header,
+        )?))
     }
 }
 
