@@ -192,9 +192,20 @@ header's `MILI_PRECISION_LIMIT_IDX` byte (byte 7) and applied via
 |------:|---------------------|------------------------------------------|
 | 0     | `PREC_LIMIT_NULL`   | undefined; treat as error                |
 | 1     | `PREC_LIMIT_SINGLE` | `M_FLOAT` = 4 bytes, `M_INT` = 4 bytes   |
-| 2     | `PREC_LIMIT_DOUBLE` | `M_FLOAT` = 4 bytes, `M_INT` = 4 bytes (per current C code; double precision is opt-in per svar via `M_FLOAT8` rather than promotion of `M_FLOAT`) |
+| 2     | `PREC_LIMIT_DOUBLE` | `M_FLOAT` = 4 bytes, `M_INT` = 4 bytes (resolved — see below) |
 | 3     | `PREC_LIMIT_QUAD`   | reserved; not in use                     |
 | 4     | `PREC_LIMIT_NONE`   | strict-explicit-types mode               |
+
+**Resolved**: under `PREC_LIMIT_DOUBLE` the C lib still resolves
+`M_FLOAT` to 4 bytes and `M_INT` to 4 bytes — the SINGLE and DOUBLE
+arms of `set_default_io_routines` (`dep.c:100-244`) populate
+`fam->external_size[]` identically. Double precision is opt-in per
+svar via an explicit `M_FLOAT8` (or `M_INT8`) `num_type` in
+`STATE_VAR_DICT`, not via promotion of the `M_FLOAT` alias. Verified
+on the `dbl_nodtang` fixture: header byte 7 is `0x02`
+(PREC_LIMIT_DOUBLE), and `db.nodes().dtype` is `float32` while the
+explicit `nodtang` svar (declared `M_FLOAT8`) reads back as
+`float64`.
 
 **Implication for `mili-rs`:** resolve `M_FLOAT`/`M_INT` to a concrete
 width once at open time based on the precision-limit byte, and store
@@ -264,21 +275,63 @@ Several high-level concepts that the Python API exposes as
 first-class objects do **not** have their own entry type. They are
 named TI_PARAM payloads, identified by naming convention:
 
-| Concept            | TI_PARAM name pattern                              |
-|--------------------|----------------------------------------------------|
-| Per-class labels   | `Labels[<classname>]`                              |
-| Element IDs        | `Labels-ElemIds[<classname>]`                      |
-| Materials          | `MAT_NAME_<n>` (one entry per material)            |
-| Element sets       | `IntLabel_es_<setname>`                            |
-| Mesh dimensions    | scalar param named `"mesh dimensions"`             |
-| Partition limits   | scalars `"states per file"`, `"max size per file"` |
+| Concept            | TI_PARAM name pattern                                            |
+|--------------------|------------------------------------------------------------------|
+| Node labels        | `Node Labels<descriptor>`                                        |
+| Per-class labels   | `Element Labels<descriptor>` (filter out names containing `ElemIds`) |
+| Per-class elem ids | `Element Labels-ElemIds<descriptor>` (written but unused by mili-python) |
+| Materials          | `MAT_NAME_<n>` (one entry per material)                          |
+| Element sets       | `IntLabel_es_<setname>`                                          |
+| Mesh dimensions    | scalar param named `"mesh dimensions"`                           |
+| Partition limits   | scalars `"states per file"`, `"max size per file"`               |
 
-The `mili-rs` reader exposes these as typed accessors
+`<descriptor>` is the fixed-format suffix built by
+`ti_make_label_description` (`ti.c:879-884`):
+
+```
+[/Mesh-<meshid>/Sname-<classname>/Scls-<superclass_name>/Mat-<matid>/]
+```
+
+`matid` is a per-class monotonic counter (`label_class_list[].last_matid`),
+starting at 0 and bumped on every `mc_def_conn_labels` call for the
+same class (`mesh_u.c:1602-1627`). It is **not** a material number in
+the physics sense — it just serializes repeated label-definition
+calls for the same class.
+
+The reader recipe (`miliinternal.py:96-106`) is therefore:
+
+- For each TI_PARAM whose name starts with `"Node Labels"`, attach
+  the payload to the `"node"` class.
+- For each TI_PARAM whose name starts with `"Element Labels"` and
+  does **not** contain `"ElemIds"`, parse `Sname-(\w+)` out of the
+  descriptor to identify the class, then **concatenate** all matching
+  payloads (in directory order) into one label array for that class.
+- TI_PARAMs whose name contains `"Element Labels-ElemIds"` are
+  ignored on read — they exist only for Xmilics/griz compatibility.
+
+### Label-material trailing convention (resolved)
+
+The file-header comment at `mesh_u.c:29-31` ("material numbers added
+to end of label list") is **stale**. The current writer
+(`mc_def_conn_labels`, `mesh_u.c:1556-1678`) emits labels and local
+element ids as two **separate** TI arrays of equal length `qty`, not
+one concatenated `2 * qty` array with a split point. The `qty * 2`
+allocation at `mesh_u.c:1196` and `mesh_u.c:1473` is a leftover; only
+the first `qty` slots are populated and only the first `qty` slots
+are read back (the `mc_ti_wrt_array` call sets `dims[0] = qty`).
+Physical material numbers live entirely in separate `MAT_NAME_<n>`
+TI params.
+
+The Rust port therefore does **not** need to split label payloads.
+The `Element Labels` array for a given class is the full label
+sequence, no trailer to strip.
+
+The Rust reader exposes these as typed accessors
 (`db.labels(class)`, `db.materials()`, …) that look up the relevant
 TI param name and parse the payload. The Python API's
 `materials()`, `material_numbers()`, `element_sets()`,
 `integration_points()`, and `labels()` are all built on this
-pattern (`reference/mili-python/src/mili/miliinternal.py:107-115,
+pattern (`reference/mili-python/src/mili/miliinternal.py:96-119,
 198-211, 463-474`).
 
 Element-set values have an internal convention: the payload is an
