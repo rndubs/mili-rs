@@ -76,7 +76,9 @@ planning/
 │   ├── format.md        # on-disk mili format reference
 │   └── buffer.md        # MiliBuffer / zero-copy contract
 ├── mili-rs/
-│   └── README.md
+│   ├── README.md
+│   ├── plan.md           # detailed module-by-module build plan
+│   └── status.md         # live status tracker (steps, edge cases, coverage)
 ├── mili-py/
 │   └── README.md
 └── mili-viz/

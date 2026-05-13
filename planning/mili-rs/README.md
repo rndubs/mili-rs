@@ -3,6 +3,10 @@
 A pure-Rust replacement for `libmili`. Byte-for-byte compatible with
 existing mili databases on disk. No C dependency.
 
+> **Where to look:** [`plan.md`](plan.md) for the module-by-module build
+> plan, [`status.md`](status.md) for the live tracker of which steps
+> have landed.
+
 ## Objectives
 
 1. Read any database that `libmili` writes, on either endianness.
