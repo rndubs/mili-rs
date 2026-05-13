@@ -37,6 +37,11 @@ use crate::header::{Endianness, Header};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MeshId(pub i32);
 
+/// Material number, parsed from `MAT_NAME_<n>` / element-set names.
+/// See `planning/shared/format.md` § "TI_PARAM-as-storage pattern".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MaterialId(pub i32);
+
 /// Mili superclass codes from `planning/shared/format.md` § "Superclass
 /// table". The numeric value is the on-disk code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -16,16 +16,17 @@
 //! the read path (`query.rs`) needs it. The family root is stashed so
 //! state files (`<root>00`, `<root>01`, …) can be resolved by index.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
-use crate::directory::Directory;
+use crate::directory::{DirEntry, DirEntryType, Directory};
 use crate::error::{MiliError, Result};
-use crate::header::Header;
-use crate::mesh::{self, Connectivity, MeshId, MeshTable, Nodes};
-use crate::param::{ParamTable, ParamValue, ScalarValue};
+use crate::header::{Endianness, Header};
+use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
+use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
 use crate::state::{self, StateMapSource, StateMeta};
 
 /// An opened mili family — the read-side handle through which all
@@ -188,6 +189,171 @@ impl Database {
             self.header,
         )?))
     }
+
+    /// Concatenated label array for `(mesh_id, classname)`.
+    ///
+    /// Implements the TI_PARAM-as-storage recipe from
+    /// `planning/shared/format.md` § "TI_PARAM-as-storage pattern":
+    /// for the `"node"` class, scan TI_PARAMs whose name starts with
+    /// `"Node Labels"`; for any other class, scan names starting with
+    /// `"Element Labels"`, skipping any that contain `"ElemIds"`. Filter
+    /// to those whose descriptor's `Sname-<classname>` matches, then
+    /// concatenate every matching payload in directory order. Returns
+    /// `None` if no matching entry is present.
+    ///
+    /// `reference/mili-python/src/mili/miliinternal.py:96-106`.
+    pub fn labels(&self, mesh_id: MeshId, classname: &str) -> Result<Option<Vec<i32>>> {
+        let prefix = if classname == "node" {
+            "Node Labels"
+        } else {
+            "Element Labels"
+        };
+        let sname_token = format!("Sname-{classname}");
+        let mut out: Vec<i32> = Vec::new();
+        let mut any = false;
+        for entry in &self.directory.entries {
+            if entry.entry_type != DirEntryType::TiParam || entry.name_count == 0 {
+                continue;
+            }
+            let name = self.directory.names.get(entry.name_start as usize);
+            if !name.starts_with(prefix) || name.contains("ElemIds") {
+                continue;
+            }
+            if !descriptor_matches(name, mesh_id, &sname_token) {
+                continue;
+            }
+            any = true;
+            append_i32_array(&self.a_mmap, entry, self.header, &mut out)?;
+        }
+        Ok(if any { Some(out) } else { None })
+    }
+
+    /// Materials discovered via `MAT_NAME_<n>` TI_PARAM entries.
+    ///
+    /// Returns a map from material name (the entry's string payload) to
+    /// the list of material numbers (the `<n>` suffix) that share that
+    /// name. Material numbers appear in the order their TI_PARAMs are
+    /// encountered.
+    ///
+    /// `reference/mili-python/src/mili/miliinternal.py:198-211`.
+    pub fn materials(&self) -> Result<HashMap<String, Vec<i32>>> {
+        let mut out: HashMap<String, Vec<i32>> = HashMap::new();
+        for entry in &self.directory.entries {
+            if entry.entry_type != DirEntryType::TiParam || entry.name_count == 0 {
+                continue;
+            }
+            let name = self.directory.names.get(entry.name_start as usize);
+            let Some(suffix) = name.strip_prefix("MAT_NAME_") else {
+                continue;
+            };
+            let Ok(n) = suffix.parse::<i32>() else {
+                continue;
+            };
+            let value = ParamValue::decode(&self.a_mmap, entry, self.header)?;
+            let ParamValue::String(s) = value else {
+                return Err(MiliError::MalformedDirectory(
+                    "MAT_NAME_<n>: payload not a string param",
+                ));
+            };
+            out.entry(s.to_owned()).or_default().push(n);
+        }
+        Ok(out)
+    }
+
+    /// Element sets defined via `IntLabel_es_<setname>` TI_PARAMs.
+    ///
+    /// The returned `Vec<i32>` is the raw payload exactly as written:
+    /// integration-point ids followed by a single trailing count entry.
+    /// See `planning/shared/format.md` § "TI_PARAM-as-storage pattern"
+    /// and `reference/mili-python/src/mili/miliinternal.py:113-115`.
+    pub fn element_sets(&self) -> Result<HashMap<String, Vec<i32>>> {
+        let mut out: HashMap<String, Vec<i32>> = HashMap::new();
+        for entry in &self.directory.entries {
+            if entry.entry_type != DirEntryType::TiParam || entry.name_count == 0 {
+                continue;
+            }
+            let name = self.directory.names.get(entry.name_start as usize);
+            let Some(setname) = name.strip_prefix("IntLabel_es_") else {
+                continue;
+            };
+            let mut values = Vec::new();
+            append_i32_array(&self.a_mmap, entry, self.header, &mut values)?;
+            out.insert(setname.to_owned(), values);
+        }
+        Ok(out)
+    }
+
+    /// Integration-point ids per material, derived from
+    /// [`Self::element_sets`].
+    ///
+    /// An element-set name that parses as an `i32` is treated as a
+    /// material number; the IP ids are the payload minus the trailing
+    /// count entry. Sets whose names do not parse as integers are
+    /// skipped.
+    ///
+    /// `reference/mili-python/src/mili/miliinternal.py:463-474`.
+    pub fn integration_points(&self) -> Result<HashMap<MaterialId, Vec<i32>>> {
+        let sets = self.element_sets()?;
+        let mut out: HashMap<MaterialId, Vec<i32>> = HashMap::new();
+        for (setname, values) in sets {
+            let Ok(mat) = setname.parse::<i32>() else {
+                continue;
+            };
+            let ips = match values.split_last() {
+                Some((_count, head)) => head.to_vec(),
+                None => Vec::new(),
+            };
+            out.insert(MaterialId(mat), ips);
+        }
+        Ok(out)
+    }
+}
+
+fn descriptor_matches(name: &str, mesh_id: MeshId, sname_token: &str) -> bool {
+    // Names from `ti_make_label_description` carry the descriptor
+    // `[/Mesh-<id>/Sname-<class>/Scls-<superclass>/Mat-<matid>/]`. We
+    // only need to confirm both the mesh-id and class tokens are
+    // present; the order is fixed by the writer but matching by
+    // substring is robust against future writer variations.
+    let Some(open) = name.find('[') else {
+        return false;
+    };
+    let desc = &name[open..];
+    let mesh_token = format!("/Mesh-{}/", mesh_id.0);
+    desc.contains(&mesh_token) && desc.contains(sname_token)
+}
+
+fn append_i32_array(
+    bytes: &[u8],
+    entry: &DirEntry,
+    header: Header,
+    out: &mut Vec<i32>,
+) -> Result<()> {
+    let value = ParamValue::decode(bytes, entry, header)?;
+    let ParamValue::Array(arr) = value else {
+        return Err(MiliError::MalformedDirectory(
+            "TI accessor: expected array param",
+        ));
+    };
+    if !matches!(arr.data_type, DataType::Int | DataType::Int4) {
+        return Err(MiliError::MalformedDirectory(
+            "TI accessor: array element type is not i32",
+        ));
+    }
+    let end = header.endianness;
+    out.reserve(arr.atoms);
+    for chunk in arr.data.chunks_exact(4) {
+        let slot: [u8; 4] = chunk.try_into().expect("chunks_exact(4)");
+        out.push(read_i32_4(end, slot));
+    }
+    Ok(())
+}
+
+fn read_i32_4(end: Endianness, slot: [u8; 4]) -> i32 {
+    match end {
+        Endianness::Big => i32::from_be_bytes(slot),
+        Endianness::Little => i32::from_le_bytes(slot),
+    }
 }
 
 fn mmap_read_only(path: &Path) -> Result<Mmap> {
@@ -200,4 +366,37 @@ fn mmap_read_only(path: &Path) -> Result<Mmap> {
     // mili databases are not concurrent-write safe.
     let mmap = unsafe { Mmap::map(&file)? };
     Ok(mmap)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::descriptor_matches;
+    use crate::mesh::MeshId;
+
+    #[test]
+    fn descriptor_matches_basic_pattern() {
+        let name = "Element Labels[/Mesh-0/Sname-brick/Scls-M_HEX/Mat--1/]";
+        assert!(descriptor_matches(name, MeshId(0), "Sname-brick"));
+        assert!(!descriptor_matches(name, MeshId(1), "Sname-brick"));
+        assert!(!descriptor_matches(name, MeshId(0), "Sname-node"));
+    }
+
+    #[test]
+    fn descriptor_matches_rejects_bare_name() {
+        // No descriptor bracket — should not match anything.
+        assert!(!descriptor_matches(
+            "Element Labels",
+            MeshId(0),
+            "Sname-brick"
+        ));
+    }
+
+    #[test]
+    fn descriptor_matches_substring_not_prefix() {
+        // `Sname-bri` would substring-match `Sname-brick` if we weren't
+        // careful; document the current behavior (substring) so callers
+        // know to pass the full class name.
+        let name = "Element Labels[/Mesh-2/Sname-brick/Scls-M_HEX/Mat-0/]";
+        assert!(descriptor_matches(name, MeshId(2), "Sname-brick"));
+    }
 }

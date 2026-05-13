@@ -20,8 +20,8 @@ pub use error::{MiliError, Result};
 pub use family::Database;
 pub use header::{Endianness, Header, PartitionScheme, PrecisionLimit};
 pub use mesh::{
-    decode_elem_conns, decode_nodes, Connectivity, Mesh, MeshId, MeshTable, Nodes, ObjectClass,
-    Superclass,
+    decode_elem_conns, decode_nodes, Connectivity, MaterialId, Mesh, MeshId, MeshTable, Nodes,
+    ObjectClass, Superclass,
 };
 pub use param::{AggType, ArrayParam, DataType, ParamTable, ParamValue, ScalarValue};
 pub use state::{StateMapSource, StateMeta};
