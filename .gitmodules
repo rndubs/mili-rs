@@ -1,0 +1,9 @@
+[submodule "reference/mili"]
+	path = reference/mili
+	url = https://github.com/mdg-graphics/mili.git
+[submodule "reference/mili-python"]
+	path = reference/mili-python
+	url = https://github.com/mdg-graphics/mili-python.git
+[submodule "reference/griz"]
+	path = reference/griz
+	url = https://github.com/mdg-graphics/griz.git
