@@ -9,11 +9,29 @@ pub enum MiliError {
     #[error("bad magic: expected b\"mili\", got {0:?}")]
     BadMagic([u8; 4]),
 
+    #[error("header too short: need {need} bytes, got {got}", need = crate::header::Header::SIZE, got = .0)]
+    HeaderTooShort(usize),
+
     #[error("unsupported header version {0}")]
     UnsupportedHeader(u8),
 
     #[error("unsupported directory version {0}")]
     UnsupportedDir(u8),
+
+    #[error("unsupported endianness byte {0:#x}")]
+    UnsupportedEndianness(u8),
+
+    #[error("unsupported precision limit byte {0:#x}")]
+    UnsupportedPrecisionLimit(u8),
+
+    #[error("invalid state-file suffix width: 0")]
+    InvalidSuffixWidth,
+
+    #[error("unsupported partition scheme byte {0:#x}")]
+    UnsupportedPartitionScheme(u8),
+
+    #[error("header extension fields not supported (count={0})")]
+    HeaderExtensionUnsupported(u8),
 
     #[error("truncated {file}: needed {need} bytes at offset {off}, got {got}")]
     Truncated {

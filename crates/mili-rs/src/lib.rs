@@ -7,5 +7,7 @@
 //! query path, and write path arrive in later steps per the plan.
 
 mod error;
+pub mod header;
 
 pub use error::{MiliError, Result};
+pub use header::{Endianness, Header, PartitionScheme, PrecisionLimit};
