@@ -216,7 +216,7 @@ impl Directory {
 }
 
 impl NamePool {
-    fn parse(bytes: &[u8], expected_count: u32) -> Result<Self> {
+    pub(crate) fn parse(bytes: &[u8], expected_count: u32) -> Result<Self> {
         if std::str::from_utf8(bytes).is_err() {
             // We don't yet know the offset of the first invalid byte; the
             // common case (NUL terminators present, ASCII names) is fine,
