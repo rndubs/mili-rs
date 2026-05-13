@@ -119,6 +119,24 @@ impl Header {
     }
 }
 
+impl Endianness {
+    #[inline]
+    pub fn read_i32(self, bytes: &[u8; 4]) -> i32 {
+        match self {
+            Endianness::Big => i32::from_be_bytes(*bytes),
+            Endianness::Little => i32::from_le_bytes(*bytes),
+        }
+    }
+
+    #[inline]
+    pub fn read_i64(self, bytes: &[u8; 8]) -> i64 {
+        match self {
+            Endianness::Big => i64::from_be_bytes(*bytes),
+            Endianness::Little => i64::from_le_bytes(*bytes),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

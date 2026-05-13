@@ -33,6 +33,12 @@ pub enum MiliError {
     #[error("header extension fields not supported (count={0})")]
     HeaderExtensionUnsupported(u8),
 
+    #[error("malformed directory: {0}")]
+    MalformedDirectory(&'static str),
+
+    #[error("unknown directory entry type code {0}")]
+    UnknownEntryType(i64),
+
     #[error("truncated {file}: needed {need} bytes at offset {off}, got {got}")]
     Truncated {
         file: PathBuf,

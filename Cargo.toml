@@ -17,3 +17,12 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# The numeric cast lints are too noisy on byte-parsing code. We
+# range-check signed values before narrowing them, but each cast still
+# trips three or four pedantic lints. Allow the family.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+similar_names = "allow"
+doc_markdown = "allow"
