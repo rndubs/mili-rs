@@ -45,6 +45,34 @@ persisted in the `.A` file as named scalar parameters
 2486`) and read back via `mc_read_scalar()` at open time
 (`mili.c:1295-1311`).
 
+### State file suffix width (header byte 8)
+
+`HDR_SFILE_SUFFIX_WIDTH_IDX` is a one-byte field giving the number
+of digits in the state-file suffix. Width 2 → `R.A00`..`R.A99`.
+Legal range `1..=255` (`mili.c:2396`, error
+`INVALID_SUFFIX_WIDTH`). Overflow is **not** handled automatically:
+writing past the suffix range is an error rather than a silent
+expansion to a wider suffix. The Rust writer must surface this
+error explicitly. Filename printf format is `%0*d`
+(`mili_util.c:881`).
+
+### Directory commit count (header field `COMMIT_COUNT_IDX`)
+
+Incremented on every directory flush (`direc.c:204, 215`). The
+reader tracks the highest commit number observed so subsequent
+writes start one higher (`direc.c:562-564`). No formal validation;
+it imposes a temporal order on directory contents and lets a
+writer detect that another commit happened concurrently.
+
+### Header extension fields (header byte 15)
+
+`HDR_NUM_EXT_FIELDS_IDX` declares the count of trailing 4-byte
+extension fields after the 16-byte char header (`mili_enum.h:422`).
+Forward-compatibility hook; **always 0** in the reference corpus.
+Treat any non-zero value as a hard error in the Rust port for now
+— if a real fixture surfaces extension fields, we widen the parser
+then.
+
 ## `.A` header (`mili.c:2059`, `mili_enum.h:414-422`)
 
 Fixed 16-byte prefix (extensible via byte 15):
@@ -142,7 +170,7 @@ emits v3 only.
 Reading directory entries gives us the contiguous byte ranges that
 `MiliBuffer` will eventually point at.
 
-## Numeric types (`mili.h:54-60`, `mili.c:140-141`)
+## Numeric types (`mili.h:54-60`, `mili.c:140-141`, `dep.c:84-181`)
 
 | Code      | On-disk size | Rust type        |
 |-----------|-------------:|------------------|
@@ -153,12 +181,112 @@ Reading directory entries gives us the contiguous byte ranges that
 | M_INT8    | 8            | `i64`            |
 | M_CHAR    | 1            | `u8`             |
 
-`M_FLOAT` and `M_INT` are platform-native aliases that resolve to one
-of the explicit widths at write time and are recorded as the explicit
-form in the directory. We always emit explicit widths.
+`M_FLOAT` and `M_INT` are platform-native aliases. Their resolution
+to a concrete width is **global to the database**, set by the
+header's `MILI_PRECISION_LIMIT_IDX` byte (byte 7) and applied via
+`fam->external_type[]` function pointers configured in
+`set_default_io_routines()` (`dep.c:84-181`). Legal values
+(`mili_enum.h:68-74`):
+
+| Value | Name                | Effect on `M_FLOAT` / `M_INT`            |
+|------:|---------------------|------------------------------------------|
+| 0     | `PREC_LIMIT_NULL`   | undefined; treat as error                |
+| 1     | `PREC_LIMIT_SINGLE` | `M_FLOAT` = 4 bytes, `M_INT` = 4 bytes   |
+| 2     | `PREC_LIMIT_DOUBLE` | `M_FLOAT` = 4 bytes, `M_INT` = 4 bytes (per current C code; double precision is opt-in per svar via `M_FLOAT8` rather than promotion of `M_FLOAT`) |
+| 3     | `PREC_LIMIT_QUAD`   | reserved; not in use                     |
+| 4     | `PREC_LIMIT_NONE`   | strict-explicit-types mode               |
+
+**Implication for `mili-rs`:** resolve `M_FLOAT`/`M_INT` to a concrete
+width once at open time based on the precision-limit byte, and store
+the resolved width in `Database` so downstream code never sees the
+ambiguous aliases. We will not emit `M_FLOAT`/`M_INT` on write; we
+always serialize the explicit form to keep produced files
+unambiguous.
 
 No packed, varint, or compressed encodings exist. Every numeric block
 on disk is a plain C array of the declared width.
+
+## Superclass table (`mili.h:65-81, 88`)
+
+| Code | Name        | conn_words | Notes                                  |
+|-----:|-------------|-----------:|----------------------------------------|
+| 0    | M_UNIT      | 0          | sentinel; no geometry                  |
+| 1    | M_NODE      | 0          | nodal "elements" — coordinates only    |
+| 2    | M_TRUSS     | 4          |                                        |
+| 3    | M_BEAM      | 5          |                                        |
+| 4    | M_TRI       | 5          |                                        |
+| 6    | M_TET       | 6          | (5 is intentionally skipped upstream)  |
+| 7    | M_PYRAMID   | 7          |                                        |
+| 8    | M_WEDGE     | 8          |                                        |
+| 9    | M_HEX       | 10         | 8 corner nodes + 2 metadata words      |
+| 10   | M_MAT       | 0          | material pseudo-class                  |
+| 11   | M_MESH      | 0          | mesh-level pseudo-class                |
+| 12   | M_SURFACE   | 0          | surfaces; connectivity in SURFACE_CONNS|
+| 13   | M_PARTICLE  | 3          |                                        |
+| 14   | M_TET10     | 12         | quadratic tet                          |
+| 15   | M_INODE     | 3          | interface node                         |
+
+The `conn_words` counts above include any per-element trailing
+metadata that the C library stores alongside the bare node IDs. The
+"`Glob`" class the Python API exposes uses the M_MESH or M_MAT
+superclass (one element representing the global state).
+
+Node-ordering conventions are not documented in code; we preserve
+whatever order we read.
+
+## Entry types in the directory
+
+This is the complete set of values that can appear in a directory
+entry's `TYPE` field. Byte-level payload schemas for each one are
+in [`entry-payloads.md`](entry-payloads.md).
+
+| Type             | Payload contents (high level)                       |
+|------------------|-----------------------------------------------------|
+| `NODES`          | `start_node`, `stop_node`, then dense coords        |
+| `ELEM_CONNS`     | `superclass`, `qty_blocks`, block ranges, conn data |
+| `CLASS_DEF`      | **empty payload**; data is in MODIFIER1 + name pool |
+| `CLASS_IDENTS`   | `superclass`, `start_id`, `stop_id` — the id-range table for one class within a mesh |
+| `STATE_VAR_DICT` | dual integer+character streams describing svars     |
+| `STATE_REC_DATA` | dual streams describing srecs and their subrecords  |
+| `MILI_PARAM`     | scalar/array/string named parameter                 |
+| `APPLICATION_PARAM` | same encoding as MILI_PARAM, semantically distinct |
+| `TI_PARAM`       | same encoding, lives in the separate `R.ATI*` files |
+| `SURFACE_CONNS`  | `superclass`, facet-block list, facet conn data     |
+
+**We initially missed `CLASS_IDENTS`** in the survey — it is a
+separate entry type that defines the `[start_id, stop_id]` range for
+each object class within a mesh. The CLASS_DEF entry alone is not
+enough to know how many elements exist; CLASS_IDENTS is required.
+
+### TI_PARAM-as-storage pattern
+
+Several high-level concepts that the Python API exposes as
+first-class objects do **not** have their own entry type. They are
+named TI_PARAM payloads, identified by naming convention:
+
+| Concept            | TI_PARAM name pattern                              |
+|--------------------|----------------------------------------------------|
+| Per-class labels   | `Labels[<classname>]`                              |
+| Element IDs        | `Labels-ElemIds[<classname>]`                      |
+| Materials          | `MAT_NAME_<n>` (one entry per material)            |
+| Element sets       | `IntLabel_es_<setname>`                            |
+| Mesh dimensions    | scalar param named `"mesh dimensions"`             |
+| Partition limits   | scalars `"states per file"`, `"max size per file"` |
+
+The `mili-rs` reader exposes these as typed accessors
+(`db.labels(class)`, `db.materials()`, …) that look up the relevant
+TI param name and parse the payload. The Python API's
+`materials()`, `material_numbers()`, `element_sets()`,
+`integration_points()`, and `labels()` are all built on this
+pattern (`reference/mili-python/src/mili/miliinternal.py:107-115,
+198-211, 463-474`).
+
+Element-set values have an internal convention: the payload is an
+`i32` array whose last entry is a count and whose preceding entries
+are the integration-point IDs for that set
+(`miliinternal.py:113-115`). This format is **not enforced by the
+on-disk layout** — it is a contract the Python lib relies on. The
+Rust reader has to honor the same convention.
 
 ## Mesh entities (`mili_internal.h:262-269`, `253-260`; `mili.h:429-494`)
 
@@ -178,21 +306,90 @@ on disk is a plain C array of the declared width.
 ## State records, subrecords, svars (`mili.h:169-196`, `srec.c:1821-1921`)
 
 - **State variable (svar)**: scalar, vector, array, or vec-array.
-  Carries `num_type`, `agg_type`, `rank`, `dims[]`, optional
-  `components[]`.
+  Carries `num_type`, `agg_type` (`SCALAR`=0, `VECTOR`=1, `ARRAY`=2,
+  `VEC_ARRAY`=3), `rank`, `dims[]`, optional `components[]`.
+  Components of vector svars are stored as a concatenated stream of
+  NUL-terminated names **inside** the STATE_VAR_DICT character
+  payload, not as separate svar entries and not in the file-level
+  name pool (`svar.c:341-352`).
 - **Subrecord**: a grouping of svars over a particular object class.
-  Has an `organization`:
-  - `RESULT_ORDERED` — all values of svar 0 across all objects, then
-    svar 1, etc. (column-major).
-  - `OBJECT_ORDERED` — all svars for object 0, then object 1, etc.
-    (row-major).
+  Has an `organization` byte (`subrec_layout` enum,
+  `mili_enum.h:41-45`): `RESULT_ORDERED` = 0, `OBJECT_ORDERED` = 1.
 - **Srec** (state record format): the schema for a state. Multiple
   srec formats can coexist; each state is tagged with one.
 - **State**: per-state file offset + time + srec format ID
   (`State_descriptor`, `mili_internal.h:109-115`). Inside the state
-  file, each subrecord is a contiguous byte range described by
-  `lump_offsets[]` and `lump_sizes[]` (`Sub_srec`,
-  `mili_internal.h:215-250`).
+  file, each subrecord is a contiguous byte range. The
+  `lump_offsets[]`, `lump_sizes[]`, `lump_atoms[]` arrays on
+  `Sub_srec` (`mili_internal.h:215-250`) are **derived at read
+  time** from svar atom counts and the subrecord's object id blocks
+  (`srec.c:1409+`) — they are not written to disk.
+
+### Subrecord byte-layout matrix
+
+For a subrecord with `K` svars over `N` objects, the byte order
+depends on `organization` and on each svar's `agg_type`. The
+following enumerates every cell of the matrix because this is the
+single biggest place where a port can silently produce
+wrong-shaped arrays.
+
+**RESULT_ORDERED (organization = 0):** the K svars are laid out
+serially; within each svar's region, the N objects are serial;
+within each object's slot, the svar's atoms are serial.
+
+```
+[ svar_0: obj_0_atoms | obj_1_atoms | … | obj_{N-1}_atoms ]
+[ svar_1: obj_0_atoms | obj_1_atoms | … | obj_{N-1}_atoms ]
+…
+[ svar_{K-1}: … ]
+```
+
+Per-svar atom counts by `agg_type`:
+
+| `agg_type`    | atoms per object                                     |
+|---------------|------------------------------------------------------|
+| `SCALAR`      | 1                                                    |
+| `VECTOR`      | `list_size` (number of components)                   |
+| `ARRAY`       | `prod(dims)`                                         |
+| `VEC_ARRAY`   | `prod(dims) * list_size`                             |
+
+For `VEC_ARRAY` the inner order is: array-dim indices vary fastest,
+then component (vector) index, then integration-point index — i.e.
+"IP axis is the slowest-varying after the array dims, before
+components" (`srec.c:1908, 3018, 4263`). **TODO**: confirm against
+the `vecarray` test fixture before we lock this in. The C code's
+own offset math is the ground truth; a unit test against
+`vecarray` is on the M5 checklist.
+
+**OBJECT_ORDERED (organization = 1):** the N objects are laid out
+serially; within each object's region, the K svars are serial in
+declaration order; within each svar slot, atoms are serial per the
+table above.
+
+```
+[ obj_0: svar_0_atoms | svar_1_atoms | … | svar_{K-1}_atoms ]
+[ obj_1: svar_0_atoms | svar_1_atoms | … | svar_{K-1}_atoms ]
+…
+[ obj_{N-1}: … ]
+```
+
+The mixed-svar case the Python tests pin down
+(`reference/mili-python/tests/test_bugfixes.py:119-172`) is a
+VEC_ARRAY whose components are not all the same width — a stress
+tensor plus a scalar plastic-strain in the same vec-array. The
+layout is still: per object → per IP → per component, with each
+component contributing its own width. The reader has to walk the
+component list to compute per-IP byte size, not multiply
+component-count by a uniform width.
+
+### State end marker (`mili.c:276`, `mili_statemap.c:535, 602-603, 779, 811`)
+
+A single ASCII `~` byte (0x7E) is written to the time-state file
+(`R.A.tfile`) after the state map entries to mark EOF. On read, a
+mismatch triggers `rebuild_state_tfile`. The marker is per-file,
+not per-state; it is **not** written into the `.A0N` state files
+themselves. The Rust writer must emit it when finalizing the
+tfile.
 
 ## Error handling philosophy (`mili.c:1518`, `mili_statemap.c:602-610`, `direc.c:418-440`, `io_mem.c:292`)
 

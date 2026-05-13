@@ -51,6 +51,97 @@ The top 15 methods from the existing API are pinned here; the full
 audit is in `reference/mili-python/src/mili/miliinternal.py`. We do a
 final diff pass against the upstream API at the start of Phase 2.
 
+### Full `query()` signature
+
+`reference/mili-python/src/mili/milidatabase.py:770-844`:
+
+```python
+def query(self,
+    svar_names: Union[List[str], str, ...],
+    entity_type: Union[str, EntityType],
+    material:        Optional[Union[str,int]]   = None,
+    labels:          Optional[Union[List[int],int]] = None,
+    states:          Optional[Union[List[int],int]] = None,
+    ips:             Optional[Union[List[int],int]] = None,
+    write_data:      Optional[Dict[str, QueryDict]] = None,
+    as_dataframe:    bool                        = False,
+    modifier:        Optional[ResultModifier]    = None,
+    project_to_nodes: bool                       = False,
+    **kwargs) -> Union[Dict[str, pd.DataFrame], Dict[str, QueryDict]]
+```
+
+Hidden `**kwargs` validated at `miliinternal.py:1159`:
+`output_object_labels`, `subrec`, `source` (`'primal'` /
+`'derived'`), `reference_state`, `face`. Anything else raises.
+`modifier` is a `ResultModifier` enum: `MIN`, `MAX`, `AVERAGE`,
+`MEDIAN`, `STDDEV`, `CUMMIN`, `CUMMAX`. Negative state indices
+(e.g. `-1` for last) are supported.
+
+The Rust binding accepts the same signature. `write_data`,
+`as_dataframe`, `modifier`, and `project_to_nodes` are
+post-processing wrappers around the basic primal query; for v1
+they can stay in Python on top of the Rust primal call. We push
+them into Rust only if profiling shows it matters.
+
+### Filename root parsing
+(`reference/mili-python/src/mili/reader.py:19-71`,
+`afileIO.py:34-57`)
+
+`open_database()` accepts:
+
+- `/path/to/run` — the basename, no suffix.
+- `/path/to/run.plt` — also accepted; trailing `.plt` is stripped.
+- `/path/to/run.plt00` — also accepted.
+- For parallel files (`dblplt00A`, `dblplt01A`, …), pass `dblplt`;
+  the loader uses regex `re.escape(base) + r"(\d*)A$"` to find
+  matching A-files and sorts them numerically.
+
+Not accepted: glob patterns, directory paths. Missing directory →
+`MiliFileNotFoundError`.
+
+The Rust binding has to replicate this normalization in Python (it
+predates the FFI boundary). The Rust core's `Database::open` takes
+a fully-resolved `&Path`; the Python shim does the regex / suffix
+stripping.
+
+### Parallel wrappers
+(`reference/mili-python/src/mili/parallel.py:19-356`,
+`milidatabase.py:65-88`)
+
+Three operating modes:
+
+| Mode                                 | Wrapper            |
+|--------------------------------------|--------------------|
+| single A-file                        | `_MiliInternal`    |
+| multiple A-files, `suppress_parallel=True` | `LoopWrapper`      |
+| multiple A-files (default)           | `ServerWrapper`    |
+
+`LoopWrapper` and `ServerWrapper` proxy every public method of
+`_MiliInternal` via runtime method-forwarding. `ServerWrapper`
+spawns one worker per core and uses shared memory for the
+large-array returns. With `merge_results=True` (default), results
+are reduced via `reductions.py` helpers (`list_concatenate_unique`,
+`dictionary_merge_no_concat`).
+
+For Phase 2, the Rust-backed `_MiliInternal` slots into all three
+wrappers unchanged — the wrappers introspect the underlying
+object's methods, which still work when those methods are PyO3
+bindings. We do not rewrite the wrappers in Rust.
+
+### Exception hierarchy
+(`afileIO.py:27-30`, `milidatabase.py:36-38`)
+
+Three exceptions all derived from `Exception`:
+
+| Python class             | Rust `MiliError` variant(s)                              |
+|--------------------------|----------------------------------------------------------|
+| `MiliFileNotFoundError`  | `Io(NotFound)` after path normalization fails            |
+| `MiliAParseError`        | `BadMagic`, `UnsupportedHeader`, `UnsupportedDir`, `Truncated`, `DirEntryOutOfRange`, `BadName` |
+| `MiliPythonError`        | `UnknownSvar`, `UnknownClass`, `StateOutOfRange`, `Misaligned`, and any query-level validation error |
+
+Mapping happens in `crates/mili-py/src/errors.rs` via a `match`
+that converts each `MiliError` variant to the right Python class.
+
 ## Crate shape
 
 ```

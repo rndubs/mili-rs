@@ -129,28 +129,110 @@ construction — no global `fam_list` equivalent.
 
 Materializes mesh metadata from the directory:
 
-- `Mesh` (one per `MESH_PARAM` entry chain).
+- `Mesh` (one per mesh discovered while scanning entries; the mesh
+  id-space is the union of all `MODIFIER1` values on geometry
+  entries).
 - `ObjectClass` (one per `CLASS_DEF` entry): name, superclass code,
-  element count, optional label array.
+  long name. The element count and id range come from one or more
+  `CLASS_IDENTS` entries for the same `(mesh_id, classname)` —
+  multiple CLASS_IDENTS entries per class are coalesced into a
+  block list (`Vec<(i32, i32)>`).
 - `nodes(MeshId) -> MiliBuffer<f32>`: locate the `NODES` entry,
-  return a buffer over the matching byte range.
-- `connectivity(ClassId) -> MiliBuffer<i32>`: similar for
-  `ELEM_CONNS`. Two on-disk formats (`M_LIST_OBJ_FMT`,
-  `M_BLOCK_OBJ_FMT`); list form is straight zero-copy, block form
-  needs a small materialization pass.
+  skip the `[start, stop]` int prefix, return a buffer over the
+  coordinate range. `fam.dimensions` is read from the
+  `"mesh dimensions"` scalar param at open and lives on `Database`.
+- `connectivity(ClassId) -> MiliBuffer<i32>`: parse the
+  `[superclass, qty_blocks][block_pairs...]` header, then expose
+  the connectivity data. The block list itself is preserved on
+  `ObjectClass` for label / material lookup against TI params.
+- The labels-per-class accessor lives in `param.rs` (see below) and
+  is exposed re-exported through `mesh.rs` for ergonomics.
 
 ### `svar.rs`
 
 Parses `STATE_VAR_DICT` entries into typed `Svar` records: name,
-`num_type`, `agg_type`, rank, dims, optional components. Components
-of vector svars are themselves svar IDs into the same table.
+title, `num_type`, `agg_type`, rank, dims, component names.
+
+The dictionary's payload is a dual stream (`entry-payloads.md` §
+`STATE_VAR_DICT`): a Rust parser walks the integer and character
+streams in lockstep, consuming one svar definition at a time.
+Components of vector / vec_array svars are NUL-terminated names
+embedded **inside** the char stream, not in the file-level name
+pool — the parser owns its own substring index into the char stream
+and does not touch the global name pool for components.
+
+The resulting `Svar` carries:
+
+```rust
+struct Svar {
+    name: String,
+    title: String,
+    num_type: NumType,    // M_INT4 / M_INT8 / M_FLOAT4 / M_FLOAT8
+    agg: SvarAgg,         // Scalar | Vector { comps: Vec<String> } | Array { dims: Vec<i32> } | VecArray { dims: Vec<i32>, comps: Vec<String> }
+    atoms: usize,         // resolved at parse time per the matrix in format.md
+}
+```
+
+A user query for `"sx"` against a vector svar `"stress"` resolves
+by matching `"sx"` against `stress.agg.comps` and recording the
+component index for the byte-offset math in `query.rs`.
 
 ### `srec.rs`
 
 State record format parser. One `Srec` per srec id; each holds a
-`Vec<Subrecord>` with: class id, organization (`RESULT_ORDERED` /
-`OBJECT_ORDERED`), svars referenced, `lump_offsets`, `lump_sizes`,
-`lump_atoms` (matching the C `Sub_srec` shape).
+`Vec<Subrecord>` with:
+
+- `mclass`: resolved class id (from looking up the on-disk class
+  name via the class table).
+- `svar_ids`: resolved svar ids (from looking up names via the
+  svar table).
+- `organization`: `RESULT_ORDERED` or `OBJECT_ORDERED`.
+- `id_blocks`: `Vec<(i32, i32)>` of inclusive object id ranges
+  (potentially the whole class, potentially a subset).
+- Derived per-svar `lump_offsets`, `lump_sizes`, `lump_atoms` —
+  computed on load via the algorithm in `srec.c:1409+`, *not*
+  read from disk. The Rust function `derive_lumps` lives here and
+  is unit-tested against handcrafted inputs first, against a real
+  fixture second.
+
+The byte-layout matrix (`format.md` § "Subrecord byte-layout
+matrix") drives the offset arithmetic in `query.rs`; `srec.rs` is
+its source of truth.
+
+### `param.rs`
+
+Parses MILI_PARAM, APPLICATION_PARAM, and TI_PARAM payloads. One
+parser, three call sites (the main `.A` directory and each `R.ATI*`
+directory).
+
+Public API (called from `family.rs` and re-exported by
+`Database`):
+
+- `scalar<T>(&self, name: &str) -> Result<T>` for the basic
+  partition-limit / dimension reads.
+- `string(&self, name: &str) -> Result<&str>`.
+- `array<T>(&self, name: &str) -> Result<ArrayParam<T>>` returning
+  `{ dims: Vec<i32>, data: MiliBuffer<T> }`.
+
+On top of these, **high-level accessors** that follow the
+TI_PARAM naming conventions documented in `format.md`:
+
+- `labels(class: ClassId) -> MiliBuffer<i32>` → reads
+  `Labels[<classname>]`.
+- `element_ids(class: ClassId) -> MiliBuffer<i32>` → reads
+  `Labels-ElemIds[<classname>]`.
+- `materials() -> HashMap<String, Vec<i32>>` → scans for
+  `MAT_NAME_<n>` TI params.
+- `element_sets() -> HashMap<String, ElementSet>` → scans for
+  `IntLabel_es_<name>`; the trailing entry is the count and the
+  preceding entries are integration-point ids, per the contract
+  enforced in `miliinternal.py:113-115`.
+- `integration_points() -> HashMap<MaterialId, Vec<i32>>` →
+  derived from element_sets per `miliinternal.py:463-474`.
+
+These accessors are **the** way to discover the high-level
+concepts the Python API exposes. There is no parallel dedicated
+entry-type code path.
 
 ### `state.rs`
 
@@ -214,9 +296,19 @@ and the query gather code.
 
 ### `ti.rs`
 
-TI param reader. Same directory parser as `directory.rs` but pointed
-at the separate `R.ATI0…` files. Holds its own `Directory` and name
-pool; reuses the body parsers for params and arrays.
+TI file open / directory load. Same directory parser as
+`directory.rs` but pointed at the separate `R.ATI0…` files. Holds
+its own `Directory` and name pool. Hands TI_PARAM entries off to
+`param.rs` for payload parsing — there is exactly one param parser
+and it is reused here.
+
+### `state_marker.rs` (small)
+
+Read and write of the `~` (0x7E) end-of-file marker in the
+`.tfile`. Read path validates and returns a typed error on
+mismatch; write path emits a single byte after the state map is
+flushed. Trivial but called out because forgetting it on write
+will silently produce files the C reader thinks are corrupt.
 
 ## Incremental build order
 
@@ -227,17 +319,19 @@ prior work.
 | Step | Lands                                                       | Validates against           |
 |-----:|-------------------------------------------------------------|-----------------------------|
 | 0    | Workspace, CI skeleton, `MiliError`, fixture symlinks       | `cargo test` green          |
-| 1    | `header.rs` + golden bytes from `basic1.pltA`               | hand-checked offsets        |
+| 1    | `header.rs` + golden bytes from `basic1.pltA`               | hand-checked offsets, precision-limit resolution |
 | 2    | `directory.rs` for v3, then v2, then v1                     | parity on dir-entry count, names, types; `dir_version_2/` fixture |
-| 3    | `family.rs` open path, `state_map` resolution               | parity on `times()`, state count |
-| 4    | `mesh.rs`: nodes, connectivity, labels                      | parity on `nodes()`, `connectivity()`, `labels()` |
-| 5    | `svar.rs`, `srec.rs`                                        | parity on `class_names()`, `svars()` |
-| 6    | `buffer.rs` and `endian.rs`                                 | unit tests on synthetic mmaps |
-| 7    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | parity on simple `query()` cases |
-| 8    | `query.rs` full filter set, `OBJECT_ORDERED`                | full mili-python read test suite |
-| 9    | `ti.rs`                                                     | parity on TI param reads    |
-| 10   | rayon over states; criterion benches                        | ≥ 2× mili-python throughput |
-| 11   | cargo-fuzz targets on `directory.rs` and `header.rs`        | runs clean for an hour      |
+| 3    | `param.rs` scalar/string/array decode; `ti.rs` open         | parity on `"mesh dimensions"`, `"states per file"`, MAT_NAME, IntLabel_es |
+| 4    | `family.rs` open path, `state_map` resolution, end-marker   | parity on `times()`, state count, marker round-trip |
+| 5    | `mesh.rs`: CLASS_DEF + CLASS_IDENTS, nodes, connectivity    | parity on `class_names()`, `nodes()`, `connectivity()` |
+| 6    | high-level TI accessors (labels, materials, element_sets)   | parity on `labels()`, `materials()`, `element_sets()`, `integration_points()` |
+| 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | parity on svar metadata; unit tests on offset math for every cell of the layout matrix |
+| 8    | `buffer.rs` and `endian.rs`                                 | unit tests on synthetic mmaps, including misaligned + byteswap cases |
+| 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | parity on simple `query()` cases |
+| 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | full mili-python read test suite |
+| 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | parity on `test_bugfixes.py:251-296` |
+| 12   | rayon over states; criterion benches                        | ≥ 2× mili-python throughput |
+| 13   | cargo-fuzz targets on `directory.rs`, `header.rs`, `param.rs` | runs clean for an hour    |
 
 Step 0 lands a working CI before any logic. Steps 1–6 land
 read-side metadata; nothing returns data arrays yet. Step 7 is the
@@ -390,15 +484,63 @@ Pass criterion for Phase 1: `query_single` and `query_many` are
 both ≥ 2× faster than mili-python on the corpus, with parity
 results verified.
 
+## Mandatory edge-case tests
+
+Captured from `reference/mili-python/tests/test_bugfixes.py` and
+the entry-payload survey. Every one of these has to pass before
+Phase 1 is done. Each becomes a named integration test in
+`crates/mili-rs/tests/edge_cases.rs`.
+
+1. **Non-sequential mesh-object blocks.** A class's id range is
+   split across multiple non-contiguous `CLASS_IDENTS` entries.
+   The reader must coalesce them into the `id_blocks` vector and
+   honor the layout when serving queries.
+   (`test_bugfixes.py:25-38`.)
+2. **Double-precision nodal positions.** A database where the
+   `nodpos` svar is `M_FLOAT8` instead of `M_FLOAT4`. Confirms the
+   precision-limit byte is honored and that
+   `nodes()` returns `f64` rather than silently truncating.
+   (`test_bugfixes.py:62-72`.)
+3. **Vec-array with mixed component widths.** A vec-array whose
+   components are a stress tensor (vector of 6 scalars) **plus** a
+   scalar plastic-strain `eps`. Querying `"eps"` must extract
+   only the scalar; querying `"sy"` must extract from the embedded
+   stress sub-vector. The byte-offset math has to walk the
+   component list, not multiply by a uniform width.
+   (`test_bugfixes.py:119-172`.)
+4. **Inconsistent integration-point counts across subrecords.**
+   Different materials carrying the same svar with different IP
+   counts. Querying without an `ips` filter must error; specifying
+   `ips=4` filters to that single IP across all subrecords.
+   (`test_bugfixes.py:99-117`.)
+5. **Array-svar subscript notation.** Queries like `"hx[3]"` or
+   `"hx[1-8]"` (1-based!) must resolve into the right slice of
+   the underlying array svar. Out-of-range or 0-based indices
+   raise a typed error. (`test_bugfixes.py:251-296`.)
+6. **`dir_version_2` fixture.** Read v2 directory entries
+   (4-byte ints) without converting on disk; widen to i64 in
+   memory only.
+7. **State end marker.** Write a small database via the C oracle
+   (Phase 3) and confirm `mili-rs` round-trips the `~` byte in
+   `R.A.tfile` byte-for-byte.
+
 ## Open questions to revisit during implementation
 
 - **Format-v1 entry data type.** `direc.c:492-538` does a custom
-  widening I haven't decoded byte-by-byte. Worth a one-day spike to
-  produce a v1 fixture (if `dir_version_2` is the only old fixture,
-  we may not have a v1 sample) and confirm the widening works.
+  widening I haven't decoded byte-by-byte. The reference corpus
+  ships only a `dir_version_2` fixture — no v1 sample. Options:
+  (a) generate one via the C oracle if its writer still supports
+  v1; (b) defer v1 support and emit a typed error. Decide before
+  step 2 lands.
 - **`block_obj_fmt` connectivity.** Does it ever appear in modern
   databases or is `list_obj_fmt` universal? If always list, we
   hold off on the block code path until the first failing fixture.
+- **Materials and labels coupling.** `mesh_u.c` line 29-31
+  mentions "material numbers added to end of label list" — the
+  Rust reader needs to know how to split the label TI param into
+  label-proper vs. trailing material-id portions. Worth a focused
+  read of `mc_def_conn_arb_labels` (`mesh_u.c:1167+`) before
+  step 6.
 - **mmap on Lustre / NFS.** Defer the pread fallback until we have
   a failing benchmark; don't speculate-engineer it now.
 - **String-pool UTF-8 strictness.** Current plan: validate once at
@@ -409,6 +551,13 @@ results verified.
   pub(crate) for now; expose `Array3` / `ArrayView` instead. We
   can promote `MiliBuffer` if `mili-py` or `mili-viz` show a
   concrete need.
+- **`PREC_LIMIT_DOUBLE` semantics.** The C lib's `dep.c:103-181`
+  appears to keep `M_FLOAT` at 4 bytes even under
+  `PREC_LIMIT_DOUBLE`, which contradicts the name. Either the
+  intent was "doubles are opt-in per svar via M_FLOAT8" or the
+  code drifted from spec. Open a focused read of `dep.c` plus a
+  fixture audit before step 1 lands so the Rust port doesn't
+  bake in a wrong rule.
 
 ## What this plan deliberately does not cover
 
