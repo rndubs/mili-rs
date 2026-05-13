@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch top-level submodules (reference/mili, reference/mili-python,
+          # reference/griz). We do not recurse: the nested mdgtest submodule
+          # under reference/mili/test/ is on an LLNL-internal SSH host that
+          # GitHub runners cannot reach.
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch top-level submodules (reference/mili, reference/mili-python,
+          # reference/griz). We do not recurse: the nested mdgtest submodule
+          # under reference/mili/test/ is on an LLNL-internal SSH host that
+          # GitHub runners cannot reach.
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: cargo test --workspace

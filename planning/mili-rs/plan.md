@@ -526,21 +526,9 @@ Phase 1 is done. Each becomes a named integration test in
 
 ## Open questions to revisit during implementation
 
-- **Format-v1 entry data type.** `direc.c:492-538` does a custom
-  widening I haven't decoded byte-by-byte. The reference corpus
-  ships only a `dir_version_2` fixture — no v1 sample. Options:
-  (a) generate one via the C oracle if its writer still supports
-  v1; (b) defer v1 support and emit a typed error. Decide before
-  step 2 lands.
 - **`block_obj_fmt` connectivity.** Does it ever appear in modern
   databases or is `list_obj_fmt` universal? If always list, we
   hold off on the block code path until the first failing fixture.
-- **Materials and labels coupling.** `mesh_u.c` line 29-31
-  mentions "material numbers added to end of label list" — the
-  Rust reader needs to know how to split the label TI param into
-  label-proper vs. trailing material-id portions. Worth a focused
-  read of `mc_def_conn_arb_labels` (`mesh_u.c:1167+`) before
-  step 6.
 - **mmap on Lustre / NFS.** Defer the pread fallback until we have
   a failing benchmark; don't speculate-engineer it now.
 - **String-pool UTF-8 strictness.** Current plan: validate once at
@@ -551,13 +539,43 @@ Phase 1 is done. Each becomes a named integration test in
   pub(crate) for now; expose `Array3` / `ArrayView` instead. We
   can promote `MiliBuffer` if `mili-py` or `mili-viz` show a
   concrete need.
-- **`PREC_LIMIT_DOUBLE` semantics.** The C lib's `dep.c:103-181`
-  appears to keep `M_FLOAT` at 4 bytes even under
-  `PREC_LIMIT_DOUBLE`, which contradicts the name. Either the
-  intent was "doubles are opt-in per svar via M_FLOAT8" or the
-  code drifted from spec. Open a focused read of `dep.c` plus a
-  fixture audit before step 1 lands so the Rust port doesn't
-  bake in a wrong rule.
+
+## Resolved questions
+
+- **`PREC_LIMIT_DOUBLE` semantics** (resolved before step 1). The
+  C lib's SINGLE and DOUBLE arms of `set_default_io_routines`
+  (`dep.c:100-244`) populate `fam->external_size[]` identically;
+  `M_FLOAT` is 4 bytes in both modes. Verified empirically on
+  `dbl_nodtang` (header byte 7 = `0x02`, `db.nodes().dtype` is
+  `float32`, only the explicit `M_FLOAT8` `nodtang` svar is
+  `float64`). The Rust port resolves `M_FLOAT` to 4 bytes for both
+  SINGLE and DOUBLE and rejects `NULL`/`QUAD`/`NONE` with a typed
+  error. See `../shared/format.md` § Numeric types.
+- **Format-v1 directory support** (resolved before step 2).
+  **Defer with typed error.** The C writer can still emit v1 in
+  principle (`direc.c:218-262`), but no v1 fixture exists in the
+  corpus and the modern writer defaults to v3. Synthesizing one
+  via the C oracle would require either coaxing the writer into a
+  non-default mode (patches we don't take) or hunting for legacy
+  databases. The marginal cost of adding v1 later is small: v1
+  differs from v2 only in (a) the trailing header field
+  `QTY_STATES` being absent — one less `i32` to read at trailer —
+  and (b) it shares v2's 4-byte-int entry width and the same
+  widen-to-LONGLONG path (`direc.c:519-537`). Step 2 lands v3
+  first, v2 second, and emits `MiliError::UnsupportedDir(1)` on
+  v1 input. If a v1 sample surfaces we extend in place.
+- **Label/material trailing convention** (resolved before step 6).
+  There is no trailing portion to split. `mc_def_conn_labels`
+  (`mesh_u.c:1556-1678`) writes labels and local elem-ids as two
+  separate TI arrays of length `qty` each. The `qty * 2`
+  allocations at `mesh_u.c:1196` and `mesh_u.c:1473` are unused
+  beyond the first half. Material numbers live entirely in
+  separate `MAT_NAME_<n>` TI params. mili-python's reader
+  (`miliinternal.py:96-106`) ignores `Element Labels-ElemIds*`
+  entries and concatenates all `Element Labels*` entries per
+  class identified by `Sname-(\w+)`. The Rust `labels(class)`
+  accessor mirrors this. Split convention documented in
+  `../shared/format.md` § TI_PARAM-as-storage pattern.
 
 ## What this plan deliberately does not cover
 
