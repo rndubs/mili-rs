@@ -1,0 +1,14 @@
+[package]
+name = "mili-rs"
+version = "0.0.0"
+description = "Pure-Rust reader and writer for LLNL MDG mili databases."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror = "2"
+
+[lints]
+workspace = true
