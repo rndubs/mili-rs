@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+memmap2 = "0.9"
 thiserror = "2"
 
 [lints]
