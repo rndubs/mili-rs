@@ -22,7 +22,7 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ✅ done    | TBD   | `Database::state_var_values(svar, class, state) -> StateValues::{F32,F64,I32,I64}`; lazy state-file mmap cache; per-state header skip is 8 bytes (i32 srec_id + f32 time); `OBJECT_ORDERED`, label / material / IP filters, and component-name lookups return typed errors until Steps 10 / 11. |
 | 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ✅ done    | TBD   | `Database::query(&QueryArgs)` with labels / states / materials / ips filters; `OBJECT_ORDERED` gather; vec_array IP filter (components-fastest, IP-slowest); material → label via `ELEM_CONNS` mat_id column; `LabelNotFound` / `UnknownMaterial` / `IpFilterNotApplicable` / `IpOutOfRange` typed errors; `Svar::atoms` now accumulates component atom counts (was `comps.len()` — broke for vec_array-of-vectors like d3samp4's `es_1a`). Component-name lookups (`"sx"` → `"stress"`, `hx[3]`) still defer to Step 11. |
 | 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ✅ done    | TBD   | `parse_query_name` + `resolve_target` decompose the input into base svar + `AtomPicker::Specific` atom indices; ARRAY-svar subscript (`"hx[3]"`) and bare-component lookup (`"sx"` → parent VECTOR `stress`) share one gather path. `InvalidSubscript` / `SubscriptNotApplicable` typed errors cover the mili-python exception set (out-of-range, 0/negative, too-many indices, non-integer). VEC_ARRAY bare-comp + partial-dim multi-D subscripts still defer with `Unsupported`. d3samp6.thA `hx[3]` matches mili-python's golden bit-for-bit on state 6, labels [2,5,10] (`test_bugfixes.py:345-365`). |
-| 12   | rayon over states; criterion benches                        | ⏳ pending |       | Target ≥ 2× mili-python throughput.                         |
+| 12   | rayon over states; criterion benches                        | 🟡 partial | TBD   | `Database::query` now prefetches per-state contexts (rebased plan + state-file mmap + path) single-threaded then dispatches the byteswap-and-fill gather across `par_chunks_mut` over the output vec — each state writes a disjoint slab so no synchronisation in the hot loop. Criterion suite at `crates/mili-rs/benches/read.rs` covers `open`, `nodes`, `query_single`, `query_many`; on the local sandbox `query_single` (basic1 `nodpos`, all states) hits ~2.0 GiB/s and `query_many` ~2.5 ms for four svars over all states. Full ≥ 2× mili-python throughput parity bench lands with the pyo3 cross-impl harness in Phase 2 (no mili-python install available in CI yet). |
 | 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | ⏳ pending |       | One-hour clean-run gate.                                    |
 
 **Phase 1 exit:** Step 8 — landed. Phase 2 (mili-py) can start now.
@@ -52,7 +52,7 @@ Snapshot at PR merge time — refresh on every step bump.
 | Fixture parity (corpus reads)  | 53    | Step 11      |
 | mili-python parity (`pyo3`)    | —     | not wired yet — Phase 2 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
-| Criterion benches              | —     | Step 12      |
+| Criterion benches              | 4     | Step 12 (open, nodes, query_single, query_many) |
 
 ## Resolved questions log
 
@@ -190,6 +190,13 @@ crates/mili-rs/src/
 ├── buffer.rs           done — Step 8 (`MiliBuffer<T>`, `pub(crate)`)
 └── query.rs            done — Step 10 (RESULT_ORDERED + OBJECT_ORDERED gather, label / IP filters, multi-state `ReadPlan::rebased`) + Step 11 (`parse_query_name` + `resolve_target` + `AtomPicker::{AllAtoms, PerIp, Specific}`; ARRAY-svar subscript `"hx[3]"` and bare-component `"sx"`-on-VECTOR-parent lookup share the `Specific` atom-indices gather path)
 ```
+
+Step 12 lands `rayon = "1.10"` as a hard dep (already on the
+external-deps list in `plan.md`) and `criterion = "0.5"` as a
+dev-dep. The state-axis parallelisation lives entirely in
+`Database::query`'s gather macro via `par_chunks_mut` over the
+output vec; `query.rs` itself stays single-threaded for the plan
+build.
 
 ## How to update this file
 
