@@ -30,14 +30,17 @@
 //! function here means [`crate::family`] can call it unconditionally
 //! once it lands.
 
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use crate::error::Result;
 
 /// Filename pattern for v1 TI files.
 ///
 /// `<root>_TI_<base26>` where base26 = `A, B, …, Z, AA, AB, …`
 /// (`reference/mili/src/mili_util.c:908-911, 921-946`).
+#[cfg(test)]
 fn ti_filename(root: &Path, index: u32) -> PathBuf {
     let stem = root.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let mut name = String::with_capacity(stem.len() + 8);
@@ -47,6 +50,7 @@ fn ti_filename(root: &Path, index: u32) -> PathBuf {
     root.with_file_name(name)
 }
 
+#[cfg(test)]
 fn append_base26_upper(out: &mut String, num: u32) {
     // Re-implementation of `to_base26(num, TRUE, …)` from
     // `reference/mili/src/mili_util.c:921-946`. The "zero" digit is
@@ -80,7 +84,8 @@ fn append_base26_upper(out: &mut String, num: u32) {
 ///
 /// Errors only on I/O — missing files are not an error, they end the
 /// scan.
-pub fn enumerate_ti_files(root: &Path) -> Result<Vec<PathBuf>> {
+#[cfg(test)]
+pub(crate) fn enumerate_ti_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut idx: u32 = 0;
     loop {

@@ -244,9 +244,14 @@ impl MeshTable {
         if let Some(existing) = mesh.classes.get(&short) {
             // Idempotent re-declaration is common in the corpus (the
             // writer can emit CLASS_DEF more than once for the same
-            // class). Accept it as long as the superclass and long
-            // name match; otherwise the conflict is real.
-            if existing.superclass != class.superclass || existing.long_name != class.long_name {
+            // class). The superclass must match — disagreement there
+            // is a real correctness conflict — but the long_name is
+            // a cosmetic human-readable label and the corpus
+            // (`labeling` fixture: `particle` is declared with
+            // `long_name = "Nodal"` then later `"Particles"`) does
+            // emit inconsistent values that mili-python silently
+            // accepts. Don't error on long_name disagreement.
+            if existing.superclass != class.superclass {
                 return Err(MiliError::MalformedDirectory(
                     "conflicting CLASS_DEF for the same class name",
                 ));

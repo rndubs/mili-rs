@@ -93,6 +93,23 @@ pub enum MiliError {
 
     #[error("subscript notation not applicable to svar {svar:?} ({agg} agg)")]
     SubscriptNotApplicable { svar: String, agg: &'static str },
+
+    /// Different subrecords carrying the requested svar on the same
+    /// class report different per-object atom widths (i.e. inconsistent
+    /// integration-point counts across materials). Without an explicit
+    /// `ips` filter the result shape is ambiguous, so the query is
+    /// rejected. Mirrors mili-python's `ValueError` for
+    /// `query("sx", "brick")` on `basic1` where material 5 has 8 IPs
+    /// and material 7 has 9 (`test_bugfixes.py:99-117`).
+    #[error(
+        "svar {svar:?} on class {class:?} has inconsistent integration-point counts across \
+         subrecords ({counts:?}); pass an explicit `ips` filter to disambiguate"
+    )]
+    InconsistentIpCounts {
+        svar: String,
+        class: String,
+        counts: Vec<usize>,
+    },
 }
 
 pub type Result<T, E = MiliError> = core::result::Result<T, E>;

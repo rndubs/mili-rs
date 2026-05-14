@@ -24,10 +24,38 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ✅ done    | TBD   | `parse_query_name` + `resolve_target` decompose the input into base svar + `AtomPicker::Specific` atom indices; ARRAY-svar subscript (`"hx[3]"`) and bare-component lookup (`"sx"` → parent VECTOR `stress`) share one gather path. `InvalidSubscript` / `SubscriptNotApplicable` typed errors cover the mili-python exception set (out-of-range, 0/negative, too-many indices, non-integer). VEC_ARRAY bare-comp + partial-dim multi-D subscripts still defer with `Unsupported`. d3samp6.thA `hx[3]` matches mili-python's golden bit-for-bit on state 6, labels [2,5,10] (`test_bugfixes.py:345-365`). |
 | 12   | rayon over states; criterion benches                        | ✅ done    | TBD   | `Database::query` now prefetches per-state contexts (rebased plan + state-file mmap + path) single-threaded then dispatches the byteswap-and-fill gather across `par_chunks_mut` over the output vec — each state writes a disjoint slab so no synchronisation in the hot loop. Criterion suite at `crates/mili-rs/benches/read.rs` covers `open`, `nodes`, `query_single`, `query_many`, plus a `mili_python_baseline` group under `--features parity` that runs the same workload through mili-python via pyo3. On the local sandbox `query_single` (basic1 `nodpos`, all states) is ~4.7× faster than mili-python (1.75 GiB/s vs 379 MiB/s) and `query_many` ~8× (3.1 ms vs 25 ms) — both clear the ≥ 2× Phase-1 gate. |
 | 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | 🟡 partial | TBD   | Scaffolding: `crates/mili-rs/fuzz/` is a self-contained cargo-fuzz crate (own `[workspace]` to hide from the parent) with three targets — `header` (`Header::parse`), `directory` (chained `Header::parse` + `Directory::parse`), and `param` (chained header → directory → `ParamValue::decode` over every parsed entry). `cargo check` on stable passes (libfuzzer-sys's link step is the only nightly-only piece). Step 15 wires the CI: a `fuzz` job in `.github/workflows/ci.yml` runs on `schedule: '0 7 * * *'` UTC (and `workflow_dispatch`), installs nightly Rust + `cargo-fuzz`, and matrix-runs each target for 1800 s (30 min) — gated `if: github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'` so PRs don't pay the cost. Seed corpora (`crates/mili-rs/fuzz/corpus/<target>/basic1.pltA`, copied from the corpus fixture) are committed and force-tracked through the fuzz crate's `.gitignore` so the cron starts from a valid input on each run. The one-hour clean-run gate still owes — flip to ✅ once the cron has logged a clean pass and any crash artifacts have been promoted to regression tests under `crates/mili-rs/tests/regressions/` per the `plan.md` § Layer 3 contract. |
+| 16   | Phase-1 closeout: corpus-wide parity, IP-count edge case, API audit | ✅ done    | TBD   | Pre-`mili-py` review pass. All six sub-items closed (see § "Step 16 — Phase-1 closeout" below). |
 
 **Phase 1 exit:** Step 8 — landed. Phase 2 (mili-py) can start now. Step
 12's ≥ 2× mili-python throughput gate was pinned in Step 14 (4.7×
 single-svar, ~8× multi-svar on basic1 via the pyo3 baseline bench).
+
+## Step 16 — Phase-1 closeout
+
+Pre-`mili-py` review pass. Six items, none of which require code on the
+Phase-2 surface; closing them gives Phase 2 a stable foundation to wrap.
+
+| # | Item                                            | Status | Notes |
+|--:|-------------------------------------------------|:-------|:------|
+| 1 | Parity coverage across all 14 serial fixtures   | ✅ done | `tests/parity_corpus.rs` covers 10 fixtures bit-exact (beam_udi, d3samp4, dbl_nodtang, fdamp1, labeling, mstate, rigid_body_1, sstate, tet, vrt_BS) plus a `dir_version_2` open-only check (state files absent from corpus, mili-python query path also errors with `IndexError` on that fixture). Combined with the existing `parity_basic1` (4) and `parity_array_subscript` on d3samp6.thA (2), the parity surface is now 17 tests across 12 fixtures. `solids014` (file-naming exception) and `vecarray` (no `.A` file) are corpus-shape exceptions and don't open via either reader. f64 path added via `query_f64` / `OracleResultF64` / `assert_flat_eq_f64` helpers in `tests/parity_support/mod.rs`. |
+| 2 | Fix any bugs surfaced by item 1                 | ✅ done | Two bugs found and fixed: (a) `labeling` fixture: `mesh.rs::add_class_def` rejected `particle` because long_name disagreed across re-declarations ("Nodal" then "Particles") even though the superclass agreed; corpus shows mili-python tolerates the cosmetic mismatch. Dropped the long_name check; superclass mismatch still errors. (b) `dir_version_2` fixture ships only the `.A` file with no state files on disk — adjusted the corpus parity test to validate `Database::open` + `Database::nodes` instead of attempting a state query (mili-python's `query` on this fixture also errors). |
+| 3 | Mandatory edge-case #4: inconsistent IP counts  | ✅ done | Added typed `MiliError::InconsistentIpCounts { svar, class, counts }` (`error.rs:96-113`) and the cross-subrec guard in `query.rs::plan_state_svar` after match collection: if matches list has differing `lumps.sizes[svar_idx]` and no `ips` filter is provided, the query is rejected. The guard is dormant on today's corpus (the only path that produces differing match sizes for the same logical svar lookup is element-set substitution, item 5) — so it's a contract for Phase 2 to rely on rather than an active code path. Display string + variant existence pinned by `inconsistent_ip_counts_error_is_typed_and_informative` unit test. |
+| 4 | Resolve `MiliError::Unsupported(...)` call sites| ✅ done | Audited both: (a) partial-dim array subscript (`query.rs:345`) — corpus scan shows no fixture has multi-D ARRAY svars (every fixture's array svars are rank-1); deferral honest. (b) cross-srec-format multi-state query (`family.rs:393`) — corpus scan shows every fixture has `srec_fmt_qty=1`; deferral honest. Both kept as typed `MiliError::Unsupported`, neither reachable from current fixtures. Phase 2 can refine to dedicated variants if downstream users hit them. |
+| 5 | Aggregate VEC_ARRAY parity gap                  | ✅ done (deferred) | Decided "document as deferred for Phase 2 follow-up". mili-rs's aggregate `query("es_1a", "shell")` path is already self-consistent (covered by `d3samp4_vec_array_*` fixture tests); the blocker is solely the parity oracle (mili-python raises `IndexError` on the same query). Cross-impl validation needs either an upstream mili-python patch or a fixture that exercises both paths via the working component-name lookup. Pinning the contract here so Phase 2 picks it up with the right framing. |
+| 6 | Public API surface narrowing                    | ✅ done | `lib.rs` rewritten: nine `pub mod` declarations demoted to `mod` so types are reachable through one path only (the crate-root re-exports). Internal types (`Directory`, `DirEntry`, `DirEntryType`, `ByteRange`, `NamePool`, `MeshTable`, `decode_elem_conns`, `decode_nodes`, `ParamTable`, `SvarTable`, `Lumps`, `derive_lumps`, `Srec`, `SrecTable`, `Subrecord`, `StateMapSource`, `StateMeta`, `parse_inline`, `parse_tfile`, `tfile_path`) are now `#[doc(hidden)] pub use` — still reachable for in-tree integration tests, hidden from rustdoc and from `mili-py`'s natural import path. The supported surface that Phase 2 should wrap is the un-hidden re-exports plus `pub mod {family, header}`. |
+
+Explicitly out of scope (Phase 3+): write path, directory v1,
+`SURFACE_CONNS`, `block_obj_fmt` connectivity, mmap-on-NFS `pread`
+fallback. Each surfaces a typed error today; that contract holds across
+the Phase-2 boundary.
+
+**Manual follow-up (not blockable from this branch):** Step 13 still
+needs a one-hour clean-run gate on the `fuzz` cron job. The CI job
+exists (`.github/workflows/ci.yml` § `fuzz`) and triggers on
+`schedule: '0 7 * * *' UTC` or `workflow_dispatch`; flip Step 13 to ✅
+once the first cron run logs clean. A maintainer can also trigger
+`workflow_dispatch` from the Actions UI to validate the job builds on
+the runner.
 
 ## Step 14 — pyo3 cross-impl parity harness
 
@@ -54,7 +82,7 @@ because some sit on top of multiple steps.
 | Non-sequential mesh-object blocks coalesce    | `test_bugfixes.py:25-38`              | ✅ done (Step 5: `id_blocks: Vec<(i32, i32)>`) |
 | Double-precision nodal positions              | `test_bugfixes.py:62-72`              | ✅ done (Step 10: `state_var_values` returns `StateValues::F64` for `Float8` svars; covered by the per-numtype gather macro) |
 | Vec-array with mixed component widths         | `test_bugfixes.py:119-172`            | ✅ done (Step 10: `Svar::atoms` accumulates component atom counts; d3samp4 `es_1a` (`vec_array<[stress(6), eps(1)]>`) round-trips through `query()` with `ips` filter — fixture test in `tests/query_fixtures.rs`) |
-| Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | 🟡 IP filter mechanism in place (Step 10); the cross-subrec IP-label-set validation that turns inconsistent counts into a typed error needs the element-set IP-label lookup, which lands with component-name resolution in Step 11. |
+| Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | ✅ done (Step 16: typed `MiliError::InconsistentIpCounts { svar, class, counts }` + cross-subrec guard in `query.rs::plan_state_svar`. Dormant on today's corpus; activates automatically once Phase-2's element-set substitution lands.) |
 | Array-svar subscript notation                 | `test_bugfixes.py:251-296`            | ✅ done (Step 11: `hx[3]` resolves through `parse_query_name`/`resolve_target`/`AtomPicker::Specific`; d3samp6.thA fixture matches the mili-python golden bit-for-bit; the four error cases (`hx[0]`, `hx[9]`, `hx[-2]`, `hx[1,1]`) all surface `MiliError::InvalidSubscript`.) |
 | `dir_version_2` fixture                       | corpus                                | ✅ done (Step 2) |
 | State end marker `~` round-trip               | corpus (read), C oracle (write)       | ✅ read    |
@@ -65,9 +93,9 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | 190   | Step 11      |
+| `cargo test --workspace`       | 191   | Step 16 (+1 inconsistent-IP variant unit test) |
 | Fixture parity (corpus reads)  | 53    | Step 11      |
-| mili-python parity (`pyo3`)    | 6     | Step 14 (`parity_basic1`, `parity_array_subscript`) — `cargo test --features parity` |
+| mili-python parity (`pyo3`)    | 17    | Step 16 (`parity_corpus` 11 + `parity_basic1` 4 + `parity_array_subscript` 2) — `cargo test --features parity` |
 | cargo-fuzz (nightly cron)      | 3     | Step 13 scaffolding (header, directory, param); Step 15 lands the `fuzz` CI job + seed corpora — one-hour clean-run gate still pending |
 | Criterion benches              | 4     | Step 12 (open, nodes, query_single, query_many; `mili_python_baseline` adds 2 more under `--features parity`) |
 
@@ -225,11 +253,14 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   aggregate query end-to-end, so the parity harness can't compare on
   this dimension yet: bare-component-on-VEC_ARRAY-parent is the open
   Rust-side gap (Step 11 § "Bare component-name fallback") and the
-  aggregate path crashes on the Python side. Picking the parity test
-  back up needs either (a) a fixture that exercises both paths or (b)
-  a mili-python patch upstream. Tracked here so the Phase-2 `mili-py`
-  crate, which has its own query layer, knows where the divergence
-  sits.
+  aggregate path crashes on the Python side. Step 16 closed this item
+  as **deferred for Phase 2 follow-up** — mili-rs's path is verified
+  self-consistent against direct decode of state bytes
+  (`d3samp4_vec_array_*` fixture tests), the blocker is solely the
+  oracle. Picking the parity test back up needs either (a) a fixture
+  that exercises both paths or (b) a mili-python patch upstream.
+  Tracked here so the Phase-2 `mili-py` crate, which has its own
+  query layer, knows where the divergence sits.
 
 ## Module shape (post-Step 11)
 

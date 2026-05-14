@@ -7,10 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mili_rs::{
-    state::{parse_inline, parse_tfile, tfile_path},
-    Directory, Header, StateMapSource,
-};
+use mili_rs::{parse_inline, parse_tfile, tfile_path, Directory, Header, StateMapSource};
 
 fn corpus_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
