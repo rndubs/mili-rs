@@ -17,7 +17,7 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 4    | `family.rs` open path, `state_map` resolution, end-marker   | ✅ done    | #3    | mmap-backed `Database`, inline + tfile state-map dispatch.  |
 | 5    | `mesh.rs`: CLASS_DEF + CLASS_IDENTS, nodes, connectivity    | ✅ done    | #4    | `MeshTable`, `Nodes`, `Connectivity`, superclass table.     |
 | 6    | high-level TI accessors (labels, materials, element_sets)   | ✅ done    | TBD   | `Database::{labels, materials, element_sets, integration_points}`; `MaterialId` newtype. |
-| 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | ⏳ pending |       | Dual int/char stream parser; offset-math unit tests.        |
+| 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | ✅ done    | TBD   | Dual int/char stream parsers; `derive_lumps` covers both organisations; svar count on basic1 = 93 (with recursive components). |
 | 8    | `buffer.rs` and `endian.rs`                                 | ⏳ pending |       | Misalignment + byteswap fallbacks. Phase 1 exit criterion.  |
 | 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ⏳ pending |       |                                                             |
 | 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ⏳ pending |       |                                                             |
@@ -35,9 +35,9 @@ because some sit on top of multiple steps.
 | Test                                          | Source                                | Status     |
 |-----------------------------------------------|---------------------------------------|:-----------|
 | Non-sequential mesh-object blocks coalesce    | `test_bugfixes.py:25-38`              | ✅ done (Step 5: `id_blocks: Vec<(i32, i32)>`) |
-| Double-precision nodal positions              | `test_bugfixes.py:62-72`              | ⏳ blocked on svar (Step 7) |
-| Vec-array with mixed component widths         | `test_bugfixes.py:119-172`            | ⏳ blocked on svar (Step 7) |
-| Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | ⏳ blocked on srec (Step 7) |
+| Double-precision nodal positions              | `test_bugfixes.py:62-72`              | 🟡 metadata covered (Step 7: `dbl_nodtang`'s `nodtang` svar resolves to `NumType::Float8`); blocked on the read path itself until Step 9 |
+| Vec-array with mixed component widths         | `test_bugfixes.py:119-172`            | 🟡 metadata covered (Step 7: `derive_lumps` unit test exercises mixed widths for both organisations); blocked on the read path until Step 9 |
+| Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | ⏳ blocked on the query layer (Step 10) — srec metadata in place |
 | Array-svar subscript notation                 | `test_bugfixes.py:251-296`            | ⏳ Step 11 |
 | `dir_version_2` fixture                       | corpus                                | ✅ done (Step 2) |
 | State end marker `~` round-trip               | corpus (read), C oracle (write)       | ✅ read    |
@@ -48,8 +48,8 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | 79    | Step 6       |
-| Fixture parity (corpus reads)  | 23    | Step 6       |
+| `cargo test --workspace`       | 101   | Step 7       |
+| Fixture parity (corpus reads)  | 35    | Step 7       |
 | mili-python parity (`pyo3`)    | —     | not wired yet — planned for Step 8 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
 | Criterion benches              | —     | Step 12      |
@@ -76,6 +76,20 @@ Track in `plan.md` § "Resolved questions". Current entries:
 - Idempotent `CLASS_DEF` re-declaration (Step 6 fix-up). Writer can
   emit the same class twice; reader accepts the second declaration
   when superclass and long name match, errors only on real conflicts.
+- `Lumps` interpretation (Step 7). `derive_lumps` produces `atoms`,
+  `sizes`, and `offsets` parallel vectors that are independent of
+  [`Organization`]; the byte-address formula differs per organisation
+  and is documented at the head of `srec.rs`. For `RESULT_ORDERED`
+  the per-svar slab is `N * offsets[s]` from the subrec start;
+  `OBJECT_ORDERED` strides by `bytes_per_object` across objects with
+  `offsets[s]` selecting within. The Rust unit tests cover both, and
+  the matrix in `format.md` § "Subrecord byte-layout matrix" is the
+  source of truth.
+- `Subrecord.id_blocks` semantics (Step 7). Stored exactly as written
+  on disk: inclusive `(start, stop)` pairs in 1-based mili object
+  ids. Normalisation to 0-based ordinals + half-open intervals
+  (mili-python's `afileIO.py:444-445`) is deferred to the query layer
+  so the table preserves writer-side intent.
 
 ## Open questions (still active)
 
@@ -94,21 +108,21 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   matching the simplest reading of `miliinternal.py:463-474`. Revisit
   once a fixture surfaces a non-integer setname.
 
-## Module shape (post-Step 6)
+## Module shape (post-Step 7)
 
 ```
 crates/mili-rs/src/
-├── lib.rs              done (re-exports for Steps 0-5)
+├── lib.rs              done (re-exports for Steps 0-7)
 ├── error.rs            done — `MiliError`
 ├── header.rs           done — Step 1
 ├── directory.rs        done — Step 2
 ├── param.rs            done — Step 3
 ├── ti.rs               done — Step 3 (v1 stub)
 ├── state.rs            done — Step 4
-├── family.rs           done — Step 4 (Database open)
+├── family.rs           done — Step 4 (Database open) + svars/srecs
 ├── mesh.rs             done — Step 5
-├── svar.rs             todo — Step 7
-├── srec.rs             todo — Step 7
+├── svar.rs             done — Step 7
+├── srec.rs             done — Step 7 (includes `derive_lumps`)
 ├── buffer.rs           todo — Step 8
 ├── endian.rs           todo — Step 8
 └── query.rs            todo — Steps 9-11
