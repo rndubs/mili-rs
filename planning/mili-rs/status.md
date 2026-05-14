@@ -22,10 +22,27 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ✅ done    | TBD   | `Database::state_var_values(svar, class, state) -> StateValues::{F32,F64,I32,I64}`; lazy state-file mmap cache; per-state header skip is 8 bytes (i32 srec_id + f32 time); `OBJECT_ORDERED`, label / material / IP filters, and component-name lookups return typed errors until Steps 10 / 11. |
 | 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ✅ done    | TBD   | `Database::query(&QueryArgs)` with labels / states / materials / ips filters; `OBJECT_ORDERED` gather; vec_array IP filter (components-fastest, IP-slowest); material → label via `ELEM_CONNS` mat_id column; `LabelNotFound` / `UnknownMaterial` / `IpFilterNotApplicable` / `IpOutOfRange` typed errors; `Svar::atoms` now accumulates component atom counts (was `comps.len()` — broke for vec_array-of-vectors like d3samp4's `es_1a`). Component-name lookups (`"sx"` → `"stress"`, `hx[3]`) still defer to Step 11. |
 | 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ✅ done    | TBD   | `parse_query_name` + `resolve_target` decompose the input into base svar + `AtomPicker::Specific` atom indices; ARRAY-svar subscript (`"hx[3]"`) and bare-component lookup (`"sx"` → parent VECTOR `stress`) share one gather path. `InvalidSubscript` / `SubscriptNotApplicable` typed errors cover the mili-python exception set (out-of-range, 0/negative, too-many indices, non-integer). VEC_ARRAY bare-comp + partial-dim multi-D subscripts still defer with `Unsupported`. d3samp6.thA `hx[3]` matches mili-python's golden bit-for-bit on state 6, labels [2,5,10] (`test_bugfixes.py:345-365`). |
-| 12   | rayon over states; criterion benches                        | 🟡 partial | TBD   | `Database::query` now prefetches per-state contexts (rebased plan + state-file mmap + path) single-threaded then dispatches the byteswap-and-fill gather across `par_chunks_mut` over the output vec — each state writes a disjoint slab so no synchronisation in the hot loop. Criterion suite at `crates/mili-rs/benches/read.rs` covers `open`, `nodes`, `query_single`, `query_many`; on the local sandbox `query_single` (basic1 `nodpos`, all states) hits ~2.0 GiB/s and `query_many` ~2.5 ms for four svars over all states. Full ≥ 2× mili-python throughput parity bench lands with the pyo3 cross-impl harness in Phase 2 (no mili-python install available in CI yet). |
+| 12   | rayon over states; criterion benches                        | ✅ done    | TBD   | `Database::query` now prefetches per-state contexts (rebased plan + state-file mmap + path) single-threaded then dispatches the byteswap-and-fill gather across `par_chunks_mut` over the output vec — each state writes a disjoint slab so no synchronisation in the hot loop. Criterion suite at `crates/mili-rs/benches/read.rs` covers `open`, `nodes`, `query_single`, `query_many`, plus a `mili_python_baseline` group under `--features parity` that runs the same workload through mili-python via pyo3. On the local sandbox `query_single` (basic1 `nodpos`, all states) is ~4.7× faster than mili-python (1.75 GiB/s vs 379 MiB/s) and `query_many` ~8× (3.1 ms vs 25 ms) — both clear the ≥ 2× Phase-1 gate. |
 | 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | 🟡 partial | TBD   | Scaffolding only: `crates/mili-rs/fuzz/` is a self-contained cargo-fuzz crate (own `[workspace]` to hide from the parent) with three targets — `header` (`Header::parse`), `directory` (chained `Header::parse` + `Directory::parse`), and `param` (chained header → directory → `ParamValue::decode` over every parsed entry). `cargo check` on stable passes (libfuzzer-sys's link step is the only nightly-only piece). The CI nightly-cron job + one-hour clean-run gate land in a follow-up CI tweak. |
 
-**Phase 1 exit:** Step 8 — landed. Phase 2 (mili-py) can start now.
+**Phase 1 exit:** Step 8 — landed. Phase 2 (mili-py) can start now. Step
+12's ≥ 2× mili-python throughput gate was pinned in Step 14 (4.7×
+single-svar, ~8× multi-svar on basic1 via the pyo3 baseline bench).
+
+## Step 14 — pyo3 cross-impl parity harness
+
+Lands the `parity` cargo feature, the `crates/mili-rs/tests/parity_*.
+rs` integration tests, the `mili_python_baseline` criterion group in
+`benches/read.rs`, and the `test-parity` CI job. Six parity tests:
+four against basic1 (`nodpos` all-states/all-nodes, `nodvel` label-
+filter, `sand` material-filter, `nodpos` multi-state subset) and two
+against d3samp6.thA (`hx` full 8-atom array and `hx[k]` for k ∈ 1..=8).
+All bit-exact against mili-python's `db.query(...)['data'].flatten()`.
+
+The harness also surfaced the M_MESH glob bug (see the "Resolved
+questions log" entry); the fix lives in `SrecTable::patch_m_mesh_
+classes` and lands in the same PR because the harness can't validate
+basic1 / d3samp4 without it.
 
 ## Mandatory edge-case tests (per `plan.md`)
 
@@ -50,9 +67,9 @@ Snapshot at PR merge time — refresh on every step bump.
 |--------------------------------|------:|:-------------|
 | `cargo test --workspace`       | 190   | Step 11      |
 | Fixture parity (corpus reads)  | 53    | Step 11      |
-| mili-python parity (`pyo3`)    | —     | not wired yet — Phase 2 |
+| mili-python parity (`pyo3`)    | 6     | Step 14 (`parity_basic1`, `parity_array_subscript`) — `cargo test --features parity` |
 | cargo-fuzz (nightly cron)      | 3     | Step 13 scaffolding (header, directory, param) — CI runner pending |
-| Criterion benches              | 4     | Step 12 (open, nodes, query_single, query_many) |
+| Criterion benches              | 4     | Step 12 (open, nodes, query_single, query_many; `mili_python_baseline` adds 2 more under `--features parity`) |
 
 ## Resolved questions log
 
@@ -148,6 +165,28 @@ Track in `plan.md` § "Resolved questions". Current entries:
   is striped across IP slots; defer until a fixture surfaces the
   case (mili-python's `test_modify_database.py::sx-on-beam` is
   the likely future driver, but it also requires the write path).
+- `M_MESH`-superclass subrec byte accounting (Step 14 cross-impl
+  finding via the pyo3 parity harness). mili-python writes
+  `block_count = 0` and no id-block pairs for any subrec whose mclass
+  has `Superclass::M_MESH` (e.g. `glob`, `cpu_time` on `glob`-class),
+  but the reader treats those subrecs as carrying *one* object's worth
+  of data per state — see `reference/mili-python/src/mili/afileIO.py:
+  439-441`. mili-rs's `SrecTable` was leaving `id_blocks` empty for
+  those subrecs, which made `Subrecord::object_count()` return 0 and
+  every later subrec's per-state offset slid forward by the swallowed
+  bytes (basic1: `1 * 19 * 4` for `glob` + `1 * 21 * 4` for `cpu_time`
+  = 160 bytes, so `nodvel` mis-read by exactly that much).
+  `SrecTable::patch_m_mesh_classes` now synthesises `id_blocks =
+  [(1, 1)]` for those subrecs at open time so the offset math matches
+  mili-python and the file's actual layout. The existing
+  `basic1_nodvel_at_state_50_self_consistent` constant moved from 528
+  to 688 (76 + 84 + 504 + 24); `d3samp4_vec_array_object_ordered_
+  self_consistent`'s walk reads through the patched id_blocks so it
+  picks the fix up automatically. The corpus scan in this PR found
+  the bug active on 9/13 reference fixtures (basic1, d3samp4, beam_
+  udi, vrt_BS, rigid_body_1, tet, fdamp1, sstate, d3samp6 ⟵ `pltA`
+  variants); newer `.thA` / `.plt_cA` / `dblpltA` writers emit
+  explicit `(1, 1)` for `M_MESH` and were already correct.
 - `MiliBuffer` public-vs-private (Step 8). Kept `pub(crate)` for now —
   `Nodes` / `Connectivity` / `ArrayParam` keep their existing public
   shapes (which already wrap the same bytes), and the byteswap path
@@ -170,6 +209,19 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   only sets whose name parses as `i32` to `integration_points`,
   matching the simplest reading of `miliinternal.py:463-474`. Revisit
   once a fixture surfaces a non-integer setname.
+- Aggregate VEC_ARRAY queries through the pyo3 parity oracle. mili-
+  python errors with `IndexError: index 0 is out of bounds for axis 0
+  with size 0` (`datatypes.py:341`) on `db.query("es_1a", "shell",
+  …)` whether or not `ips` is set — the working code path is the
+  component-name lookup (`eps`, `sy`, `stress`). mili-rs supports the
+  aggregate query end-to-end, so the parity harness can't compare on
+  this dimension yet: bare-component-on-VEC_ARRAY-parent is the open
+  Rust-side gap (Step 11 § "Bare component-name fallback") and the
+  aggregate path crashes on the Python side. Picking the parity test
+  back up needs either (a) a fixture that exercises both paths or (b)
+  a mili-python patch upstream. Tracked here so the Phase-2 `mili-py`
+  crate, which has its own query layer, knows where the divergence
+  sits.
 
 ## Module shape (post-Step 11)
 
@@ -185,7 +237,7 @@ crates/mili-rs/src/
 ├── family.rs           done — Step 4 (Database open) + Step 9 (state-file mmap cache, `state_var_values`) + Step 10 (`query(&QueryArgs)` with labels/states/materials/ips filters, material → label via `ELEM_CONNS`)
 ├── mesh.rs             done — Step 5
 ├── svar.rs             done — Step 7, Step 10 (atom-count fix for vec_array-of-vectors)
-├── srec.rs             done — Step 7 (includes `derive_lumps`)
+├── srec.rs             done — Step 7 (includes `derive_lumps`) + Step 14 (`patch_m_mesh_classes` synthesises `id_blocks=[(1,1)]` for M_MESH-superclass subrecs that the writer left with `block_count=0`)
 ├── endian.rs           done — Step 8 (`ByteSwap`, `for_each_swap`, `swap_*_slice`)
 ├── buffer.rs           done — Step 8 (`MiliBuffer<T>`, `pub(crate)`)
 └── query.rs            done — Step 10 (RESULT_ORDERED + OBJECT_ORDERED gather, label / IP filters, multi-state `ReadPlan::rebased`) + Step 11 (`parse_query_name` + `resolve_target` + `AtomPicker::{AllAtoms, PerIp, Specific}`; ARRAY-svar subscript `"hx[3]"` and bare-component `"sx"`-on-VECTOR-parent lookup share the `Specific` atom-indices gather path)

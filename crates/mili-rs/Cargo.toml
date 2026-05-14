@@ -10,11 +10,17 @@ repository.workspace = true
 [dependencies]
 bytemuck = "1"
 memmap2 = "0.9"
+pyo3 = { version = "0.22", features = ["auto-initialize"], optional = true }
 rayon = "1.10"
 thiserror = "2"
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[features]
+# Cross-impl parity tests against mili-python via pyo3. Requires a working
+# Python with `mili` importable (e.g. `pip install -e reference/mili-python`).
+parity = ["dep:pyo3"]
 
 [lints]
 workspace = true

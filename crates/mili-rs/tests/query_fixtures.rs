@@ -57,10 +57,15 @@ fn basic1_nodvel_at_state_50_self_consistent() {
     // basic1's first state-file is `basic1.plt00`. With the node subrec
     // at index 4 holding [nodpos(3), nodvel(3), nodacc(3)] in
     // RESULT_ORDERED over N=1400 nodes, nodvel's slab is at
-    //   state.offset + 8                                  (per-state hdr)
-    //   + sum_{i<4} N_i * bytes_per_obj_i = 0+0+504+24    (prior subrecs)
-    //   + N * lump_offsets[1] = 1400 * 12 = 16800         (nodvel slab)
-    // Read those bytes directly and compare against the API.
+    //   state.offset + 8                                   (per-state hdr)
+    //   + sum_{i<4} N_i * bytes_per_obj_i = 76+84+504+24   (prior subrecs)
+    //   + N * lump_offsets[1] = 1400 * 12 = 16800          (nodvel slab)
+    // The 76 + 84 bytes are the M_MESH-superclass `glob` and `cpu_time`
+    // subrecs — basic1's writer emits `block_count = 0` for them, and
+    // `SrecTable::patch_m_mesh_classes` synthesises `(1, 1)` at open
+    // time so the offset math accounts for the one object's worth of
+    // data each carries. (`cpu_time` is a 21-atom vector — that's the
+    // 84.) See `reference/mili-python/src/mili/afileIO.py:439-441`.
     let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
     if !path.exists() {
         return;
@@ -71,7 +76,7 @@ fn basic1_nodvel_at_state_50_self_consistent() {
     let state_file = corpus_path(&["serial", "basic1", "basic1.plt00"]);
     let raw = std::fs::read(&state_file).expect("read state file");
 
-    let slab_start = (state.offset as usize) + 8 + 528 + 16800;
+    let slab_start = (state.offset as usize) + 8 + 688 + 16800;
     let slab_len = 1400 * 3 * 4;
     let bytes = &raw[slab_start..slab_start + slab_len];
     let mut direct: Vec<f32> = Vec::with_capacity(1400 * 3);

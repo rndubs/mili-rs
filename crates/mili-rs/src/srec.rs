@@ -180,6 +180,39 @@ impl SrecTable {
             .iter()
             .map(|id| self.by_id.get(id).expect("srec order index consistent"))
     }
+
+    /// Synthesise `id_blocks = [(1, 1)]` for every subrec whose mclass
+    /// has `Superclass::Mesh` and whose on-disk `id_blocks` list is
+    /// empty. Mirrors mili-python's parser:
+    /// `reference/mili-python/src/mili/afileIO.py:439-441` — for
+    /// `M_MESH` superclass the writer emits `block_count = 0` and no
+    /// id-block pairs, but the layout always carries one object's worth
+    /// of data per state. Without this fix, every subrec that appears
+    /// after a glob / mesh subrec in directory order ends up offset by
+    /// the swallowed M_MESH bytes (e.g. basic1 mis-reads `nodvel` by 80
+    /// bytes — `1 * 19 * 4` for glob + `1 * 1 * 4` for cpu_time).
+    pub fn patch_m_mesh_classes(&mut self, meshes: &crate::mesh::MeshTable) {
+        for srec_id in &self.order {
+            let Some(srec) = self.by_id.get_mut(srec_id) else {
+                continue;
+            };
+            let mesh_id = crate::mesh::MeshId(srec.mesh_id);
+            let Some(mesh) = meshes.mesh(mesh_id) else {
+                continue;
+            };
+            for sub in &mut srec.subrecords {
+                if !sub.id_blocks.is_empty() {
+                    continue;
+                }
+                if mesh
+                    .class(&sub.mclass)
+                    .is_some_and(|c| c.superclass == crate::mesh::Superclass::Mesh)
+                {
+                    sub.id_blocks.push((1, 1));
+                }
+            }
+        }
+    }
 }
 
 fn parse_srec_entry(bytes: &[u8], entry: &DirEntry, header: Header) -> Result<Srec> {

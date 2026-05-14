@@ -38,3 +38,23 @@ jobs:
           submodules: true
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - run: cargo test --workspace
+
+  test-parity:
+    # Cross-impl parity vs. mili-python. Runs the `parity` feature
+    # tests in `crates/mili-rs/tests/parity_*.rs` (skip-not-fail when
+    # the corpus or python package is absent at runtime, but here we
+    # always install both).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install mili-python (editable)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e reference/mili-python
+      - run: cargo test --workspace --features parity
