@@ -1,5 +1,12 @@
 # `mili-py` — PyO3 + numpy bindings
 
+> **Status: ready to start.** Phase 1 (`mili-rs`) is feature-complete
+> for the read path and has bit-exact parity against `mili-python`
+> across 12 corpus fixtures (`crates/mili-rs/tests/parity_*.rs`).
+> See [`../mili-rs/status.md`](../mili-rs/status.md) for the Phase-1
+> wrap-up and the "Known gaps Phase 2 inherits" section before
+> starting M1.
+
 A drop-in replacement for the existing pure-Python `mili` package,
 backed by `mili-rs` under the hood. The Python-facing API is the same;
 the implementation is Rust.

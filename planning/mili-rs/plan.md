@@ -1,5 +1,12 @@
 # `mili-rs` implementation plan
 
+> **Status (Phase 1 complete):** Steps 0–12 + 14–16 ✅; Step 13 🟡
+> (cron clean-run gate pending). The live tracker is
+> [`status.md`](status.md). This document is the **design archive** —
+> it captures the build order, oracle strategy, and CI shape that got
+> us here. Don't edit it to track progress; edit it only if the
+> *design* changes (e.g. Phase 2 reshapes a module boundary).
+
 The README in this directory states the goals and high-level
 milestones. This document is the working plan: concrete modules,
 build order, oracle strategy, CI shape.
@@ -316,27 +323,34 @@ The order below is what we land on the branch in sequence. Each step
 is a PR-sized chunk that compiles, ships tests, and doesn't regress
 prior work.
 
-| Step | Lands                                                       | Validates against           |
-|-----:|-------------------------------------------------------------|-----------------------------|
-| 0    | Workspace, CI skeleton, `MiliError`, fixture symlinks       | `cargo test` green          |
-| 1    | `header.rs` + golden bytes from `basic1.pltA`               | hand-checked offsets, precision-limit resolution |
-| 2    | `directory.rs` for v3, then v2, then v1                     | parity on dir-entry count, names, types; `dir_version_2/` fixture |
-| 3    | `param.rs` scalar/string/array decode; `ti.rs` open         | parity on `"mesh dimensions"`, `"states per file"`, MAT_NAME, IntLabel_es |
-| 4    | `family.rs` open path, `state_map` resolution, end-marker   | parity on `times()`, state count, marker round-trip |
-| 5    | `mesh.rs`: CLASS_DEF + CLASS_IDENTS, nodes, connectivity    | parity on `class_names()`, `nodes()`, `connectivity()` |
-| 6    | high-level TI accessors (labels, materials, element_sets)   | parity on `labels()`, `materials()`, `element_sets()`, `integration_points()` |
-| 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | parity on svar metadata; unit tests on offset math for every cell of the layout matrix |
-| 8    | `buffer.rs` and `endian.rs`                                 | unit tests on synthetic mmaps, including misaligned + byteswap cases |
-| 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | parity on simple `query()` cases |
-| 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | full mili-python read test suite |
-| 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | parity on `test_bugfixes.py:251-296` |
-| 12   | rayon over states; criterion benches                        | ≥ 2× mili-python throughput |
-| 13   | cargo-fuzz targets on `directory.rs`, `header.rs`, `param.rs` | runs clean for an hour    |
+| Step | Lands                                                       | Validates against                                                 | Status |
+|-----:|-------------------------------------------------------------|-------------------------------------------------------------------|:-------|
+| 0    | Workspace, CI skeleton, `MiliError`, fixture symlinks       | `cargo test` green                                                | ✅ |
+| 1    | `header.rs` + golden bytes from `basic1.pltA`               | hand-checked offsets, precision-limit resolution                  | ✅ |
+| 2    | `directory.rs` for v3, then v2 (v1 deferred)                | parity on dir-entry count, names, types; `dir_version_2/` fixture | ✅ |
+| 3    | `param.rs` scalar/string/array decode; `ti.rs` open         | parity on `"mesh dimensions"`, `"states per file"`, MAT_NAME, IntLabel_es | ✅ |
+| 4    | `family.rs` open path, `state_map` resolution, end-marker   | parity on `times()`, state count, marker round-trip               | ✅ |
+| 5    | `mesh.rs`: CLASS_DEF + CLASS_IDENTS, nodes, connectivity    | parity on `class_names()`, `nodes()`, `connectivity()`            | ✅ |
+| 6    | high-level TI accessors (labels, materials, element_sets)   | parity on `labels()`, `materials()`, `element_sets()`, `integration_points()` | ✅ |
+| 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | parity on svar metadata; unit tests on offset math for every cell of the layout matrix | ✅ |
+| 8    | `buffer.rs` and `endian.rs` — **Phase 1 exit**              | unit tests on synthetic mmaps, including misaligned + byteswap cases | ✅ |
+| 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | parity on simple `query()` cases                                  | ✅ |
+| 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | full mili-python read test suite                                  | ✅ |
+| 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | parity on `test_bugfixes.py:251-296`                              | ✅ |
+| 12   | rayon over states; criterion benches                        | ≥ 2× mili-python throughput                                       | ✅ |
+| 13   | cargo-fuzz targets on `directory.rs`, `header.rs`, `param.rs` | runs clean for an hour (cron-time gate)                         | 🟡 |
+| 14   | pyo3 cross-impl parity harness                              | post-plan: bit-exact `db.query()` round-trip                      | ✅ |
+| 15   | nightly fuzz CI cron + planning-doc fix-ups                 | CI workflow; `format.md`/`entry-payloads.md` corrections          | ✅ |
+| 16   | Phase-1 closeout: corpus-wide parity, IP-count contract, API audit | parity across 12 fixtures; `#[doc(hidden)]` narrowing      | ✅ |
 
 Step 0 lands a working CI before any logic. Steps 1–6 land
 read-side metadata; nothing returns data arrays yet. Step 7 is the
 first end-to-end "user can read a result" milestone. Step 8 is the
 Phase 1 exit criterion (full read parity). Steps 9–11 harden.
+
+Steps 14–16 were added after the original plan as the pyo3 parity
+harness surfaced corpus-wide validation needs; the live status of
+each is in [`status.md`](status.md).
 
 The write path (Phase 3) gets its own plan document later, but the
 modules it touches (`directory.rs`, `srec.rs`, `state.rs`) already

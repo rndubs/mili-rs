@@ -197,6 +197,34 @@ pub(crate) fn plan_state_svar(
         });
     }
 
+    // Inconsistent integration-point counts across subrecords on the
+    // same class produce ragged output. mili-python raises
+    // `ValueError` for the no-ips-filter case
+    // (`test_bugfixes.py::InconsistantIntPointsForElementClassResult`);
+    // mirror that here with a typed error so consumers get a clear
+    // signal instead of a misleading length mismatch downstream. With
+    // an `ips` filter the picker either takes the same per-IP slab
+    // across all subrecs (consistent by construction) or has already
+    // been rejected upstream.
+    if filter.ips.is_none() && matches.len() > 1 {
+        let first = matches[0].lumps.sizes[matches[0].svar_idx];
+        let mut distinct: Vec<usize> = Vec::new();
+        distinct.push(first);
+        for m in &matches[1..] {
+            let s = m.lumps.sizes[m.svar_idx];
+            if !distinct.contains(&s) {
+                distinct.push(s);
+            }
+        }
+        if distinct.len() > 1 {
+            return Err(MiliError::InconsistentIpCounts {
+                svar: svar_input.to_owned(),
+                class: class_name.to_owned(),
+                counts: distinct,
+            });
+        }
+    }
+
     let width = resolved.num_type.width();
     let slabs = match filter.labels {
         None => gather_all(&matches, width, &resolved.picker),
@@ -1670,5 +1698,27 @@ mod tests {
                 ByteSlab { start: 600, len: 4 },
             ]
         );
+    }
+
+    // ---------------------------- inconsistent IP counts -------------------
+
+    // The cross-subrec IP-count guard fires when `matches.len() > 1`
+    // and the matching subrecs disagree on `lumps.sizes[svar_idx]`.
+    // Today the only way that happens is via element-set substitution
+    // (Step 16 item 5), which isn't wired yet — so the guard is
+    // dormant in production but the typed error variant is in place
+    // as the user-facing contract. This test pins the error shape so
+    // future work can rely on it.
+    #[test]
+    fn inconsistent_ip_counts_error_is_typed_and_informative() {
+        let err = MiliError::InconsistentIpCounts {
+            svar: "sx".to_owned(),
+            class: "brick".to_owned(),
+            counts: vec![8 * 4, 9 * 4],
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("inconsistent integration-point counts"));
+        assert!(msg.contains("\"sx\""));
+        assert!(msg.contains("\"brick\""));
     }
 }

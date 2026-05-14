@@ -13,10 +13,13 @@ A mili database with root `R` is a directory containing:
   "Directory" below). Body between holds node coordinates, element
   connectivity, class definitions, svar dictionary, parameters.
 - `R.A00`, `R.A01`, … — state files. Suffix width is configurable in
-  the header (`mili_internal.h:414-422`). **No per-state header**:
-  states are written back-to-back; offsets and times live in the
-  `.A` file's `state_map` (`mili_internal.h:109-115`,
-  `srec.c:3456-3586`).
+  the header (`mili_internal.h:414-422`). Each state begins with an
+  8-byte per-state header — an `i32` srec format id followed by an
+  `f32` time — before the subrec data (`mili.c:3042-3043`,
+  `srec.c:2332-2333`). The state map in the `.A` file
+  (`mili_internal.h:109-115`, `srec.c:3456-3586`) records the start
+  offset of each state's header; the subrec data begins 8 bytes
+  later.
 - `<root>_TI_A`, `<root>_TI_B`, … — **separate files** for
   time-independent parameters, written **only in directory v1**
   databases (`mili_util.c:908-911`, base26 suffix). v2+ databases
@@ -441,13 +444,33 @@ Per-svar atom counts by `agg_type`:
 | `ARRAY`       | `prod(dims)`                                         |
 | `VEC_ARRAY`   | `prod(dims) * list_size`                             |
 
-For `VEC_ARRAY` the inner order is: array-dim indices vary fastest,
-then component (vector) index, then integration-point index — i.e.
-"IP axis is the slowest-varying after the array dims, before
-components" (`srec.c:1908, 3018, 4263`). **TODO**: confirm against
-the `vecarray` test fixture before we lock this in. The C code's
-own offset math is the ground truth; a unit test against
-`vecarray` is on the M5 checklist.
+For `VEC_ARRAY` the inner order is **components-fastest,
+IP-slowest**. For a `dims = [n_ip]` vec_array whose components are
+`[c_0, …, c_{list_size-1}]`, each object's slot reads
+
+```
+[ c_0(ip_0) c_1(ip_0) … c_{list_size-1}(ip_0)
+| c_0(ip_1) c_1(ip_1) … c_{list_size-1}(ip_1)
+| …
+| c_0(ip_{n_ip-1}) … c_{list_size-1}(ip_{n_ip-1}) ]
+```
+
+— all components for one IP, then all components for the next IP.
+Multi-dim `dims` are flattened in C row-major order and follow the
+same rule: the flattened array index varies after the component
+index. Pinned by mili-python's writer / reader
+(`reference/mili-python/src/mili/datatypes.py:236-247`: the
+`[sv.comp_layout for sv in svars] * prod(dims)` expansion lays
+components inner, IPs outer) and verified end-to-end against the
+d3samp4 `es_1a` fixture
+(`crates/mili-rs/tests/query_fixtures.rs::d3samp4_vec_array_*`),
+which round-trips a vec_array of mixed-width components
+(`vec_array<[stress(6), eps(1)]>`) through `query()` with an `ips`
+filter. mili-python's `test_bugfixes.py::VectorsInVectorArrays`
+numeric goldens could not be cross-checked at the time of pinning
+(no working mili-python install in that environment); the Rust
+layout is verified self-consistent against direct decode of the
+state-file bytes.
 
 **OBJECT_ORDERED (organization = 1):** the N objects are laid out
 serially; within each object's region, the K svars are serial in
