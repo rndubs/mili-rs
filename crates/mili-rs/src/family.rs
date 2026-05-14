@@ -19,17 +19,19 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
 
 use crate::directory::{DirEntry, DirEntryType, Directory};
 use crate::error::{MiliError, Result};
-use crate::header::{Endianness, Header};
+use crate::header::Header;
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
+use crate::query::{plan_state_svar, StateValues};
 use crate::srec::SrecTable;
 use crate::state::{self, StateMapSource, StateMeta};
-use crate::svar::SvarTable;
+use crate::svar::{NumType, SvarTable};
 
 /// An opened mili family — the read-side handle through which all
 /// parsed metadata and state byte ranges are reachable.
@@ -43,6 +45,7 @@ pub struct Database {
     svars: SvarTable,
     srecs: SrecTable,
     states: Vec<StateMeta>,
+    state_mmaps: Mutex<HashMap<i32, Arc<Mmap>>>,
 }
 
 impl Database {
@@ -95,6 +98,7 @@ impl Database {
             svars,
             srecs,
             states,
+            state_mmaps: Mutex::new(HashMap::new()),
         })
     }
 
@@ -304,6 +308,112 @@ impl Database {
         Ok(out)
     }
 
+    /// Read every value of `svar_name` on objects of class `class` at
+    /// state index `state_idx`, returning a typed flat vector keyed by
+    /// the svar's numeric type.
+    ///
+    /// Step 9 scope (`planning/mili-rs/plan.md` § "Incremental build
+    /// order"): a single (svar, class, state) tuple,
+    /// `RESULT_ORDERED` subrecords only. Concatenates across multiple
+    /// matching subrecs in srec order. The flat layout is
+    /// `[object][atom]` row-major; per-object atom count is
+    /// `Svar::atoms`. `OBJECT_ORDERED` queries and component-name
+    /// lookups (e.g. `"sx"` for `"stress"`) land in Step 10 / 11.
+    pub fn state_var_values(
+        &self,
+        svar_name: &str,
+        class: &str,
+        state_idx: usize,
+    ) -> Result<StateValues> {
+        let state = self
+            .states
+            .get(state_idx)
+            .ok_or(MiliError::StateOutOfRange(state_idx, self.states.len()))?;
+        let srec = self
+            .srecs
+            .get(state.srec_format)
+            .ok_or(MiliError::MalformedDirectory(
+                "state references unknown srec_format",
+            ))?;
+        let state_offset = u64::try_from(state.offset)
+            .map_err(|_| MiliError::MalformedDirectory("state offset negative"))?;
+        // Each state's data block opens with an 8-byte per-state
+        // header: i32 srec_id then f32 time
+        // (`reference/mili/src/mili.c:3042-3043`,
+        // `mili_internal.h:215-250`). Skip it; subrecord bytes start
+        // immediately after.
+        let data_start = state_offset
+            .checked_add(8)
+            .ok_or(MiliError::MalformedDirectory(
+                "state offset + header overflow",
+            ))?;
+        let plan = plan_state_svar(srec, &self.svars, svar_name, class, data_start)?;
+
+        let path = state_file_path(&self.a_path, self.header.suffix_width, state.file).ok_or(
+            MiliError::MalformedDirectory("cannot derive state-file path from .A path"),
+        )?;
+        let mmap = self.state_mmap(state.file)?;
+        let bytes: &[u8] = &mmap;
+        let byteswap = !self.header.is_native_endian();
+        let count = plan.total_bytes() / plan.num_type.width();
+
+        Ok(match plan.num_type {
+            NumType::Float4 => {
+                let mut v: Vec<f32> = Vec::with_capacity(count);
+                for slab in &plan.slabs {
+                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
+                    crate::endian::for_each_swap::<f32, _>(b, byteswap, |x| v.push(x));
+                }
+                StateValues::F32(v)
+            }
+            NumType::Float8 => {
+                let mut v: Vec<f64> = Vec::with_capacity(count);
+                for slab in &plan.slabs {
+                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
+                    crate::endian::for_each_swap::<f64, _>(b, byteswap, |x| v.push(x));
+                }
+                StateValues::F64(v)
+            }
+            NumType::Int4 => {
+                let mut v: Vec<i32> = Vec::with_capacity(count);
+                for slab in &plan.slabs {
+                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
+                    crate::endian::for_each_swap::<i32, _>(b, byteswap, |x| v.push(x));
+                }
+                StateValues::I32(v)
+            }
+            NumType::Int8 => {
+                let mut v: Vec<i64> = Vec::with_capacity(count);
+                for slab in &plan.slabs {
+                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
+                    crate::endian::for_each_swap::<i64, _>(b, byteswap, |x| v.push(x));
+                }
+                StateValues::I64(v)
+            }
+        })
+    }
+
+    fn state_mmap(&self, file_idx: i32) -> Result<Arc<Mmap>> {
+        let mut map = self
+            .state_mmaps
+            .lock()
+            .expect("state_mmaps mutex not poisoned");
+        if let Some(m) = map.get(&file_idx) {
+            return Ok(Arc::clone(m));
+        }
+        let path = state_file_path(&self.a_path, self.header.suffix_width, file_idx).ok_or(
+            MiliError::MalformedDirectory("cannot derive state-file path from .A path"),
+        )?;
+        let file = File::open(&path)?;
+        // SAFETY: same posture as the .A mmap — the family is not
+        // concurrent-write safe and the database holds the file open
+        // through its lifetime.
+        let mmap = unsafe { Mmap::map(&file)? };
+        let arc = Arc::new(mmap);
+        map.insert(file_idx, Arc::clone(&arc));
+        Ok(arc)
+    }
+
     /// Integration-point ids per material, derived from
     /// [`Self::element_sets`].
     ///
@@ -361,20 +471,32 @@ fn append_i32_array(
             "TI accessor: array element type is not i32",
         ));
     }
-    let end = header.endianness;
     out.reserve(arr.atoms);
-    for chunk in arr.data.chunks_exact(4) {
-        let slot: [u8; 4] = chunk.try_into().expect("chunks_exact(4)");
-        out.push(read_i32_4(end, slot));
-    }
+    let byteswap = !header.is_native_endian();
+    crate::endian::for_each_swap::<i32, _>(arr.data, byteswap, |v| out.push(v));
     Ok(())
 }
 
-fn read_i32_4(end: Endianness, slot: [u8; 4]) -> i32 {
-    match end {
-        Endianness::Big => i32::from_be_bytes(slot),
-        Endianness::Little => i32::from_le_bytes(slot),
-    }
+fn slab_bytes<'a>(bytes: &'a [u8], path: &Path, start: usize, len: usize) -> Result<&'a [u8]> {
+    let end = start.checked_add(len).ok_or(MiliError::MalformedDirectory(
+        "state read: slab end overflow",
+    ))?;
+    bytes.get(start..end).ok_or_else(|| MiliError::Truncated {
+        file: path.to_path_buf(),
+        off: start as u64,
+        need: len,
+        got: bytes.len().saturating_sub(start),
+    })
+}
+
+/// Build a state-file path from the `.A` path. `R.A` → `R.A00` etc.,
+/// per `reference/mili/src/mili_util.c:881`.
+fn state_file_path(a_path: &Path, suffix_width: u8, file_idx: i32) -> Option<PathBuf> {
+    let name = a_path.file_name()?.to_str()?;
+    let stem = name.strip_suffix('A')?;
+    let width = usize::from(suffix_width);
+    let suffix = format!("{file_idx:0width$}");
+    Some(a_path.with_file_name(format!("{stem}{suffix}")))
 }
 
 fn mmap_read_only(path: &Path) -> Result<Mmap> {

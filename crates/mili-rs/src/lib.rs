@@ -6,12 +6,15 @@
 //! Step 0 ships only the workspace skeleton and [`MiliError`]; the parser,
 //! query path, and write path arrive in later steps per the plan.
 
+pub(crate) mod buffer;
 pub mod directory;
+pub(crate) mod endian;
 mod error;
 pub mod family;
 pub mod header;
 pub mod mesh;
 pub mod param;
+pub mod query;
 pub mod srec;
 pub mod state;
 pub mod svar;
@@ -26,6 +29,7 @@ pub use mesh::{
     ObjectClass, Superclass,
 };
 pub use param::{AggType, ArrayParam, DataType, ParamTable, ParamValue, ScalarValue};
+pub use query::StateValues;
 pub use srec::{derive_lumps, Lumps, Organization, Srec, SrecTable, Subrecord};
 pub use state::{StateMapSource, StateMeta};
 pub use svar::{NumType, Svar, SvarAgg, SvarTable};

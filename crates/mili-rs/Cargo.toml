@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bytemuck = "1"
 memmap2 = "0.9"
 thiserror = "2"
 
