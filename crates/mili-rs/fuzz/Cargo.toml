@@ -1,0 +1,43 @@
+[package]
+name = "mili-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mili_rs]
+path = ".."
+package = "mili-rs"
+
+[[bin]]
+name = "header"
+path = "fuzz_targets/header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "directory"
+path = "fuzz_targets/directory.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "param"
+path = "fuzz_targets/param.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# Hide this crate from the parent workspace — cargo-fuzz expects its
+# own isolated workspace rooted at `fuzz/`.
+[workspace]

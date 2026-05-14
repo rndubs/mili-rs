@@ -23,7 +23,7 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ✅ done    | TBD   | `Database::query(&QueryArgs)` with labels / states / materials / ips filters; `OBJECT_ORDERED` gather; vec_array IP filter (components-fastest, IP-slowest); material → label via `ELEM_CONNS` mat_id column; `LabelNotFound` / `UnknownMaterial` / `IpFilterNotApplicable` / `IpOutOfRange` typed errors; `Svar::atoms` now accumulates component atom counts (was `comps.len()` — broke for vec_array-of-vectors like d3samp4's `es_1a`). Component-name lookups (`"sx"` → `"stress"`, `hx[3]`) still defer to Step 11. |
 | 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ✅ done    | TBD   | `parse_query_name` + `resolve_target` decompose the input into base svar + `AtomPicker::Specific` atom indices; ARRAY-svar subscript (`"hx[3]"`) and bare-component lookup (`"sx"` → parent VECTOR `stress`) share one gather path. `InvalidSubscript` / `SubscriptNotApplicable` typed errors cover the mili-python exception set (out-of-range, 0/negative, too-many indices, non-integer). VEC_ARRAY bare-comp + partial-dim multi-D subscripts still defer with `Unsupported`. d3samp6.thA `hx[3]` matches mili-python's golden bit-for-bit on state 6, labels [2,5,10] (`test_bugfixes.py:345-365`). |
 | 12   | rayon over states; criterion benches                        | 🟡 partial | TBD   | `Database::query` now prefetches per-state contexts (rebased plan + state-file mmap + path) single-threaded then dispatches the byteswap-and-fill gather across `par_chunks_mut` over the output vec — each state writes a disjoint slab so no synchronisation in the hot loop. Criterion suite at `crates/mili-rs/benches/read.rs` covers `open`, `nodes`, `query_single`, `query_many`; on the local sandbox `query_single` (basic1 `nodpos`, all states) hits ~2.0 GiB/s and `query_many` ~2.5 ms for four svars over all states. Full ≥ 2× mili-python throughput parity bench lands with the pyo3 cross-impl harness in Phase 2 (no mili-python install available in CI yet). |
-| 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | ⏳ pending |       | One-hour clean-run gate.                                    |
+| 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | 🟡 partial | TBD   | Scaffolding only: `crates/mili-rs/fuzz/` is a self-contained cargo-fuzz crate (own `[workspace]` to hide from the parent) with three targets — `header` (`Header::parse`), `directory` (chained `Header::parse` + `Directory::parse`), and `param` (chained header → directory → `ParamValue::decode` over every parsed entry). `cargo check` on stable passes (libfuzzer-sys's link step is the only nightly-only piece). The CI nightly-cron job + one-hour clean-run gate land in a follow-up CI tweak. |
 
 **Phase 1 exit:** Step 8 — landed. Phase 2 (mili-py) can start now.
 
@@ -51,7 +51,7 @@ Snapshot at PR merge time — refresh on every step bump.
 | `cargo test --workspace`       | 190   | Step 11      |
 | Fixture parity (corpus reads)  | 53    | Step 11      |
 | mili-python parity (`pyo3`)    | —     | not wired yet — Phase 2 |
-| cargo-fuzz (nightly cron)      | —     | Step 13      |
+| cargo-fuzz (nightly cron)      | 3     | Step 13 scaffolding (header, directory, param) — CI runner pending |
 | Criterion benches              | 4     | Step 12 (open, nodes, query_single, query_many) |
 
 ## Resolved questions log
