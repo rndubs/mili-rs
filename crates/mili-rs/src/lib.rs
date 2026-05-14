@@ -12,7 +12,9 @@ pub mod family;
 pub mod header;
 pub mod mesh;
 pub mod param;
+pub mod srec;
 pub mod state;
+pub mod svar;
 pub mod ti;
 
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};
@@ -24,4 +26,6 @@ pub use mesh::{
     ObjectClass, Superclass,
 };
 pub use param::{AggType, ArrayParam, DataType, ParamTable, ParamValue, ScalarValue};
+pub use srec::{derive_lumps, Lumps, Organization, Srec, SrecTable, Subrecord};
 pub use state::{StateMapSource, StateMeta};
+pub use svar::{NumType, Svar, SvarAgg, SvarTable};

@@ -27,7 +27,9 @@ use crate::error::{MiliError, Result};
 use crate::header::{Endianness, Header};
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
+use crate::srec::SrecTable;
 use crate::state::{self, StateMapSource, StateMeta};
+use crate::svar::SvarTable;
 
 /// An opened mili family — the read-side handle through which all
 /// parsed metadata and state byte ranges are reachable.
@@ -38,6 +40,8 @@ pub struct Database {
     directory: Directory,
     params: ParamTable,
     meshes: MeshTable,
+    svars: SvarTable,
+    srecs: SrecTable,
     states: Vec<StateMeta>,
 }
 
@@ -58,6 +62,9 @@ impl Database {
 
         let mut meshes = MeshTable::build(&directory)?;
         meshes.load_ident_ranges(&a_mmap, header, &directory)?;
+
+        let svars = SvarTable::build(&a_mmap, &directory, header)?;
+        let srecs = SrecTable::build(&a_mmap, &directory, header)?;
 
         let states = match StateMapSource::pick(&header, &directory) {
             StateMapSource::InlineA(range) => state::parse_inline(&a_mmap, range, &header)?,
@@ -85,6 +92,8 @@ impl Database {
             directory,
             params,
             meshes,
+            svars,
+            srecs,
             states,
         })
     }
@@ -154,6 +163,18 @@ impl Database {
     /// `CLASS_IDENTS`, `NODES`, and `ELEM_CONNS` entries.
     pub fn meshes(&self) -> &MeshTable {
         &self.meshes
+    }
+
+    /// State-variable dictionary parsed from every `STATE_VAR_DICT`
+    /// entry in the directory.
+    pub fn svars(&self) -> &SvarTable {
+        &self.svars
+    }
+
+    /// State-record schemas parsed from every `STATE_REC_DATA` entry
+    /// in the directory.
+    pub fn srecs(&self) -> &SrecTable {
+        &self.srecs
     }
 
     /// Decode the `NODES` payload for `(mesh_id, classname)`, returning
