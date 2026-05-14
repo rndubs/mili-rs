@@ -166,12 +166,16 @@ impl Mesh {
 pub struct MeshTable {
     meshes: HashMap<MeshId, Mesh>,
     mesh_order: Vec<MeshId>,
-    /// `(mesh_id, classname)` → directory index of the matching
-    /// `NODES` entry, if any.
-    nodes_index: HashMap<(MeshId, String), usize>,
-    /// `(mesh_id, classname)` → directory index of the matching
-    /// `ELEM_CONNS` entry, if any.
-    conns_index: HashMap<(MeshId, String), usize>,
+    /// `(mesh_id, classname)` → directory indices of every matching
+    /// `NODES` entry, in directory order. Real-world databases split
+    /// non-contiguous node-id ranges across multiple `NODES` entries
+    /// (basic1 is one example), so this is a vector rather than a
+    /// single index.
+    nodes_index: HashMap<(MeshId, String), Vec<usize>>,
+    /// `(mesh_id, classname)` → directory indices of every matching
+    /// `ELEM_CONNS` entry, in directory order. Same reasoning as
+    /// [`Self::nodes_index`].
+    conns_index: HashMap<(MeshId, String), Vec<usize>>,
 }
 
 impl MeshTable {
@@ -206,19 +210,20 @@ impl MeshTable {
     }
 
     fn add_class_def(&mut self, idx: usize, entry: &DirEntry, names: &NamePool) -> Result<()> {
-        // CLASS_DEF: MODIFIER1 = superclass, STRING_QTY = 2
-        // (short_name, long_name). The reference notes call out that
-        // mesh id does **not** live in CLASS_DEF — the class is
-        // claimed by whichever mesh first emits a CLASS_IDENTS / NODES
-        // / ELEM_CONNS entry that names it. We tag it with MeshId(-1)
-        // as a sentinel and rewrite the field the first time a
-        // geometry entry pins it to a real mesh.
+        // CLASS_DEF: STRING_QTY = 2 (short_name, long_name); the
+        // superclass code lives in MODIFIER2 (MODIFIER1 is M_UNIT=0
+        // on every fixture in the corpus). mesh id does **not** live
+        // in CLASS_DEF — the class is claimed by whichever mesh first
+        // emits a CLASS_IDENTS / NODES / ELEM_CONNS entry that names
+        // it. We tag it with MeshId(-1) as a sentinel and rewrite the
+        // field the first time a geometry entry pins it to a real
+        // mesh.
         if entry.name_count < 2 {
             return Err(MiliError::MalformedDirectory(
                 "CLASS_DEF entry has fewer than two names",
             ));
         }
-        let superclass = Superclass::from_code(entry.modifier1).ok_or(
+        let superclass = Superclass::from_code(entry.modifier2).ok_or(
             MiliError::MalformedDirectory("CLASS_DEF: unknown superclass code"),
         )?;
         let short = names.get(entry.name_start as usize).to_owned();
@@ -236,10 +241,17 @@ impl MeshTable {
         // moves it to the real mesh once a geometry entry binds it.
         let sentinel = MeshId(-1);
         let mesh = self.mesh_entry(sentinel);
-        if mesh.classes.contains_key(&short) {
-            return Err(MiliError::MalformedDirectory(
-                "duplicate CLASS_DEF for the same class name",
-            ));
+        if let Some(existing) = mesh.classes.get(&short) {
+            // Idempotent re-declaration is common in the corpus (the
+            // writer can emit CLASS_DEF more than once for the same
+            // class). Accept it as long as the superclass and long
+            // name match; otherwise the conflict is real.
+            if existing.superclass != class.superclass || existing.long_name != class.long_name {
+                return Err(MiliError::MalformedDirectory(
+                    "conflicting CLASS_DEF for the same class name",
+                ));
+            }
+            return Ok(());
         }
         mesh.class_order.push(short.clone());
         mesh.classes.insert(short, class);
@@ -308,32 +320,34 @@ impl MeshTable {
     fn add_nodes(&mut self, idx: usize, entry: &DirEntry, names: &NamePool) -> Result<()> {
         let (mesh_id, classname) = mesh_and_classname(entry, names)?;
         self.resolve_class(mesh_id, &classname)?;
-        let key = (mesh_id, classname);
-        if self.nodes_index.insert(key, idx).is_some() {
-            return Err(MiliError::MalformedDirectory(
-                "duplicate NODES entry for the same (mesh, class)",
-            ));
-        }
+        self.nodes_index
+            .entry((mesh_id, classname))
+            .or_default()
+            .push(idx);
         Ok(())
     }
 
     fn add_elem_conns(&mut self, idx: usize, entry: &DirEntry, names: &NamePool) -> Result<()> {
         let (mesh_id, classname) = mesh_and_classname(entry, names)?;
         self.resolve_class(mesh_id, &classname)?;
-        let key = (mesh_id, classname);
-        if self.conns_index.insert(key, idx).is_some() {
-            return Err(MiliError::MalformedDirectory(
-                "duplicate ELEM_CONNS entry for the same (mesh, class)",
-            ));
-        }
+        self.conns_index
+            .entry((mesh_id, classname))
+            .or_default()
+            .push(idx);
         Ok(())
     }
 
     /// Append id-block ranges to each class by decoding every
-    /// `CLASS_IDENTS` payload. Call after [`Self::build`] when you
-    /// have the file bytes; safe to call multiple times only at the
-    /// cost of duplicate ranges, so the open path calls it exactly
-    /// once.
+    /// geometry entry's payload (`CLASS_IDENTS`, `NODES`, and
+    /// `ELEM_CONNS`). Call after [`Self::build`] when you have the
+    /// file bytes; safe to call multiple times only at the cost of
+    /// duplicate ranges, so the open path calls it exactly once.
+    ///
+    /// Some classes carry no `CLASS_IDENTS` and rely on `NODES` /
+    /// `ELEM_CONNS` to declare their id range (basic1's `node` and
+    /// `brick` classes are the canonical examples); without walking
+    /// those entries here, [`ObjectClass::element_count`] would
+    /// underreport.
     pub fn load_ident_ranges(
         &mut self,
         bytes: &[u8],
@@ -341,24 +355,32 @@ impl MeshTable {
         dir: &Directory,
     ) -> Result<()> {
         for entry in &dir.entries {
-            if entry.entry_type != DirEntryType::ClassIdents {
-                continue;
+            match entry.entry_type {
+                DirEntryType::ClassIdents => {
+                    let (mesh_id, classname) = mesh_and_classname(entry, &dir.names)?;
+                    let block = decode_class_idents(bytes, entry, header)?;
+                    push_block(&mut self.meshes, mesh_id, &classname, block)?;
+                }
+                DirEntryType::Nodes => {
+                    let (mesh_id, classname) = mesh_and_classname(entry, &dir.names)?;
+                    let dims = read_mesh_dimensions(dir, bytes, header)?;
+                    let nodes = decode_nodes(bytes, entry, header, dims)?;
+                    push_block(
+                        &mut self.meshes,
+                        mesh_id,
+                        &classname,
+                        (nodes.start_id, nodes.stop_id),
+                    )?;
+                }
+                DirEntryType::ElemConns => {
+                    let (mesh_id, classname) = mesh_and_classname(entry, &dir.names)?;
+                    let conn = decode_elem_conns(bytes, entry, header)?;
+                    for block in conn.blocks {
+                        push_block(&mut self.meshes, mesh_id, &classname, block)?;
+                    }
+                }
+                _ => {}
             }
-            let (mesh_id, classname) = mesh_and_classname(entry, &dir.names)?;
-            let block = decode_class_idents(bytes, entry, header)?;
-            let mesh = self
-                .meshes
-                .get_mut(&mesh_id)
-                .ok_or(MiliError::MalformedDirectory(
-                    "load_ident_ranges: mesh missing",
-                ))?;
-            let class = mesh
-                .classes
-                .get_mut(&classname)
-                .ok_or(MiliError::MalformedDirectory(
-                    "load_ident_ranges: class missing",
-                ))?;
-            class.id_blocks.push(block);
         }
         Ok(())
     }
@@ -374,26 +396,94 @@ impl MeshTable {
         self.meshes.get(&id)
     }
 
-    /// Directory index of the `NODES` entry for `(mesh_id, classname)`,
-    /// or `None` if no such entry was declared.
+    /// First directory index of a `NODES` entry for
+    /// `(mesh_id, classname)`, or `None` if no such entry was declared.
+    /// Use [`Self::nodes_entry_indices`] when a class has multiple
+    /// `NODES` entries.
     pub fn nodes_entry_index(&self, mesh_id: MeshId, classname: &str) -> Option<usize> {
-        self.nodes_index
-            .get(&(mesh_id, classname.to_owned()))
+        self.nodes_entry_indices(mesh_id, classname)
+            .first()
             .copied()
     }
 
-    /// Directory index of the `ELEM_CONNS` entry for
+    /// All directory indices of `NODES` entries for
+    /// `(mesh_id, classname)`, in directory order. Empty if none.
+    pub fn nodes_entry_indices(&self, mesh_id: MeshId, classname: &str) -> &[usize] {
+        self.nodes_index
+            .get(&(mesh_id, classname.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// First directory index of an `ELEM_CONNS` entry for
     /// `(mesh_id, classname)`, or `None` if no such entry was declared.
+    /// Use [`Self::conns_entry_indices`] when a class has multiple
+    /// `ELEM_CONNS` entries.
     pub fn conns_entry_index(&self, mesh_id: MeshId, classname: &str) -> Option<usize> {
+        self.conns_entry_indices(mesh_id, classname)
+            .first()
+            .copied()
+    }
+
+    /// All directory indices of `ELEM_CONNS` entries for
+    /// `(mesh_id, classname)`, in directory order. Empty if none.
+    pub fn conns_entry_indices(&self, mesh_id: MeshId, classname: &str) -> &[usize] {
         self.conns_index
             .get(&(mesh_id, classname.to_owned()))
-            .copied()
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Every class across every mesh, in directory-discovery order.
     pub fn classes(&self) -> impl Iterator<Item = &ObjectClass> {
         self.meshes().flat_map(Mesh::classes)
     }
+}
+
+fn push_block(
+    meshes: &mut HashMap<MeshId, Mesh>,
+    mesh_id: MeshId,
+    classname: &str,
+    block: (i32, i32),
+) -> Result<()> {
+    let mesh = meshes
+        .get_mut(&mesh_id)
+        .ok_or(MiliError::MalformedDirectory(
+            "load_ident_ranges: mesh missing",
+        ))?;
+    let class = mesh
+        .classes
+        .get_mut(classname)
+        .ok_or(MiliError::MalformedDirectory(
+            "load_ident_ranges: class missing",
+        ))?;
+    class.id_blocks.push(block);
+    Ok(())
+}
+
+/// Resolve `"mesh dimensions"` from the directory's param entries.
+/// Returns 3 if absent — every fixture in the corpus declares it,
+/// but a defensive default keeps the geometry-range pass from
+/// failing when only `ELEM_CONNS` (which doesn't depend on dims)
+/// would be touched.
+fn read_mesh_dimensions(dir: &Directory, bytes: &[u8], header: Header) -> Result<i32> {
+    for entry in &dir.entries {
+        if entry.entry_type != DirEntryType::MiliParam
+            && entry.entry_type != DirEntryType::ApplicationParam
+            && entry.entry_type != DirEntryType::TiParam
+        {
+            continue;
+        }
+        if entry.name_count == 0 {
+            continue;
+        }
+        if dir.names.get(entry.name_start as usize) != "mesh dimensions" {
+            continue;
+        }
+        let v = crate::param::ParamValue::decode(bytes, entry, header)?;
+        if let crate::param::ParamValue::Scalar(crate::param::ScalarValue::I32(d)) = v {
+            return Ok(d);
+        }
+    }
+    Ok(3)
 }
 
 fn mesh_and_classname(entry: &DirEntry, names: &NamePool) -> Result<(MeshId, String)> {
@@ -812,7 +902,9 @@ mod tests {
     }
 
     #[test]
-    fn build_table_rejects_duplicate_class_def() {
+    fn build_table_accepts_idempotent_class_def() {
+        // Re-declaring the same class with the same superclass and
+        // long name is a no-op — the corpus does this in practice.
         let names = ["x", "X", "x", "X"];
         let pool = make_pool(&names);
         let dir = Directory {
@@ -822,6 +914,27 @@ mod tests {
             entries: vec![
                 entry(DirEntryType::ClassDef, 1, 1, 0, 0, 0, 2),
                 entry(DirEntryType::ClassDef, 1, 1, 0, 0, 2, 2),
+            ],
+            names: pool,
+        };
+        let table = MeshTable::build(&dir).expect("idempotent class def");
+        // Class lives under the sentinel mesh id until geometry binds
+        // it; we just verify it was registered exactly once.
+        assert_eq!(table.meshes.get(&MeshId(-1)).unwrap().class_order.len(), 1);
+    }
+
+    #[test]
+    fn build_table_rejects_conflicting_class_def() {
+        // Same name, different superclass — that's a real conflict.
+        let names = ["x", "X", "x", "X"];
+        let pool = make_pool(&names);
+        let dir = Directory {
+            commit_count: 1,
+            qty_states: 0,
+            state_map: ByteRange { start: 0, end: 0 },
+            entries: vec![
+                entry(DirEntryType::ClassDef, 1, 1, 0, 0, 0, 2),
+                entry(DirEntryType::ClassDef, 9, 9, 0, 0, 2, 2),
             ],
             names: pool,
         };

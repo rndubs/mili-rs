@@ -48,7 +48,7 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | 78    | Step 6       |
+| `cargo test --workspace`       | 79    | Step 6       |
 | Fixture parity (corpus reads)  | 23    | Step 6       |
 | mili-python parity (`pyo3`)    | —     | not wired yet — planned for Step 8 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
@@ -62,6 +62,20 @@ Track in `plan.md` § "Resolved questions". Current entries:
 - Format-v1 directory support — deferred with typed `UnsupportedDir(1)`.
 - Label / material trailing convention — labels and elem-ids are
   separate TI arrays of equal length, not split halves.
+- `CLASS_DEF` superclass field (Step 6 fix-up). `entry-payloads.md`
+  documented MODIFIER1 as the superclass, but every fixture in the
+  corpus stores MODIFIER1 = 0 and the actual superclass in MODIFIER2.
+  Reader now reads MODIFIER2; the entry-payloads doc will be tightened
+  to match in the next planning pass.
+- Multiple `NODES` / `ELEM_CONNS` per `(mesh, class)` (Step 6 fix-up).
+  Real-world databases (basic1) split non-contiguous element-id
+  ranges across multiple `ELEM_CONNS` entries; the table now indexes
+  them as `Vec<usize>` and `load_ident_ranges` collects id-blocks from
+  `CLASS_IDENTS`, `NODES`, and `ELEM_CONNS` so `element_count` is
+  correct even for classes that ship no `CLASS_IDENTS`.
+- Idempotent `CLASS_DEF` re-declaration (Step 6 fix-up). Writer can
+  emit the same class twice; reader accepts the second declaration
+  when superclass and long name match, errors only on real conflicts.
 
 ## Open questions (still active)
 
