@@ -24,7 +24,7 @@ use memmap2::Mmap;
 
 use crate::directory::{DirEntry, DirEntryType, Directory};
 use crate::error::{MiliError, Result};
-use crate::header::{Endianness, Header};
+use crate::header::Header;
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
 use crate::srec::SrecTable;
@@ -361,20 +361,10 @@ fn append_i32_array(
             "TI accessor: array element type is not i32",
         ));
     }
-    let end = header.endianness;
     out.reserve(arr.atoms);
-    for chunk in arr.data.chunks_exact(4) {
-        let slot: [u8; 4] = chunk.try_into().expect("chunks_exact(4)");
-        out.push(read_i32_4(end, slot));
-    }
+    let byteswap = !header.is_native_endian();
+    crate::endian::for_each_swap::<i32, _>(arr.data, byteswap, |v| out.push(v));
     Ok(())
-}
-
-fn read_i32_4(end: Endianness, slot: [u8; 4]) -> i32 {
-    match end {
-        Endianness::Big => i32::from_be_bytes(slot),
-        Endianness::Little => i32::from_le_bytes(slot),
-    }
 }
 
 fn mmap_read_only(path: &Path) -> Result<Mmap> {

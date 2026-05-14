@@ -537,15 +537,10 @@ impl Nodes<'_> {
                 "nodes: data length not a multiple of 4",
             ));
         }
-        let n = self.data.len() / 4;
-        let mut out = Vec::with_capacity(n);
-        for chunk in self.data.chunks_exact(4) {
-            let arr: [u8; 4] = chunk.try_into().expect("chunks_exact(4)");
-            out.push(match self.endianness {
-                Endianness::Big => f32::from_be_bytes(arr),
-                Endianness::Little => f32::from_le_bytes(arr),
-            });
-        }
+        let mut out = Vec::with_capacity(self.data.len() / 4);
+        crate::endian::for_each_swap::<f32, _>(self.data, byteswap(self.endianness), |v| {
+            out.push(v);
+        });
         Ok(out)
     }
 }
@@ -656,15 +651,10 @@ impl Connectivity<'_> {
                 "conn: data length not a multiple of 4",
             ));
         }
-        let n = self.data.len() / 4;
-        let mut out = Vec::with_capacity(n);
-        for chunk in self.data.chunks_exact(4) {
-            let arr: [u8; 4] = chunk.try_into().expect("chunks_exact(4)");
-            out.push(match self.endianness {
-                Endianness::Big => i32::from_be_bytes(arr),
-                Endianness::Little => i32::from_le_bytes(arr),
-            });
-        }
+        let mut out = Vec::with_capacity(self.data.len() / 4);
+        crate::endian::for_each_swap::<i32, _>(self.data, byteswap(self.endianness), |v| {
+            out.push(v);
+        });
         Ok(out)
     }
 }
@@ -744,6 +734,14 @@ pub fn decode_elem_conns<'a>(
         data: &raw[header_bytes..body_end],
         endianness: end,
     })
+}
+
+#[inline]
+fn byteswap(end: Endianness) -> bool {
+    match end {
+        Endianness::Big => !cfg!(target_endian = "big"),
+        Endianness::Little => !cfg!(target_endian = "little"),
+    }
 }
 
 fn payload<'a>(bytes: &'a [u8], entry: &DirEntry) -> Result<&'a [u8]> {

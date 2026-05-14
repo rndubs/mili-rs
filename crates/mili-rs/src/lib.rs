@@ -6,7 +6,9 @@
 //! Step 0 ships only the workspace skeleton and [`MiliError`]; the parser,
 //! query path, and write path arrive in later steps per the plan.
 
+pub(crate) mod buffer;
 pub mod directory;
+pub(crate) mod endian;
 mod error;
 pub mod family;
 pub mod header;
