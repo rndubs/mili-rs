@@ -92,6 +92,12 @@ pub(crate) struct ReadPlan {
     pub slabs: Vec<ByteSlab>,
     /// Base byte offset (state-data-start) this plan was built against.
     pub state_data_start: u64,
+    /// Entity-axis labels in `[label]` output order (one per output
+    /// row, repeated for every state). Length is constant across
+    /// states for a given srec format. For unfiltered queries this
+    /// comes from each matching subrec's `id_blocks` in directory
+    /// order; for label-filtered queries this is the input list.
+    pub labels: Vec<i32>,
 }
 
 impl ReadPlan {
@@ -119,6 +125,7 @@ impl ReadPlan {
             num_type: self.num_type,
             slabs,
             state_data_start: new_start,
+            labels: self.labels.clone(),
         })
     }
 }
@@ -226,15 +233,19 @@ pub(crate) fn plan_state_svar(
     }
 
     let width = resolved.num_type.width();
-    let slabs = match filter.labels {
+    let (slabs, labels) = match filter.labels {
         None => gather_all(&matches, width, &resolved.picker),
-        Some(labels) => gather_by_labels(&matches, width, &resolved.picker, labels, class_name)?,
+        Some(labels) => (
+            gather_by_labels(&matches, width, &resolved.picker, labels, class_name)?,
+            labels.to_vec(),
+        ),
     };
 
     Ok(ReadPlan {
         num_type: resolved.num_type,
         slabs,
         state_data_start,
+        labels,
     })
 }
 
@@ -502,14 +513,42 @@ fn collect_matching_subrecs<'a>(
     Ok(out)
 }
 
-fn gather_all(matches: &[SubrecMatch<'_>], width: usize, picker: &AtomPicker) -> Vec<ByteSlab> {
+fn gather_all(
+    matches: &[SubrecMatch<'_>],
+    width: usize,
+    picker: &AtomPicker,
+) -> (Vec<ByteSlab>, Vec<i32>) {
     let mut slabs = Vec::new();
+    let mut labels = Vec::new();
     for m in matches {
+        let block_labels = expand_id_blocks(&m.sub.id_blocks);
+        debug_assert_eq!(block_labels.len(), m.n);
         for j in 0..m.n {
             push_object_rows(&mut slabs, m, width, picker, j);
+            labels.push(block_labels[j]);
         }
     }
-    slabs
+    (slabs, labels)
+}
+
+/// Expand `[(start, stop), ...]` inclusive ranges into the full label
+/// list in declaration order. Mirrors the entity-axis enumeration that
+/// [`gather_all`] produces.
+fn expand_id_blocks(blocks: &[(i32, i32)]) -> Vec<i32> {
+    let total: i64 = blocks
+        .iter()
+        .map(|&(s, e)| (e as i64 - s as i64 + 1).max(0))
+        .sum();
+    let mut out = Vec::with_capacity(total.max(0) as usize);
+    for &(s, e) in blocks {
+        if e < s {
+            continue;
+        }
+        for id in s..=e {
+            out.push(id);
+        }
+    }
+    out
 }
 
 fn gather_by_labels(
@@ -1688,6 +1727,7 @@ mod tests {
                 ByteSlab { start: 200, len: 4 },
             ],
             state_data_start: 100,
+            labels: vec![1, 2],
         };
         let new = plan.rebased(500).unwrap();
         assert_eq!(new.state_data_start, 500);

@@ -350,6 +350,17 @@ impl Database {
     /// to a single occurrence, but the relative order of labels in
     /// connectivity is preserved.
     pub fn query(&self, args: &QueryArgs<'_>) -> Result<StateValues> {
+        self.query_with_labels(args).map(|(v, _)| v)
+    }
+
+    /// Run a filtered, multi-state query and return both the values and
+    /// the entity-axis labels (in `[label]` order matching the
+    /// `[state][label][atom]` layout of the returned `StateValues`).
+    ///
+    /// This is the primitive used by [`crate::family_set::DatabaseSet`]
+    /// when merging per-fragment results. End users should prefer
+    /// [`Database::query`] plus [`Database::labels`].
+    pub fn query_with_labels(&self, args: &QueryArgs<'_>) -> Result<(StateValues, Vec<i32>)> {
         if args.states.is_empty() {
             return Err(MiliError::MalformedDirectory(
                 "query: states must be non-empty",
@@ -450,12 +461,13 @@ impl Database {
             }};
         }
 
-        Ok(match plan.num_type {
+        let values = match plan.num_type {
             NumType::Float4 => gather!(f32, F32),
             NumType::Float8 => gather!(f64, F64),
             NumType::Int4 => gather!(i32, I32),
             NumType::Int8 => gather!(i64, I64),
-        })
+        };
+        Ok((values, plan.labels))
     }
 
     /// Prefetch the per-state read context (rebased plan, state-file
