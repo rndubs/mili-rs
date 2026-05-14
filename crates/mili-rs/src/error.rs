@@ -75,6 +75,18 @@ pub enum MiliError {
 
     #[error("no subrecord covers svar {svar:?} on class {class:?}")]
     NoMatchingSubrec { svar: String, class: String },
+
+    #[error("label {label} not found on class {class:?}")]
+    LabelNotFound { label: i32, class: String },
+
+    #[error("integration-point index {ip} out of range (svar has {atoms} per-IP slots)")]
+    IpOutOfRange { ip: usize, atoms: usize },
+
+    #[error("ips filter is only valid against vec_array svars; svar {svar:?} is {agg}")]
+    IpFilterNotApplicable { svar: String, agg: &'static str },
+
+    #[error("material {material} not declared")]
+    UnknownMaterial { material: i32 },
 }
 
 pub type Result<T, E = MiliError> = core::result::Result<T, E>;

@@ -80,8 +80,11 @@ pub struct Svar {
     pub num_type: NumType,
     pub agg: SvarAgg,
     /// Atoms-per-object for this svar, resolved at parse time:
-    /// `1` for scalar, `comps.len()` for vector, `prod(dims)` for
-    /// array, `prod(dims) * comps.len()` for vec-array. This is the
+    /// `1` for scalar, `sum(comp.atoms)` for vector, `prod(dims)` for
+    /// array, `prod(dims) * sum(comp.atoms)` for vec-array. Components
+    /// can be vectors themselves (e.g. d3samp4's `es_1a` =
+    /// vec_array<[stress(6), eps(1)]>), in which case `comp.atoms` is
+    /// the component svar's own resolved atom count. This is the
     /// per-object cell in the byte-layout matrix; the byte width per
     /// object is `atoms * num_type.width()`.
     pub atoms: usize,
@@ -286,12 +289,17 @@ fn parse_one(
         (Some(d), Some(c)) => SvarAgg::VecArray { dims: d, comps: c },
     };
 
+    // VECTOR and VEC_ARRAY component atoms accumulate the components'
+    // own per-object atom counts — a vec_array whose components are
+    // themselves vectors (e.g. d3samp4's `es_1a` with comps
+    // `[stress(6), eps(1)]`) has `prod(dims) * 7` atoms, not
+    // `prod(dims) * 2`. Matches `reference/mili-python/src/mili/datatypes.py:254-262`.
     let atoms = match &agg {
         SvarAgg::Scalar => 1usize,
-        SvarAgg::Vector { comps } => comps.len(),
+        SvarAgg::Vector { comps } => sum_comp_atoms(comps, table)?,
         SvarAgg::Array { dims } => dims_product(dims)?,
         SvarAgg::VecArray { dims, comps } => dims_product(dims)?
-            .checked_mul(comps.len())
+            .checked_mul(sum_comp_atoms(comps, table)?)
             .ok_or(MiliError::MalformedDirectory("svar: atom count overflow"))?,
     };
 
@@ -307,6 +315,24 @@ fn parse_one(
     }
     table.by_name.insert(name, svar);
     Ok(())
+}
+
+fn sum_comp_atoms(comps: &[String], table: &SvarTable) -> Result<usize> {
+    let mut acc: usize = 0;
+    for c in comps {
+        let comp_atoms =
+            table
+                .by_name
+                .get(c)
+                .map(|sv| sv.atoms)
+                .ok_or(MiliError::MalformedDirectory(
+                    "svar: component referenced before parse",
+                ))?;
+        acc = acc
+            .checked_add(comp_atoms)
+            .ok_or(MiliError::MalformedDirectory("svar: comp atoms overflow"))?;
+    }
+    Ok(acc)
 }
 
 fn dims_product(dims: &[i32]) -> Result<usize> {

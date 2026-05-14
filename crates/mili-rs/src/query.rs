@@ -1,35 +1,40 @@
-//! State-data read path: byte-offset math for a single (svar, class,
-//! state) tuple in a `RESULT_ORDERED` subrecord.
+//! State-data read path: byte-offset math and gather planning for
+//! single-svar queries with label, integration-point, and multi-state
+//! filters across both subrecord organisations.
 //!
-//! Step 9 of `planning/mili-rs/plan.md`. Pure metadata + offset
-//! computation; the I/O (state-file mmap, byteswap, decode) lives in
-//! [`crate::family::Database::state_var_values`].
-//!
-//! The byte-layout matrix in `planning/shared/format.md` §
-//! "Subrecord byte-layout matrix" is the source of truth. For svar
-//! `s` inside subrecord `k` of an srec held by a state:
+//! The byte-layout matrix in `planning/shared/format.md` § "Subrecord
+//! byte-layout matrix" is the source of truth. For svar `s` at ordinal
+//! `j` inside subrecord `k`, rooted at `subrec_k_start`:
 //!
 //! ```text
-//! state_data_start  = state.offset                       (within state file)
-//! subrec_k_start    = state_data_start
-//!                     + sum_{i<k} N_i * bytes_per_obj_i  (across all svars in i)
 //! RESULT_ORDERED:
-//!     svar_s_start  = subrec_k_start + N_k * lump_offsets[s]
-//!     svar_s_size   = N_k * lump_sizes[s]
+//!     row(j) = subrec_k_start + N_k * lump_offsets[s] + j * lump_sizes[s]
+//!     row length = lump_sizes[s]
+//! OBJECT_ORDERED:
+//!     row(j) = subrec_k_start + j * bytes_per_object_k + lump_offsets[s]
+//!     row length = lump_sizes[s]
 //! ```
 //!
-//! Subrec byte size is organisation-agnostic — both `RESULT_ORDERED`
-//! and `OBJECT_ORDERED` layouts pack `N * sum(per-object bytes)`
-//! — so the running offset table is computable without decoding any
-//! subrecord we don't actually read from.
+//! The vec_array IP filter selects a subset of integration-point
+//! indices within the per-object atom run. Per the `vecarray` corpus
+//! and `reference/mili-python/src/mili/datatypes.py:236-247`, the inner
+//! order of a `VEC_ARRAY` is components-fastest, IPs-slowest: with
+//! `dims = [n_ip]` and component count `K`, atom `(ip, c)` sits at
+//! `ip * K + c`. The format-doc's "array-dim-indices-fastest → IP
+//! slowest → components" line in `planning/shared/format.md` § cell
+//! `VEC_ARRAY` is wrong (logged under `status.md` § "Resolved questions
+//! log") — the writer / reader treat components as fastest. Both
+//! layouts agree for the common `prod(dims) == n_ip` case used here.
 
 use crate::error::{MiliError, Result};
-use crate::srec::{derive_lumps, Organization, Srec, Subrecord};
-use crate::svar::{NumType, SvarTable};
+use crate::srec::{derive_lumps, Lumps, Organization, Srec, Subrecord};
+use crate::svar::{NumType, Svar, SvarAgg, SvarTable};
 
-/// Typed return for a single-svar, single-state read. Variant chosen
-/// from the svar's [`NumType`]. Values are flat in
-/// `[object][atom]` row-major order — `len == N * atoms_per_object`.
+/// Typed return for a query. Variant is keyed off the svar's
+/// [`NumType`]. Values are flat in `[state][label][atom]` row-major
+/// order. `len == states * labels * row_atoms`, where `row_atoms` is
+/// `Svar::atoms` for unfiltered reads or `comps * ips` for vec_array
+/// reads with an `ips` filter.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateValues {
     F32(Vec<f32>),
@@ -62,59 +67,146 @@ impl StateValues {
     }
 }
 
-/// One contiguous byte range to read from a single state file, owned
-/// by one matching subrecord.
+/// One contiguous byte range to read from a single state file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ByteSlab {
-    /// Absolute byte offset into the state file.
     pub start: usize,
-    /// Length in bytes.
     pub len: usize,
 }
 
-/// Plan for one `(svar, class, state)` read: a list of contiguous
-/// byte ranges within the state file, plus the svar's numeric type.
-///
-/// May span multiple subrecords when more than one carries the
-/// `(svar, class)` pair (typical for classes that are split across
-/// id-block subrecs).
+/// Per-state gather plan: a flat list of byte ranges to read, in
+/// `[label][atom]` output order, plus the svar's numeric type and the
+/// per-row atom count after IP filtering. `state_data_start` shifts
+/// the plan to a different state file via [`ReadPlan::rebased`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadPlan {
     pub num_type: NumType,
     pub slabs: Vec<ByteSlab>,
+    /// Base byte offset (state-data-start) this plan was built against.
+    pub state_data_start: u64,
 }
 
 impl ReadPlan {
     pub fn total_bytes(&self) -> usize {
         self.slabs.iter().map(|s| s.len).sum()
     }
+
+    /// Produce a plan with every slab rebased onto a different
+    /// `state_data_start`. Used to walk multiple states whose subrec
+    /// layout is identical (same srec format) by computing offsets
+    /// once and shifting.
+    pub fn rebased(&self, new_start: u64) -> Result<Self> {
+        let delta = i128::from(new_start) - i128::from(self.state_data_start);
+        let mut slabs = Vec::with_capacity(self.slabs.len());
+        for s in &self.slabs {
+            let shifted = i128::from(s.start as u64) + delta;
+            if shifted < 0 || shifted > i128::from(u64::MAX) {
+                return Err(MiliError::MalformedDirectory("query: rebase overflow"));
+            }
+            let start = usize::try_from(shifted as u64)
+                .map_err(|_| MiliError::MalformedDirectory("query: rebase exceeds usize"))?;
+            slabs.push(ByteSlab { start, len: s.len });
+        }
+        Ok(Self {
+            num_type: self.num_type,
+            slabs,
+            state_data_start: new_start,
+        })
+    }
 }
 
-/// Build the read plan for `(svar_name, class_name)` against an srec,
-/// rooted at `state_data_start` (absolute byte offset of the state's
-/// data block inside its state file).
+/// Filter inputs for a single-svar query. All fields are pre-resolved
+/// caller-side (label list, state list, ip list); see the top-level
+/// [`crate::Database`] surface for the user-facing types.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Filter<'a> {
+    /// 1-based mili object ids to select. `None` means "all objects in
+    /// every matching subrec, in subrec-directory then in-subrec order".
+    pub labels: Option<&'a [i32]>,
+    /// Integration-point indices to keep, 0-based within the vec_array
+    /// inner order (components-fastest, IP-slowest). `None` means
+    /// "every IP".
+    pub ips: Option<&'a [usize]>,
+}
+
+/// Build the read plan for one `(svar, class, state)` tuple under the
+/// given filter, rooted at the state's data block (the byte offset of
+/// the first subrec inside its state file).
 ///
 /// Errors on:
-/// - svar name not in [`SvarTable`]
-/// - subrecord references an undefined svar
-/// - `OBJECT_ORDERED` for a matching subrecord (Step 10)
+/// - svar / class not present
 /// - no subrecord covers `(svar, class)`
+/// - a label in `filter.labels` is not covered by any matching subrec
+/// - an `ips` filter against a non-vec_array svar
+/// - an `ips` value out of range
 pub(crate) fn plan_state_svar(
     srec: &Srec,
     svars: &SvarTable,
     svar_name: &str,
     class_name: &str,
     state_data_start: u64,
+    filter: Filter<'_>,
 ) -> Result<ReadPlan> {
     let target = svars
         .get(svar_name)
         .ok_or_else(|| MiliError::UnknownSvar(svar_name.to_owned()))?;
     let num_type = target.num_type;
 
+    let ip_kept = resolve_ip_kept(target, filter.ips)?;
+
+    let matches = collect_matching_subrecs(srec, svars, svar_name, class_name, state_data_start)?;
+    if matches.is_empty() {
+        return Err(MiliError::NoMatchingSubrec {
+            svar: svar_name.to_owned(),
+            class: class_name.to_owned(),
+        });
+    }
+
+    let slabs = match filter.labels {
+        None => gather_all(&matches, target, &ip_kept),
+        Some(labels) => gather_by_labels(&matches, target, &ip_kept, labels, class_name)?,
+    };
+
+    Ok(ReadPlan {
+        num_type,
+        slabs,
+        state_data_start,
+    })
+}
+
+/// One subrecord that carries the queried `(svar, class)`. Holds the
+/// metadata the gather pass needs without re-walking the srec.
+struct SubrecMatch<'a> {
+    sub: &'a Subrecord,
+    /// Byte offset of this subrec inside the state's data block.
+    subrec_start: u64,
+    /// Index of `svar_name` in `sub.svar_names`.
+    svar_idx: usize,
+    /// `derive_lumps` over every svar in this subrec, in declaration
+    /// order. `lumps.sizes[svar_idx]` is the per-object byte size of
+    /// the target svar; `lumps.offsets[svar_idx]` is its in-object byte
+    /// offset.
+    lumps: Lumps,
+    /// Object count in this subrec.
+    n: usize,
+}
+
+fn collect_matching_subrecs<'a>(
+    srec: &'a Srec,
+    svars: &SvarTable,
+    svar_name: &str,
+    class_name: &str,
+    state_data_start: u64,
+) -> Result<Vec<SubrecMatch<'a>>> {
     let mut running: u64 = state_data_start;
-    let mut slabs = Vec::new();
+    let mut out = Vec::new();
     for sub in &srec.subrecords {
-        let size = subrec_byte_size(sub, svars)?;
+        let (atoms, widths) = atoms_and_widths(sub, svars)?;
+        let lumps = derive_lumps(&atoms, &widths);
+        let n = sub.object_count() as usize;
+        let size = n
+            .checked_mul(lumps.bytes_per_object())
+            .ok_or(MiliError::MalformedDirectory("query: subrec size overflow"))?;
         let subrec_start = running;
         running = running
             .checked_add(size as u64)
@@ -128,59 +220,173 @@ pub(crate) fn plan_state_svar(
         let Some(svar_idx) = sub.svar_names.iter().position(|n| n == svar_name) else {
             continue;
         };
-        if sub.organization != Organization::ResultOrdered {
-            return Err(MiliError::Unsupported("OBJECT_ORDERED query (Step 10)"));
-        }
-
-        let (atoms, widths) = atoms_and_widths(sub, svars)?;
-        let lumps = derive_lumps(&atoms, &widths);
-        let n = sub.object_count() as usize;
-        let slab_off = n
-            .checked_mul(lumps.offsets[svar_idx])
-            .ok_or(MiliError::MalformedDirectory("query: slab offset overflow"))?;
-        let slab_len = n
-            .checked_mul(lumps.sizes[svar_idx])
-            .ok_or(MiliError::MalformedDirectory("query: slab length overflow"))?;
-
-        let start = (subrec_start as usize)
-            .checked_add(slab_off)
-            .ok_or(MiliError::MalformedDirectory("query: slab start overflow"))?;
-        slabs.push(ByteSlab {
-            start,
-            len: slab_len,
+        out.push(SubrecMatch {
+            sub,
+            subrec_start,
+            svar_idx,
+            lumps,
+            n,
         });
     }
-
-    if slabs.is_empty() {
-        return Err(MiliError::NoMatchingSubrec {
-            svar: svar_name.to_owned(),
-            class: class_name.to_owned(),
-        });
-    }
-    Ok(ReadPlan { num_type, slabs })
+    Ok(out)
 }
 
-fn subrec_byte_size(sub: &Subrecord, svars: &SvarTable) -> Result<usize> {
-    let n = sub.object_count() as usize;
-    let mut per_obj: usize = 0;
-    for name in &sub.svar_names {
-        let s = svars
-            .get(name)
-            .ok_or_else(|| MiliError::UnknownSvar(name.clone()))?;
-        let cell = s
-            .atoms
-            .checked_mul(s.num_type.width())
-            .ok_or(MiliError::MalformedDirectory(
-                "query: per-svar byte size overflow",
-            ))?;
-        per_obj = per_obj
-            .checked_add(cell)
-            .ok_or(MiliError::MalformedDirectory(
-                "query: per-object byte size overflow",
-            ))?;
+fn gather_all(matches: &[SubrecMatch<'_>], target: &Svar, ip_kept: &IpKept) -> Vec<ByteSlab> {
+    let mut slabs = Vec::new();
+    for m in matches {
+        for j in 0..m.n {
+            push_object_rows(&mut slabs, m, target, ip_kept, j);
+        }
     }
-    n.checked_mul(per_obj)
-        .ok_or(MiliError::MalformedDirectory("query: subrec size overflow"))
+    slabs
+}
+
+fn gather_by_labels(
+    matches: &[SubrecMatch<'_>],
+    target: &Svar,
+    ip_kept: &IpKept,
+    labels: &[i32],
+    class_name: &str,
+) -> Result<Vec<ByteSlab>> {
+    let mut slabs = Vec::with_capacity(labels.len());
+    for &label in labels {
+        let mut found = false;
+        for m in matches {
+            if let Some(ord) = ordinal_in_subrec(&m.sub.id_blocks, label) {
+                if ord >= m.n {
+                    return Err(MiliError::MalformedDirectory(
+                        "query: label ordinal exceeds subrec object count",
+                    ));
+                }
+                push_object_rows(&mut slabs, m, target, ip_kept, ord);
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Err(MiliError::LabelNotFound {
+                label,
+                class: class_name.to_owned(),
+            });
+        }
+    }
+    Ok(slabs)
+}
+
+fn push_object_rows(
+    slabs: &mut Vec<ByteSlab>,
+    m: &SubrecMatch<'_>,
+    target: &Svar,
+    ip_kept: &IpKept,
+    ordinal: usize,
+) {
+    let s = m.svar_idx;
+    let svar_size = m.lumps.sizes[s];
+    let svar_off = m.lumps.offsets[s];
+    let base = match m.sub.organization {
+        Organization::ResultOrdered => {
+            (m.subrec_start as usize) + m.n * svar_off + ordinal * svar_size
+        }
+        Organization::ObjectOrdered => {
+            (m.subrec_start as usize) + ordinal * m.lumps.bytes_per_object() + svar_off
+        }
+    };
+    match ip_kept {
+        IpKept::All => slabs.push(ByteSlab {
+            start: base,
+            len: svar_size,
+        }),
+        IpKept::Subset { atoms_per_ip, ips } => {
+            let w = target.num_type.width();
+            let stride = *atoms_per_ip * w;
+            for &ip in ips {
+                slabs.push(ByteSlab {
+                    start: base + ip * stride,
+                    len: stride,
+                });
+            }
+        }
+    }
+}
+
+/// Map a 1-based mili object id to its 0-based ordinal inside a
+/// subrec's `id_blocks`. Returns `None` if no block covers `label`.
+pub(crate) fn ordinal_in_subrec(id_blocks: &[(i32, i32)], label: i32) -> Option<usize> {
+    let mut base: usize = 0;
+    for &(start, stop) in id_blocks {
+        if label >= start && label <= stop {
+            return Some(base + (label - start) as usize);
+        }
+        base += (stop as i64 - start as i64 + 1).max(0) as usize;
+    }
+    None
+}
+
+/// Resolved IP filter for a particular svar.
+enum IpKept {
+    /// No IP filter, or no `dims`-axis to slice — read the whole per-
+    /// object atom run.
+    All,
+    /// Selected IP indices; each emits `atoms_per_ip` atoms.
+    Subset {
+        atoms_per_ip: usize,
+        ips: Vec<usize>,
+    },
+}
+
+fn resolve_ip_kept(target: &Svar, ips: Option<&[usize]>) -> Result<IpKept> {
+    let Some(req) = ips else {
+        return Ok(IpKept::All);
+    };
+    let dims = match &target.agg {
+        SvarAgg::VecArray { dims, .. } => dims.clone(),
+        SvarAgg::Scalar | SvarAgg::Vector { .. } | SvarAgg::Array { .. } => {
+            return Err(MiliError::IpFilterNotApplicable {
+                svar: target.name.clone(),
+                agg: agg_label(&target.agg),
+            });
+        }
+    };
+    let n_ip = dims_product(&dims)?;
+    if n_ip == 0 || target.atoms == 0 {
+        return Err(MiliError::MalformedDirectory(
+            "vec_array svar has zero atoms or zero dims",
+        ));
+    }
+    // `atoms` already accounts for vector components within each IP
+    // slot (see `Svar::atoms` doc); per-IP atom count is total / IPs.
+    let atoms_per_ip = target.atoms / n_ip;
+    for &ip in req {
+        if ip >= n_ip {
+            return Err(MiliError::IpOutOfRange { ip, atoms: n_ip });
+        }
+    }
+    Ok(IpKept::Subset {
+        atoms_per_ip,
+        ips: req.to_vec(),
+    })
+}
+
+fn agg_label(agg: &SvarAgg) -> &'static str {
+    match agg {
+        SvarAgg::Scalar => "scalar",
+        SvarAgg::Vector { .. } => "vector",
+        SvarAgg::Array { .. } => "array",
+        SvarAgg::VecArray { .. } => "vec_array",
+    }
+}
+
+fn dims_product(dims: &[i32]) -> Result<usize> {
+    let mut acc: usize = 1;
+    for &d in dims {
+        if d < 0 {
+            return Err(MiliError::MalformedDirectory("svar: negative dim"));
+        }
+        acc = acc
+            .checked_mul(d as usize)
+            .ok_or(MiliError::MalformedDirectory("svar: dim product overflow"))?;
+    }
+    Ok(acc)
 }
 
 fn atoms_and_widths(sub: &Subrecord, svars: &SvarTable) -> Result<(Vec<usize>, Vec<usize>)> {
@@ -214,29 +420,12 @@ mod tests {
         }
     }
 
-    // Build an SvarTable with a small handcrafted dict.
+    /// Test-only svar spec: `(name, num_type, atoms_per_object)`. The
+    /// agg encoding matches the actual STATE_VAR_DICT parser: atoms==1
+    /// is encoded as `Scalar` (agg=0), atoms>1 as `Array` (agg=2) with
+    /// a single dim. Use [`make_vec_array_svars`] when a vec_array agg
+    /// is needed (for IP-filter coverage).
     fn make_svars(specs: &[(&str, NumType, usize)]) -> SvarTable {
-        // Encode a single STATE_VAR_DICT payload covering the specs.
-        // qty_svars = len(specs), then per-svar: 4-int header
-        //   [qty_subrecs_unused, agg=SCALAR(0), num_type_code, atoms (ignored)],
-        // ... actually SvarTable::build follows the real on-disk dual-stream
-        // format. Reusing the parser here would be heavyweight for a unit
-        // test. Instead, build the table via a private constructor.
-        //
-        // We don't have a public test-only ctor — so this test relies on
-        // svar.rs's tests for parser coverage and instead exercises the
-        // plan math against a hand-built `SvarTable` we get by feeding
-        // make_dict bytes through the parser.
-        use_full_parser_for_test(specs)
-    }
-
-    fn use_full_parser_for_test(specs: &[(&str, NumType, usize)]) -> SvarTable {
-        // Encode a STATE_VAR_DICT payload that the real parser will
-        // accept. Layout: 2-int header [qty_int_words including the
-        // header, qty_char_bytes] then per-svar int slots, then the
-        // char stream. SCALAR (atoms == 1) gets [agg=0, type_code];
-        // anything else uses ARRAY (agg=2) with rank=1 and a single
-        // dim of `atoms`.
         let mut svar_ints: Vec<i32> = Vec::new();
         let mut chars: Vec<u8> = Vec::new();
         for (name, nt, atoms) in specs {
@@ -260,14 +449,57 @@ mod tests {
             chars.extend_from_slice(name.as_bytes());
             chars.push(0);
         }
+        finalize_svar_table(&svar_ints, &chars)
+    }
+
+    /// Build a single-svar `SvarTable` carrying a vec_array svar with
+    /// the given `dims` and component names. Components are scalar
+    /// svars defined inline (the recursion path inside
+    /// [`crate::svar::SvarTable::build`]).
+    fn make_vec_array_svars(name: &str, nt: NumType, dims: &[i32], comps: &[&str]) -> SvarTable {
+        let code = match nt {
+            NumType::Float4 => 2,
+            NumType::Float8 => 4,
+            NumType::Int4 => 5,
+            NumType::Int8 => 7,
+        };
+        let mut svar_ints: Vec<i32> = Vec::new();
+        let mut chars: Vec<u8> = Vec::new();
+        svar_ints.push(3);
+        svar_ints.push(code);
+        svar_ints.push(dims.len() as i32);
+        for &d in dims {
+            svar_ints.push(d);
+        }
+        svar_ints.push(comps.len() as i32);
+        chars.extend_from_slice(name.as_bytes());
+        chars.push(0);
+        chars.extend_from_slice(name.as_bytes());
+        chars.push(0);
+        for c in comps {
+            chars.extend_from_slice(c.as_bytes());
+            chars.push(0);
+        }
+        for c in comps {
+            svar_ints.push(0);
+            svar_ints.push(code);
+            chars.extend_from_slice(c.as_bytes());
+            chars.push(0);
+            chars.extend_from_slice(c.as_bytes());
+            chars.push(0);
+        }
+        finalize_svar_table(&svar_ints, &chars)
+    }
+
+    fn finalize_svar_table(svar_ints: &[i32], chars: &[u8]) -> SvarTable {
         let qty_int_words = (svar_ints.len() as i32) + 2;
         let qty_char_bytes = chars.len() as i32;
         let mut full_ints = vec![qty_int_words, qty_char_bytes];
-        full_ints.extend(&svar_ints);
+        full_ints.extend_from_slice(svar_ints);
         let int_bytes: Vec<u8> = full_ints.iter().flat_map(|w| w.to_le_bytes()).collect();
         let mut payload = Vec::new();
         payload.extend_from_slice(&int_bytes);
-        payload.extend_from_slice(&chars);
+        payload.extend_from_slice(chars);
 
         let pool = NamePool::parse(b"dict\0", 1).unwrap();
         let dir = Directory {
@@ -304,8 +536,41 @@ mod tests {
         }
     }
 
+    fn no_filter() -> Filter<'static> {
+        Filter {
+            labels: None,
+            ips: None,
+        }
+    }
+
+    // ---------------------------- ordinal mapping --------------------------
+
     #[test]
-    fn plan_single_scalar_result_ordered() {
+    fn ordinal_within_single_block_is_offset_from_start() {
+        assert_eq!(ordinal_in_subrec(&[(10, 20)], 10), Some(0));
+        assert_eq!(ordinal_in_subrec(&[(10, 20)], 15), Some(5));
+        assert_eq!(ordinal_in_subrec(&[(10, 20)], 20), Some(10));
+        assert_eq!(ordinal_in_subrec(&[(10, 20)], 9), None);
+        assert_eq!(ordinal_in_subrec(&[(10, 20)], 21), None);
+    }
+
+    #[test]
+    fn ordinal_across_multi_blocks_accumulates_prior_block_sizes() {
+        // Three blocks: [1..3]=3, [10..12]=3, [100..101]=2.
+        // Label 11 → 3 + (11-10) = 4. Label 100 → 6 + 0 = 6.
+        let blocks = vec![(1, 3), (10, 12), (100, 101)];
+        assert_eq!(ordinal_in_subrec(&blocks, 1), Some(0));
+        assert_eq!(ordinal_in_subrec(&blocks, 3), Some(2));
+        assert_eq!(ordinal_in_subrec(&blocks, 11), Some(4));
+        assert_eq!(ordinal_in_subrec(&blocks, 100), Some(6));
+        assert_eq!(ordinal_in_subrec(&blocks, 101), Some(7));
+        assert_eq!(ordinal_in_subrec(&blocks, 5), None);
+    }
+
+    // ---------------------------- RESULT_ORDERED plans ---------------------
+
+    #[test]
+    fn plan_single_scalar_result_ordered_no_filter() {
         let svars = make_svars(&[("nodpos", NumType::Float4, 1)]);
         let srec = Srec {
             srec_id: 0,
@@ -318,15 +583,12 @@ mod tests {
                 &[(1, 10)],
             )],
         };
-        let plan = plan_state_svar(&srec, &svars, "nodpos", "node", 100).unwrap();
+        let plan = plan_state_svar(&srec, &svars, "nodpos", "node", 100, no_filter()).unwrap();
         assert_eq!(plan.num_type, NumType::Float4);
-        assert_eq!(
-            plan.slabs,
-            vec![ByteSlab {
-                start: 100,
-                len: 40
-            }]
-        );
+        // No-filter gather emits one slab per object, length 4.
+        assert_eq!(plan.slabs.len(), 10);
+        assert_eq!(plan.slabs[0], ByteSlab { start: 100, len: 4 });
+        assert_eq!(plan.slabs[9], ByteSlab { start: 136, len: 4 });
         assert_eq!(plan.total_bytes(), 40);
     }
 
@@ -344,22 +606,29 @@ mod tests {
                 mk_subrec("node", Organization::ResultOrdered, &["svB"], &[(1, 10)]),
             ],
         };
-        let plan = plan_state_svar(&srec, &svars, "svB", "node", 1000).unwrap();
-        // 1000 (state start) + 20 (brick subrec) = 1020
+        let plan = plan_state_svar(&srec, &svars, "svB", "node", 1000, no_filter()).unwrap();
+        // 1000 + 20 = 1020 is the node-subrec start; per-object slabs.
+        assert_eq!(plan.slabs.len(), 10);
         assert_eq!(
-            plan.slabs,
-            vec![ByteSlab {
+            plan.slabs[0],
+            ByteSlab {
                 start: 1020,
-                len: 40
-            }]
+                len: 4
+            }
+        );
+        assert_eq!(
+            plan.slabs[9],
+            ByteSlab {
+                start: 1056,
+                len: 4
+            }
         );
     }
 
     #[test]
     fn plan_picks_second_svar_in_subrec() {
         // subrec has [svA scalar f32, svB scalar f32] over 4 objects.
-        // svB slab starts at subrec_start + N * lump_offsets[1]
-        //   = 0 + 4 * 4 = 16. Length = 4 * 4 = 16.
+        // svB slab base: subrec_start + N * lump_offsets[1] = 0 + 4*4 = 16.
         let svars = make_svars(&[("svA", NumType::Float4, 1), ("svB", NumType::Float4, 1)]);
         let srec = Srec {
             srec_id: 0,
@@ -372,14 +641,14 @@ mod tests {
                 &[(1, 4)],
             )],
         };
-        let plan = plan_state_svar(&srec, &svars, "svB", "node", 0).unwrap();
-        assert_eq!(plan.slabs, vec![ByteSlab { start: 16, len: 16 }]);
+        let plan = plan_state_svar(&srec, &svars, "svB", "node", 0, no_filter()).unwrap();
+        assert_eq!(plan.slabs.len(), 4);
+        assert_eq!(plan.slabs[0], ByteSlab { start: 16, len: 4 });
+        assert_eq!(plan.slabs[3], ByteSlab { start: 28, len: 4 });
     }
 
     #[test]
-    fn plan_handles_vector_atoms() {
-        // ARRAY rank=1 atoms=3 (e.g. position vector). N=4 objects →
-        // bytes = 4 * 3 * 4 = 48.
+    fn plan_handles_vector_atoms_no_filter() {
         let svars = make_svars(&[("nodpos", NumType::Float4, 3)]);
         let srec = Srec {
             srec_id: 0,
@@ -392,13 +661,14 @@ mod tests {
                 &[(1, 4)],
             )],
         };
-        let plan = plan_state_svar(&srec, &svars, "nodpos", "node", 0).unwrap();
-        assert_eq!(plan.slabs, vec![ByteSlab { start: 0, len: 48 }]);
+        let plan = plan_state_svar(&srec, &svars, "nodpos", "node", 0, no_filter()).unwrap();
+        assert_eq!(plan.slabs.len(), 4);
+        assert_eq!(plan.slabs[0], ByteSlab { start: 0, len: 12 });
+        assert_eq!(plan.slabs[3], ByteSlab { start: 36, len: 12 });
     }
 
     #[test]
     fn plan_concatenates_across_matching_subrecs() {
-        // Two subrecs with the same (svar, class), different id ranges.
         let svars = make_svars(&[("svA", NumType::Float4, 1)]);
         let srec = Srec {
             srec_id: 0,
@@ -409,18 +679,16 @@ mod tests {
                 mk_subrec("node", Organization::ResultOrdered, &["svA"], &[(100, 102)]),
             ],
         };
-        let plan = plan_state_svar(&srec, &svars, "svA", "node", 0).unwrap();
-        assert_eq!(
-            plan.slabs,
-            vec![
-                ByteSlab { start: 0, len: 12 },
-                ByteSlab { start: 12, len: 12 },
-            ]
-        );
+        let plan = plan_state_svar(&srec, &svars, "svA", "node", 0, no_filter()).unwrap();
+        assert_eq!(plan.slabs.len(), 6);
+        assert_eq!(plan.slabs[0], ByteSlab { start: 0, len: 4 });
+        assert_eq!(plan.slabs[5], ByteSlab { start: 20, len: 4 });
     }
 
     #[test]
-    fn plan_errors_on_object_ordered_match() {
+    fn plan_label_filter_emits_only_requested_labels_in_argument_order() {
+        // 4 objects, RO scalar f32. Request labels [3,1] → ordinals
+        // [2,0], slabs in that order.
         let svars = make_svars(&[("svA", NumType::Float4, 1)]);
         let srec = Srec {
             srec_id: 0,
@@ -428,14 +696,267 @@ mod tests {
             srec_size: 0,
             subrecords: vec![mk_subrec(
                 "node",
+                Organization::ResultOrdered,
+                &["svA"],
+                &[(1, 4)],
+            )],
+        };
+        let f = Filter {
+            labels: Some(&[3, 1]),
+            ips: None,
+        };
+        let plan = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap();
+        assert_eq!(
+            plan.slabs,
+            vec![ByteSlab { start: 8, len: 4 }, ByteSlab { start: 0, len: 4 },]
+        );
+    }
+
+    #[test]
+    fn plan_label_filter_routes_across_multi_block_subrec() {
+        // Single subrec with two blocks [1..3] + [10..12]. Labels
+        // [11, 2] → ordinals [4, 1].
+        let svars = make_svars(&[("svA", NumType::Float4, 1)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "node",
+                Organization::ResultOrdered,
+                &["svA"],
+                &[(1, 3), (10, 12)],
+            )],
+        };
+        let f = Filter {
+            labels: Some(&[11, 2]),
+            ips: None,
+        };
+        let plan = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap();
+        // N=6, lump_size=4. ord=4 → 16; ord=1 → 4.
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab { start: 16, len: 4 },
+                ByteSlab { start: 4, len: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_label_filter_errors_when_label_absent() {
+        let svars = make_svars(&[("svA", NumType::Float4, 1)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "node",
+                Organization::ResultOrdered,
+                &["svA"],
+                &[(1, 3)],
+            )],
+        };
+        let f = Filter {
+            labels: Some(&[5]),
+            ips: None,
+        };
+        let err = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap_err();
+        assert!(matches!(err, MiliError::LabelNotFound { label: 5, .. }));
+    }
+
+    // ---------------------------- OBJECT_ORDERED plans ---------------------
+
+    #[test]
+    fn plan_object_ordered_scalar_no_filter() {
+        // OO subrec with one scalar f32, 3 objects. Object j starts at
+        // subrec_start + j * 4; svar offset within object is 0.
+        let svars = make_svars(&[("svA", NumType::Float4, 1)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
                 Organization::ObjectOrdered,
                 &["svA"],
                 &[(1, 3)],
             )],
         };
-        let err = plan_state_svar(&srec, &svars, "svA", "node", 0).unwrap_err();
-        assert!(matches!(err, MiliError::Unsupported(_)));
+        let plan = plan_state_svar(&srec, &svars, "svA", "brick", 100, no_filter()).unwrap();
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab { start: 100, len: 4 },
+                ByteSlab { start: 104, len: 4 },
+                ByteSlab { start: 108, len: 4 },
+            ]
+        );
     }
+
+    #[test]
+    fn plan_object_ordered_mixed_widths_walks_per_svar_lumps() {
+        // OO subrec carrying [stress(6 f32 = 24B), eps(1 f32 = 4B),
+        // flag(1 i32 = 4B)] over N=5 objects. Per-object stride is 32.
+        // Pulling `eps` should yield slabs at base + j*32 + 24, length 4.
+        let svars = make_svars(&[
+            ("stress", NumType::Float4, 6),
+            ("eps", NumType::Float4, 1),
+            ("flag", NumType::Int4, 1),
+        ]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "shell",
+                Organization::ObjectOrdered,
+                &["stress", "eps", "flag"],
+                &[(1, 5)],
+            )],
+        };
+        let plan = plan_state_svar(&srec, &svars, "eps", "shell", 0, no_filter()).unwrap();
+        assert_eq!(plan.slabs.len(), 5);
+        for (j, slab) in plan.slabs.iter().enumerate() {
+            assert_eq!(slab.start, j * 32 + 24);
+            assert_eq!(slab.len, 4);
+        }
+
+        // And the i32 flag — offset 28 in each object.
+        let plan2 = plan_state_svar(&srec, &svars, "flag", "shell", 0, no_filter()).unwrap();
+        assert_eq!(plan2.num_type, NumType::Int4);
+        for (j, slab) in plan2.slabs.iter().enumerate() {
+            assert_eq!(slab.start, j * 32 + 28);
+            assert_eq!(slab.len, 4);
+        }
+    }
+
+    #[test]
+    fn plan_object_ordered_label_filter_uses_ordinal() {
+        // Same OO shell subrec as above; request labels [4, 1] → ordinals
+        // [3, 0]. Slabs follow the request order.
+        let svars = make_svars(&[("stress", NumType::Float4, 6), ("eps", NumType::Float4, 1)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "shell",
+                Organization::ObjectOrdered,
+                &["stress", "eps"],
+                &[(1, 5)],
+            )],
+        };
+        let f = Filter {
+            labels: Some(&[4, 1]),
+            ips: None,
+        };
+        let plan = plan_state_svar(&srec, &svars, "eps", "shell", 0, f).unwrap();
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab {
+                    start: 3 * 28 + 24,
+                    len: 4
+                },
+                ByteSlab { start: 24, len: 4 },
+            ]
+        );
+    }
+
+    // ---------------------------- vec_array IP filter ----------------------
+
+    #[test]
+    fn plan_vec_array_ip_filter_picks_per_ip_slab_per_object() {
+        // vec_array stress with dims=[3] (3 IPs) and 6 f32 components.
+        // atoms = 18, per-object byte size = 72. RO over 2 objects:
+        // svar slab starts at 0, length 144.
+        // Requesting ips=[0,2] should emit, per object, slabs at
+        //   base + 0 * (6*4) = base
+        //   base + 2 * (6*4) = base + 48
+        // ip stride = 6*4 = 24, len 24.
+        let svars = make_vec_array_svars(
+            "stress",
+            NumType::Float4,
+            &[3],
+            &["sx", "sy", "sz", "sxy", "syz", "szx"],
+        );
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "shell",
+                Organization::ResultOrdered,
+                &["stress"],
+                &[(1, 2)],
+            )],
+        };
+        let f = Filter {
+            labels: None,
+            ips: Some(&[0, 2]),
+        };
+        let plan = plan_state_svar(&srec, &svars, "stress", "shell", 0, f).unwrap();
+        // obj 0 base = 0; obj 1 base = 72.
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab { start: 0, len: 24 },
+                ByteSlab { start: 48, len: 24 },
+                ByteSlab { start: 72, len: 24 },
+                ByteSlab {
+                    start: 120,
+                    len: 24
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_ip_filter_rejects_non_vec_array_svar() {
+        let svars = make_svars(&[("svA", NumType::Float4, 1)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "node",
+                Organization::ResultOrdered,
+                &["svA"],
+                &[(1, 3)],
+            )],
+        };
+        let f = Filter {
+            labels: None,
+            ips: Some(&[0]),
+        };
+        let err = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap_err();
+        assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
+    }
+
+    #[test]
+    fn plan_ip_filter_rejects_out_of_range_index() {
+        let svars = make_vec_array_svars("stress", NumType::Float4, &[2], &["sx", "sy"]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "shell",
+                Organization::ResultOrdered,
+                &["stress"],
+                &[(1, 2)],
+            )],
+        };
+        let f = Filter {
+            labels: None,
+            ips: Some(&[5]),
+        };
+        let err = plan_state_svar(&srec, &svars, "stress", "shell", 0, f).unwrap_err();
+        assert!(matches!(err, MiliError::IpOutOfRange { ip: 5, .. }));
+    }
+
+    // ---------------------------- error paths ------------------------------
 
     #[test]
     fn plan_errors_when_no_subrec_matches() {
@@ -451,7 +972,7 @@ mod tests {
                 &[(1, 3)],
             )],
         };
-        let err = plan_state_svar(&srec, &svars, "svA", "node", 0).unwrap_err();
+        let err = plan_state_svar(&srec, &svars, "svA", "node", 0, no_filter()).unwrap_err();
         assert!(matches!(err, MiliError::NoMatchingSubrec { .. }));
     }
 
@@ -464,7 +985,30 @@ mod tests {
             srec_size: 0,
             subrecords: Vec::new(),
         };
-        let err = plan_state_svar(&srec, &svars, "missing", "node", 0).unwrap_err();
+        let err = plan_state_svar(&srec, &svars, "missing", "node", 0, no_filter()).unwrap_err();
         assert!(matches!(err, MiliError::UnknownSvar(_)));
+    }
+
+    // ---------------------------- rebased ----------------------------------
+
+    #[test]
+    fn rebased_shifts_all_slabs_by_delta() {
+        let plan = ReadPlan {
+            num_type: NumType::Float4,
+            slabs: vec![
+                ByteSlab { start: 100, len: 4 },
+                ByteSlab { start: 200, len: 4 },
+            ],
+            state_data_start: 100,
+        };
+        let new = plan.rebased(500).unwrap();
+        assert_eq!(new.state_data_start, 500);
+        assert_eq!(
+            new.slabs,
+            vec![
+                ByteSlab { start: 500, len: 4 },
+                ByteSlab { start: 600, len: 4 },
+            ]
+        );
     }
 }

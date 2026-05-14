@@ -20,7 +20,7 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | ✅ done    | TBD   | Dual int/char stream parsers; `derive_lumps` covers both organisations; svar count on basic1 = 93 (with recursive components). |
 | 8    | `buffer.rs` and `endian.rs`                                 | ✅ done    | TBD   | `MiliBuffer<T: ByteSwap>` (pub(crate)) with `Mmap`/`Owned` storage, alignment check, byteswap fallbacks; `ByteSwap` trait for `i32`/`i64`/`f32`/`f64`. Mesh / connectivity / TI int-array decoders all route through `endian::for_each_swap`. Phase 1 exit. |
 | 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ✅ done    | TBD   | `Database::state_var_values(svar, class, state) -> StateValues::{F32,F64,I32,I64}`; lazy state-file mmap cache; per-state header skip is 8 bytes (i32 srec_id + f32 time); `OBJECT_ORDERED`, label / material / IP filters, and component-name lookups return typed errors until Steps 10 / 11. |
-| 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ⏳ pending |       |                                                             |
+| 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ✅ done    | TBD   | `Database::query(&QueryArgs)` with labels / states / materials / ips filters; `OBJECT_ORDERED` gather; vec_array IP filter (components-fastest, IP-slowest); material → label via `ELEM_CONNS` mat_id column; `LabelNotFound` / `UnknownMaterial` / `IpFilterNotApplicable` / `IpOutOfRange` typed errors; `Svar::atoms` now accumulates component atom counts (was `comps.len()` — broke for vec_array-of-vectors like d3samp4's `es_1a`). Component-name lookups (`"sx"` → `"stress"`, `hx[3]`) still defer to Step 11. |
 | 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ⏳ pending |       | `test_bugfixes.py:251-296`.                                 |
 | 12   | rayon over states; criterion benches                        | ⏳ pending |       | Target ≥ 2× mili-python throughput.                         |
 | 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | ⏳ pending |       | One-hour clean-run gate.                                    |
@@ -35,9 +35,9 @@ because some sit on top of multiple steps.
 | Test                                          | Source                                | Status     |
 |-----------------------------------------------|---------------------------------------|:-----------|
 | Non-sequential mesh-object blocks coalesce    | `test_bugfixes.py:25-38`              | ✅ done (Step 5: `id_blocks: Vec<(i32, i32)>`) |
-| Double-precision nodal positions              | `test_bugfixes.py:62-72`              | 🟡 metadata covered (Step 7: `dbl_nodtang`'s `nodtang` svar resolves to `NumType::Float8`); blocked on the read path itself until Step 9 |
-| Vec-array with mixed component widths         | `test_bugfixes.py:119-172`            | 🟡 metadata covered (Step 7: `derive_lumps` unit test exercises mixed widths for both organisations); blocked on the read path until Step 9 |
-| Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | ⏳ blocked on the query layer (Step 10) — srec metadata in place |
+| Double-precision nodal positions              | `test_bugfixes.py:62-72`              | ✅ done (Step 10: `state_var_values` returns `StateValues::F64` for `Float8` svars; covered by the per-numtype gather macro) |
+| Vec-array with mixed component widths         | `test_bugfixes.py:119-172`            | ✅ done (Step 10: `Svar::atoms` accumulates component atom counts; d3samp4 `es_1a` (`vec_array<[stress(6), eps(1)]>`) round-trips through `query()` with `ips` filter — fixture test in `tests/query_fixtures.rs`) |
+| Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | 🟡 IP filter mechanism in place (Step 10); the cross-subrec IP-label-set validation that turns inconsistent counts into a typed error needs the element-set IP-label lookup, which lands with component-name resolution in Step 11. |
 | Array-svar subscript notation                 | `test_bugfixes.py:251-296`            | ⏳ Step 11 |
 | `dir_version_2` fixture                       | corpus                                | ✅ done (Step 2) |
 | State end marker `~` round-trip               | corpus (read), C oracle (write)       | ✅ read    |
@@ -48,8 +48,8 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | 145   | Step 9       |
-| Fixture parity (corpus reads)  | 42    | Step 9       |
+| `cargo test --workspace`       | 164   | Step 10      |
+| Fixture parity (corpus reads)  | 50    | Step 10      |
 | mili-python parity (`pyo3`)    | —     | not wired yet — Phase 2 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
 | Criterion benches              | —     | Step 12      |
@@ -98,6 +98,30 @@ Track in `plan.md` § "Resolved questions". Current entries:
   write offsets. The Rust reader skips 8 bytes after `state.offset`
   before computing subrec offsets. The format doc needs a fix-up in
   the next planning pass.
+- VEC_ARRAY inner-order: components-fastest, IP-slowest (Step 10).
+  `planning/shared/format.md` § "Subrecord byte-layout matrix" reads
+  "array-dim indices vary fastest, then component (vector) index" —
+  for a 1-D `dims=[n_ip]` vec_array this would put IPs fastest. The
+  Python writer / reader (`reference/mili-python/src/mili/datatypes.py:
+  236-247`, the `[sv.comp_layout for sv in svars] * prod(dims)` line)
+  lays out components inner, IPs outer, and the d3samp4 `es_1a`
+  fixture round-trips that layout against direct file reads (see
+  `tests/query_fixtures.rs::d3samp4_vec_array_*`). The Rust IP filter
+  follows Python; the format doc needs the same fix-up that Step 9
+  flagged for the per-state header. mili-python's `test_bugfixes.py::
+  VectorsInVectorArrays` numeric goldens couldn't be cross-checked
+  without a working mili-python install in this environment; the Rust
+  layout is verified self-consistent against direct decode of the
+  state-file bytes.
+- `Svar::atoms` for nested aggregates (Step 10 fix-up). Step 7's
+  `parse_one` computed `atoms = comps.len()` for vector svars and
+  `prod(dims) * comps.len()` for vec_array. That under-counts a
+  vec_array whose components are themselves vectors (d3samp4's
+  `es_1a` = `vec_array<[stress(6), eps(1)]>`: should be `2 * 7 = 14`,
+  was `2 * 2 = 4`). The parser now accumulates `sum(comp.atoms)`
+  recursively via the already-parsed components in the table —
+  components are always parsed before their parent (svar.rs's
+  recursion at line 274-280 owns this invariant).
 - `MiliBuffer` public-vs-private (Step 8). Kept `pub(crate)` for now —
   `Nodes` / `Connectivity` / `ArrayParam` keep their existing public
   shapes (which already wrap the same bytes), and the byteswap path
@@ -121,24 +145,24 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   matching the simplest reading of `miliinternal.py:463-474`. Revisit
   once a fixture surfaces a non-integer setname.
 
-## Module shape (post-Step 9)
+## Module shape (post-Step 10)
 
 ```
 crates/mili-rs/src/
-├── lib.rs              done (re-exports for Steps 0-9)
-├── error.rs            done — `MiliError` (+ `Unsupported`, `NoMatchingSubrec`)
+├── lib.rs              done (re-exports for Steps 0-10, including `QueryArgs`)
+├── error.rs            done — `MiliError` (+ `Unsupported`, `NoMatchingSubrec`, `LabelNotFound`, `IpOutOfRange`, `IpFilterNotApplicable`, `UnknownMaterial`)
 ├── header.rs           done — Step 1
 ├── directory.rs        done — Step 2
 ├── param.rs            done — Step 3
 ├── ti.rs               done — Step 3 (v1 stub)
 ├── state.rs            done — Step 4
-├── family.rs           done — Step 4 (Database open) + Step 9 (state-file mmap cache, `state_var_values`)
+├── family.rs           done — Step 4 (Database open) + Step 9 (state-file mmap cache, `state_var_values`) + Step 10 (`query(&QueryArgs)` with labels/states/materials/ips filters, material → label via `ELEM_CONNS`)
 ├── mesh.rs             done — Step 5
-├── svar.rs             done — Step 7
+├── svar.rs             done — Step 7, Step 10 (atom-count fix for vec_array-of-vectors)
 ├── srec.rs             done — Step 7 (includes `derive_lumps`)
 ├── endian.rs           done — Step 8 (`ByteSwap`, `for_each_swap`, `swap_*_slice`)
 ├── buffer.rs           done — Step 8 (`MiliBuffer<T>`, `pub(crate)`)
-└── query.rs            done — Step 9 (RESULT_ORDERED single-svar single-state); Steps 10-11 add filters / OBJECT_ORDERED / subscript
+└── query.rs            done — Step 10 (RESULT_ORDERED + OBJECT_ORDERED gather, label / IP filters, multi-state `ReadPlan::rebased`); Step 11 adds component-name lookups (`"sx"` → `"stress"`, `hx[3]`)
 ```
 
 ## How to update this file

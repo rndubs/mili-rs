@@ -22,7 +22,7 @@ pub mod ti;
 
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};
 pub use error::{MiliError, Result};
-pub use family::Database;
+pub use family::{Database, QueryArgs};
 pub use header::{Endianness, Header, PartitionScheme, PrecisionLimit};
 pub use mesh::{
     decode_elem_conns, decode_nodes, Connectivity, MaterialId, Mesh, MeshId, MeshTable, Nodes,
