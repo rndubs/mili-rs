@@ -5,12 +5,10 @@ design rationale lives in [`plan.md`](plan.md).
 
 ## What's next
 
-**Phase 1 is complete** modulo a single CI-time gate. The natural next
-move is **starting Phase 2: `mili-py`** — see
-[`../mili-py/README.md`](../mili-py/README.md) for the existing design
-notes and the M1→M6 milestone breakdown. The Rust-side surface is
-narrowed and validated; Phase 2 wraps `Database::open` /
-`Database::query` and replaces the existing pure-Python `mili` package.
+**Phase 1 is complete** for the single-A-file read path. Before
+starting Phase 2 (`mili-py`), we firm up the Rust layer with three
+items so we don't end up patching two layers in lockstep. See
+**Phase 1.5** below.
 
 The one Phase-1 follow-up that can't be closed from a normal PR:
 
@@ -19,6 +17,78 @@ The one Phase-1 follow-up that can't be closed from a normal PR:
   to ✅ once a maintainer confirms the first cron run lands clean (or
   manually triggers `workflow_dispatch` from the Actions UI). No code
   change required from here.
+
+## Phase 1.5 — pre-`mili-py` read-side firming
+
+Three items to land before starting `mili-py` M1. Each closes a gap
+we found while auditing what the Rust layer covers vs. what the C
+library and the upstream test corpora cover.
+
+| Step | Lands                                                                | Status |
+|-----:|----------------------------------------------------------------------|:-------|
+| 17   | Multi-A-file orchestration in Rust (`DatabaseSet`, parallel open)    | ⬜ todo |
+| 18   | C-library + `xmilics` parity coverage and end-to-end reader smoke    | ⬜ todo |
+| 19   | numpy/rayon integration plan pinned in `plan.md` § FFI integration plan | ✅ done |
+
+**Step 17 — `DatabaseSet` (multi-A-file orchestration in Rust).**
+MPI-segmented runs write one mili family per rank (`run.plt000A`,
+`run.plt001A`, …). The C library opens each as a separate family;
+mili-python orchestrates the fan-out in `LoopWrapper` /
+`ServerWrapper`. We move that orchestration into Rust so the
+multi-fragment open path can use rayon over fragments and so the
+mili-py binding doesn't need a parallel-wrapper layer on top.
+
+Concretely:
+
+- New module `crates/mili-rs/src/family_set.rs`.
+- `DatabaseSet::open(base: &Path)` — discover fragments via the
+  mili-python regex (`re.escape(base) + r"(\d*)A$"`,
+  `reference/mili-python/src/mili/afileIO.py:34-57`), open them in
+  parallel with `rayon::par_iter`.
+- Same accessor surface as `Database` (`labels`, `times`,
+  `class_names`, `nodes`, `connectivity`, `state_maps`, `query`).
+- Merge semantics match `mili-python/src/mili/reductions.py`
+  (`list_concatenate_unique`, `dictionary_merge_no_concat`).
+- Single-fragment paths still go through `Database` directly;
+  `DatabaseSet::open` on a 1-fragment base returns a thin wrapper.
+
+**Step 18 — C-library + `xmilics` parity coverage.** The
+`reference/mili` submodule (initialized via `git submodule update
+--init reference/mili`) ships test fixtures the mili-python corpus
+doesn't have, plus baseline files for byte-level verification.
+
+Concretely:
+
+- Add `crates/mili-rs/tests/parity_xmilics.rs`. Cover the multi-proc
+  inputs from `reference/mili/test/xmilics/`: `d3samp6` (8 procs),
+  `bar1` (8 procs), `shell_mat2` (11 procs). Open each fragment
+  individually, diff one representative query per fragment against
+  mili-python reading the same fragment.
+- Add `crates/mili-rs/tests/smoke_full_corpus.rs`. `reader.c`-style:
+  for every fixture in both `reference/mili-python/tests/data/` and
+  `reference/mili/test/`, open + enumerate all classes, svars,
+  states, read every state. No oracle — just "doesn't panic, counts
+  add up." Catches the long tail across all 14 serial + 2 parallel
+  + 3 v3 + 9 xmilics fixtures.
+- Once Step 17 lands, add a `DatabaseSet`-level row in the parity
+  matrix for `d3samp6` (the most-used parallel fixture).
+- Both new test files gate on submodule presence the same way the
+  existing fixture tests do (early-return when corpus absent).
+
+**Step 19 — pin the numpy/rayon plan in `plan.md`.** No Rust code
+changes; this is documentation so `mili-py` M1 starts from a
+settled design. Updates land in `plan.md` § "FFI integration plan"
+(new section). Captures:
+
+- `pyo3::Python::allow_threads` wraps every `Database::query`
+  invocation in the binding; rayon's `par_chunks_mut` runs with
+  the GIL released.
+- `IntoPyArray::into_pyarray_bound` is the default zero-FFI-copy
+  return path — moves the owned `Vec<T>` into a numpy array, no
+  byte copy at the FFI boundary.
+- `Arc<Mmap>`-backed `PyCapsule` zero-decode path is deferred to
+  Phase 2 M5 (profiling-driven). Only pays off for single-slab,
+  aligned, native-endian queries.
 
 Everything below is reference material for future work.
 
@@ -76,7 +146,8 @@ All seven from `test_bugfixes.py` are accounted for:
 
 The Rust core is honest about what it does and doesn't cover. Phase 2
 will run into these — none of them block Phase 2 from starting, but
-the bindings layer should surface the typed errors cleanly.
+the bindings layer should surface the typed errors cleanly. Phase 1.5
+closes the multi-A-file gap before Phase 2; the others remain.
 
 - **Aggregate VEC_ARRAY queries** (e.g. `db.query("es_1a", "shell")`)
   work in mili-rs end-to-end, but mili-python raises `IndexError` on
@@ -138,10 +209,77 @@ Surfaced in `plan.md § Open questions`; none block Phase 2 start:
 - Element-set name → material id parse rule — Step 6 currently maps only sets whose name parses as `i32`. Revisit on non-integer setname.
 - Aggregate VEC_ARRAY parity oracle — see "Known gaps Phase 2 inherits".
 
+## Reference: mili C library test corpus
+
+The `reference/mili` submodule (not auto-checked-out — run
+`git submodule update --init reference/mili` once) ships its own
+test corpus and baseline files. Key facts for Phase 1.5:
+
+**Layout** (`reference/mili/test/`):
+
+- `mili/mili_C_tests/` (12 tests, all `num_procs: 1`). Mostly
+  write-path: `mixdb_wrt_stream/subrec/mixed_subrecords`, `restart*`
+  (5 variants), `state_write_check`, `value_change`, `del_test`. The
+  read-relevant sources are `reader.c` (round-trip read-then-write),
+  `titest.c` (TI table iteration), `mode_test.c`, and `MiliDiff.c`
+  (binary diff utility for baselines).
+- `mili/version_3_mili_C_tests/` (12 tests). Same suite for the v3
+  directory format.
+- `mili/mili_fortran_tests/` (~12 tests). Fortran-binding tests; same
+  library, different binding. No new Rust coverage.
+- `xmilics/` (9 fixtures). Multi-proc MPI-segmented inputs — these
+  are the high-value fixtures for Phase 1.5 Step 18: `d3samp6`
+  (8 procs), `bar1` (8 procs), `shell_mat2` (11 procs), `basic2`,
+  `cylinder`, `cylinder_4hex`, `ml40`, `d3samp6_tfile`, `bar5`.
+- Test definitions: `mili_test_definitions.py`,
+  `xmilics_test_definitions.py`. Each test has a `.baseline` file
+  (binary expected output) consumed by `MiliDiff.c`.
+
+**What the C library does with MPI fragments** (relevant to Step 17):
+
+- `mc_open` opens *one* family at a time (`reference/mili/src/mili.c:445`).
+  No combined-view API in the library itself.
+- The `nproc` scalar param tells you the fragment count
+  (`reference/mili/src/mili.c:1328`). If absent, `find_proc_count`
+  globs the directory (`reference/mili/src/mili_util.c:1488`).
+- The `xmilics` CLI is the offline combiner — reads all fragments,
+  writes one merged plot file. Phase 3 territory if we port it.
+
+## Reference: rust-numpy + rayon integration shape
+
+(Pinned here so Phase 1.5 Step 19's `plan.md` update has a
+single-source-of-truth checklist.)
+
+`pyo3` and `rust-numpy` compose cleanly with `rayon`:
+
+```rust
+#[pyfunction]
+fn query<'py>(py: Python<'py>, /* args */)
+    -> PyResult<Bound<'py, PyArray1<f32>>>
+{
+    let v: Vec<f32> = py.allow_threads(|| {
+        db.query(args)        // internal rayon::par_chunks_mut here
+    })?;
+    Ok(v.into_pyarray_bound(py))
+}
+```
+
+- `Python::allow_threads` releases the GIL for the duration of the
+  rayon section. Required so other Python threads can run while we
+  parallelize state gather.
+- `IntoPyArray::into_pyarray_bound(py)` moves an owned `Vec<T>` (or
+  `ndarray::Array<T,_>`) into a numpy array — numpy adopts the
+  allocation; no byte copy. This is the default return path.
+- `ToPyArray::to_pyarray_bound(py)` copies (when ownership can't
+  transfer, e.g., `&[T]`). Avoid on the hot path.
+- `Arc<Mmap>` + `PyCapsule` for true zero-decode views: deferred to
+  Phase 2 M5. Only wins on aligned + native-endian + single-slab
+  queries (rare in practice).
+
 ## How to update this file
 
-1. When a Phase-2 step lands, add a row to the appropriate section.
-   Don't re-open closed Phase-1 rows.
+1. When a Phase-1.5 or Phase-2 step lands, flip the row to ✅ in the
+   appropriate section. Don't re-open closed Phase-1 rows.
 2. If a closed step regresses, demote it to 🟡 with the failing test
    linked — don't paper over with notes.
 3. New surprises go under "Surprises worth remembering" with a one-line

@@ -1,11 +1,13 @@
 # `mili-rs` implementation plan
 
-> **Status (Phase 1 complete):** Steps 0–12 + 14–16 ✅; Step 13 🟡
-> (cron clean-run gate pending). The live tracker is
-> [`status.md`](status.md). This document is the **design archive** —
-> it captures the build order, oracle strategy, and CI shape that got
-> us here. Don't edit it to track progress; edit it only if the
-> *design* changes (e.g. Phase 2 reshapes a module boundary).
+> **Status (Phase 1 complete; Phase 1.5 in flight):** Steps 0–12 +
+> 14–16 ✅; Step 13 🟡 (cron clean-run gate pending); Steps 17–19
+> ⬜ (multi-A-file orchestration, C-corpus parity, FFI plan). The
+> live tracker is [`status.md`](status.md). This document is the
+> **design archive** — it captures the build order, oracle strategy,
+> CI shape, and FFI integration plan. Don't edit it to track
+> progress; edit it only if the *design* changes (e.g. Phase 2
+> reshapes a module boundary).
 
 The README in this directory states the goals and high-level
 milestones. This document is the working plan: concrete modules,
@@ -131,6 +133,73 @@ The `Database` is `Send + Sync` once construction completes. All
 post-open access is through immutable references to the directory
 and `Arc`-cloned mmap handles, so multi-threaded reads are safe by
 construction — no global `fam_list` equivalent.
+
+### `family_set.rs` (Phase 1.5 — Step 17)
+
+`DatabaseSet` — the multi-A-file orchestration layer. An MPI run
+produces N independent mili families (`run.plt000A`, `run.plt001A`,
+…), one per rank. The C library opens each separately
+(`reference/mili/src/mili.c:445`); mili-python adds the orchestration
+in Python (`LoopWrapper` / `ServerWrapper`,
+`reference/mili-python/src/mili/parallel.py:19-356`). We move that
+orchestration into Rust so:
+
+1. Multi-fragment open uses `rayon::par_iter` over fragments — real
+   multi-core win on HPC login nodes, where opens are the operation
+   users actually wait on.
+2. `mili-py` binds `DatabaseSet` directly and doesn't need a Python
+   wrapper layer for fan-out.
+3. Single-fragment opens take a fast path that doesn't pay the
+   `DatabaseSet` overhead.
+
+API:
+
+```rust
+pub struct DatabaseSet {
+    fragments: Vec<Database>,  // one per MPI rank, ordered by rank
+}
+
+impl DatabaseSet {
+    /// Open all fragments matching `<base>(\d*)A$` in parallel.
+    /// On a single-fragment base, equivalent to wrapping `Database::open`.
+    pub fn open(base: impl AsRef<Path>) -> Result<Self>;
+
+    /// Number of fragments (== MPI rank count for the producing run).
+    pub fn fragment_count(&self) -> usize;
+
+    /// Access a single fragment by rank index.
+    pub fn fragment(&self, rank: usize) -> Option<&Database>;
+}
+```
+
+`DatabaseSet` exposes the same accessor surface as `Database`
+(`labels`, `times`, `class_names`, `nodes`, `connectivity`,
+`state_maps`, `query`), dispatching across fragments and merging
+results. Merge semantics match `reductions.py`:
+
+- `labels(class)` — concatenate-unique across fragments, preserve
+  ascending order.
+- `times()` — fragments share the time axis; cross-check they agree,
+  return rank-0's vector. Disagreement → `MiliError::FragmentMismatch`.
+- `connectivity(class)` — concatenate per-fragment rows, remap
+  node-id references to the merged label space.
+- `query(...)` — gather per fragment, then concatenate along the
+  entity axis. Per-state slice ordering is `(rank-0 entities,
+  rank-1 entities, …)`.
+
+Fragment discovery (`afileIO.py:34-57`):
+
+- Accept `<dir>/run`, `<dir>/run.plt`, `<dir>/run.plt00`,
+  `<dir>/run.plt000A`. Strip trailing `A`, trailing `\d+`, trailing
+  `.plt\d*`.
+- Glob the directory matching `^<base>\d*A$`, sort by the numeric
+  suffix.
+- Zero matches → `MiliError::NoFragments` (typed).
+- One match → single-fragment fast path.
+
+Threading: open in parallel, but populate `fragments` in rank order
+so that downstream `(rank, local_idx) → global_label` math stays
+deterministic.
 
 ### `mesh.rs`
 
@@ -352,6 +421,13 @@ Steps 14–16 were added after the original plan as the pyo3 parity
 harness surfaced corpus-wide validation needs; the live status of
 each is in [`status.md`](status.md).
 
+Steps 17–19 (Phase 1.5) firm up the read-side before `mili-py`
+M1: multi-A-file orchestration moves into Rust
+(`family_set.rs`), parity coverage extends to the C-library
+`xmilics/` corpus, and the numpy/rayon FFI contract is pinned in
+the "FFI integration plan" section below. Status in
+[`status.md`](status.md) § Phase 1.5.
+
 The write path (Phase 3) gets its own plan document later, but the
 modules it touches (`directory.rs`, `srec.rs`, `state.rs`) already
 need to be structured with write support in mind — keep parser
@@ -393,6 +469,16 @@ Run it against every fixture under `reference/mili-python/tests/
 data/serial/` — fifteen of them, including the critical
 `dir_version_2/` fixture for v2 directory support. `basic1/` is
 the smallest (9MB) and is the default for fast unit tests.
+
+**Phase 1.5 extension (Step 18):** add a second oracle pass over
+the C-library corpus at `reference/mili/test/xmilics/`. Those
+fixtures are MPI-segmented (`d3samp6` — 8 procs, `bar1` — 8
+procs, `shell_mat2` — 11 procs, …) and exercise the
+`DatabaseSet` open path that mili-python only covers via its
+parallel wrappers. Compare each fragment fragment-by-fragment
+against mili-python opening the same fragment; then compare the
+merged result via `DatabaseSet` against mili-python's
+`ServerWrapper` on the same base.
 
 ### Layer 2: C oracle for byte-level write parity (Phase 3 onward)
 
@@ -590,6 +676,67 @@ Phase 1 is done. Each becomes a named integration test in
   class identified by `Sname-(\w+)`. The Rust `labels(class)`
   accessor mirrors this. Split convention documented in
   `../shared/format.md` § TI_PARAM-as-storage pattern.
+
+## FFI integration plan (Phase 1.5 — Step 19)
+
+Pins the `mili-py` binding shape so Phase 2 M1 starts from a settled
+design. No `mili-rs` code change in Step 19 itself; this section is
+the contract `mili-py` binds against.
+
+**GIL handling.** Every `Database::query` / `DatabaseSet::query`
+invocation in the binding wraps the Rust call in
+`pyo3::Python::allow_threads`:
+
+```rust
+#[pyfunction]
+fn query<'py>(py: Python<'py>, /* args */)
+    -> PyResult<Bound<'py, PyArray1<f32>>>
+{
+    let v: Vec<f32> = py.allow_threads(|| {
+        db.query(args)        // rayon::par_chunks_mut runs GIL-free
+    })?;
+    Ok(v.into_pyarray_bound(py))
+}
+```
+
+Rust-side rayon work (`family.rs:436-437` for `Database`, the new
+per-fragment fan-out in `family_set.rs` for `DatabaseSet`) runs with
+the GIL released. Other Python threads stay responsive.
+
+**Default zero-FFI-copy return.** `IntoPyArray::into_pyarray_bound(py)`
+on an owned `Vec<T>` or `ndarray::Array<T,_>` moves the allocation
+into numpy — numpy adopts the heap buffer, no byte copy at the FFI
+boundary. This is the default return path for `query()` and is what
+`StateValues::F32` / `F64` / `I32` / `I64` get wrapped into.
+
+Use `ToPyArray::to_pyarray_bound(py)` only when ownership cannot
+transfer (e.g., wrapping a `&[T]` borrow). Avoid on the hot path.
+
+**`Arc<Mmap>`-backed zero-decode views.** Deferred to Phase 2 M5.
+The pattern is `PyArray::from_owned_ptr` + a `PyCapsule` base
+object whose destructor drops the `Arc<Mmap>`. Only wins when
+*all three* hold:
+
+1. Bytes are aligned for `T` (mmap pages are page-aligned, so this
+   is mostly about subrecord offsets).
+2. Endianness is native.
+3. The query result is a single contiguous slice (no multi-slab
+   assembly, no multi-state gather).
+
+Most real queries hit none of these. Add the capsule path when a
+profiling case demands it; until then, `IntoPyArray` is honest and
+fast enough.
+
+**`DatabaseSet` binding shape.** `mili-py` exposes
+`PyMiliDatabase` as a thin wrapper over either `Database` or
+`DatabaseSet` (chosen at open time by counting fragments). The
+existing mili-python `LoopWrapper` / `ServerWrapper` are *not*
+ported; their job moves into `DatabaseSet`.
+
+**Reference:** `reference/PyO3/rust-numpy` README + the
+`examples/parallel` crate demonstrate the same pattern over an
+ndarray rayon iterator. The `Python::allow_threads` boundary and the
+`IntoPyArray` ownership transfer are the load-bearing primitives.
 
 ## What this plan deliberately does not cover
 
