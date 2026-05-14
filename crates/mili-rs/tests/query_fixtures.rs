@@ -535,3 +535,133 @@ fn basic1_state_out_of_range_errors() {
         MiliError::StateOutOfRange(_, _)
     ));
 }
+
+#[test]
+fn d3samp6_hx_subscript_matches_full_array_atom() {
+    // Step 11 — `hx[3]` on `brick` selects the 3rd atom (1-based) of
+    // every brick's 8-atom `hx` array. The parity check compares the
+    // subscripted read against atom-3 of the full array read, both
+    // pulled through the public API. mili-python's golden for the same
+    // query is `test_bugfixes.py::SerialArrayStateVariables::
+    // test_query_array_components` — labels [2,5,10], state 6.
+    let path = corpus_path(&["th", "serial", "d3samp6.thA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    // d3samp6.th's brick `hx` is M_FLOAT4 dims=[8].
+    let hx = db.svars().get("hx").expect("hx in dict");
+    assert!(matches!(hx.agg, mili_rs::SvarAgg::Array { ref dims } if dims == &[8]));
+
+    // mili-python states are 1-based; the Rust API uses 0-based indices
+    // into `Database::states()`. test_query_array_components uses
+    // state=6 (1-based) and labels=[2,5,10].
+    let labels = [2_i32, 5, 10];
+    let states = [5_usize];
+
+    let full = db
+        .query(&QueryArgs {
+            svar: "hx",
+            class: "brick",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(full) = full else {
+        panic!("hx is f32");
+    };
+    assert_eq!(full.len(), 3 * 8);
+
+    let sub = db
+        .query(&QueryArgs {
+            svar: "hx[3]",
+            class: "brick",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(sub) = sub else {
+        panic!("hx[3] is f32");
+    };
+    assert_eq!(sub.len(), 3);
+
+    // hx[3] (1-based) → atom index 2 of each per-object 8-atom slot.
+    for (i, _label) in labels.iter().enumerate() {
+        assert_eq!(
+            sub[i].to_bits(),
+            full[i * 8 + 2].to_bits(),
+            "label idx {i}, atom 2 differs between hx[3] and hx[..]"
+        );
+    }
+}
+
+#[test]
+#[allow(clippy::excessive_precision, clippy::unreadable_literal)]
+fn d3samp6_hx_subscript_matches_mili_python_golden() {
+    // Direct golden parity against mili-python's
+    // `test_bugfixes.py::SerialArrayStateVariables::
+    // test_query_array_components` numeric fixture (lines 345-365).
+    let path = corpus_path(&["th", "serial", "d3samp6.thA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let labels = [2_i32, 5, 10];
+    let states = [5_usize];
+    let v = db
+        .query(&QueryArgs {
+            svar: "hx[3]",
+            class: "brick",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(v) = v else {
+        panic!("hx[3] is f32");
+    };
+    assert_eq!(v.len(), 3);
+    let expected: [f32; 3] = [8.6602551e-01, -3.2783543e-08, 4.9999997e-01];
+    for (i, want) in expected.iter().enumerate() {
+        assert_eq!(
+            v[i].to_bits(),
+            want.to_bits(),
+            "atom {i}: got {} want {}",
+            v[i],
+            want
+        );
+    }
+}
+
+#[test]
+fn d3samp6_hx_subscript_errors_match_mili_python() {
+    // test_query_array_exceptions: hx[0], hx[9], hx[-2], hx[1,1] all
+    // must surface a typed error rather than silently succeeding.
+    let path = corpus_path(&["th", "serial", "d3samp6.thA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let states = [0_usize];
+    for bad in ["hx[0]", "hx[9]", "hx[-2]", "hx[1,1]"] {
+        let err = db
+            .query(&QueryArgs {
+                svar: bad,
+                class: "brick",
+                labels: None,
+                states: &states,
+                materials: None,
+                ips: None,
+            })
+            .unwrap_err();
+        assert!(
+            matches!(err, MiliError::InvalidSubscript { .. }),
+            "expected InvalidSubscript for {bad}, got {err:?}"
+        );
+    }
+}

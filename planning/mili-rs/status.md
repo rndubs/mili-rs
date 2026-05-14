@@ -21,7 +21,7 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 8    | `buffer.rs` and `endian.rs`                                 | ✅ done    | TBD   | `MiliBuffer<T: ByteSwap>` (pub(crate)) with `Mmap`/`Owned` storage, alignment check, byteswap fallbacks; `ByteSwap` trait for `i32`/`i64`/`f32`/`f64`. Mesh / connectivity / TI int-array decoders all route through `endian::for_each_swap`. Phase 1 exit. |
 | 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ✅ done    | TBD   | `Database::state_var_values(svar, class, state) -> StateValues::{F32,F64,I32,I64}`; lazy state-file mmap cache; per-state header skip is 8 bytes (i32 srec_id + f32 time); `OBJECT_ORDERED`, label / material / IP filters, and component-name lookups return typed errors until Steps 10 / 11. |
 | 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ✅ done    | TBD   | `Database::query(&QueryArgs)` with labels / states / materials / ips filters; `OBJECT_ORDERED` gather; vec_array IP filter (components-fastest, IP-slowest); material → label via `ELEM_CONNS` mat_id column; `LabelNotFound` / `UnknownMaterial` / `IpFilterNotApplicable` / `IpOutOfRange` typed errors; `Svar::atoms` now accumulates component atom counts (was `comps.len()` — broke for vec_array-of-vectors like d3samp4's `es_1a`). Component-name lookups (`"sx"` → `"stress"`, `hx[3]`) still defer to Step 11. |
-| 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ⏳ pending |       | `test_bugfixes.py:251-296`.                                 |
+| 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ✅ done    | TBD   | `parse_query_name` + `resolve_target` decompose the input into base svar + `AtomPicker::Specific` atom indices; ARRAY-svar subscript (`"hx[3]"`) and bare-component lookup (`"sx"` → parent VECTOR `stress`) share one gather path. `InvalidSubscript` / `SubscriptNotApplicable` typed errors cover the mili-python exception set (out-of-range, 0/negative, too-many indices, non-integer). VEC_ARRAY bare-comp + partial-dim multi-D subscripts still defer with `Unsupported`. d3samp6.thA `hx[3]` matches mili-python's golden bit-for-bit on state 6, labels [2,5,10] (`test_bugfixes.py:345-365`). |
 | 12   | rayon over states; criterion benches                        | ⏳ pending |       | Target ≥ 2× mili-python throughput.                         |
 | 13   | cargo-fuzz on `directory.rs`, `header.rs`, `param.rs`       | ⏳ pending |       | One-hour clean-run gate.                                    |
 
@@ -38,7 +38,7 @@ because some sit on top of multiple steps.
 | Double-precision nodal positions              | `test_bugfixes.py:62-72`              | ✅ done (Step 10: `state_var_values` returns `StateValues::F64` for `Float8` svars; covered by the per-numtype gather macro) |
 | Vec-array with mixed component widths         | `test_bugfixes.py:119-172`            | ✅ done (Step 10: `Svar::atoms` accumulates component atom counts; d3samp4 `es_1a` (`vec_array<[stress(6), eps(1)]>`) round-trips through `query()` with `ips` filter — fixture test in `tests/query_fixtures.rs`) |
 | Inconsistent IP counts across subrecords      | `test_bugfixes.py:99-117`             | 🟡 IP filter mechanism in place (Step 10); the cross-subrec IP-label-set validation that turns inconsistent counts into a typed error needs the element-set IP-label lookup, which lands with component-name resolution in Step 11. |
-| Array-svar subscript notation                 | `test_bugfixes.py:251-296`            | ⏳ Step 11 |
+| Array-svar subscript notation                 | `test_bugfixes.py:251-296`            | ✅ done (Step 11: `hx[3]` resolves through `parse_query_name`/`resolve_target`/`AtomPicker::Specific`; d3samp6.thA fixture matches the mili-python golden bit-for-bit; the four error cases (`hx[0]`, `hx[9]`, `hx[-2]`, `hx[1,1]`) all surface `MiliError::InvalidSubscript`.) |
 | `dir_version_2` fixture                       | corpus                                | ✅ done (Step 2) |
 | State end marker `~` round-trip               | corpus (read), C oracle (write)       | ✅ read    |
 
@@ -48,8 +48,8 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | 164   | Step 10      |
-| Fixture parity (corpus reads)  | 50    | Step 10      |
+| `cargo test --workspace`       | 190   | Step 11      |
+| Fixture parity (corpus reads)  | 53    | Step 11      |
 | mili-python parity (`pyo3`)    | —     | not wired yet — Phase 2 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
 | Criterion benches              | —     | Step 12      |
@@ -122,6 +122,32 @@ Track in `plan.md` § "Resolved questions". Current entries:
   recursively via the already-parsed components in the table —
   components are always parsed before their parent (svar.rs's
   recursion at line 274-280 owns this invariant).
+- ARRAY-subscript parser semantics (Step 11). mili-python's
+  `__parse_query_name_and_source` is tolerant: `"hx["`, `"hx[3"`,
+  `"hx[,1]"` all reach the integer-conversion step and raise
+  `ValueError` there. The Rust parser is stricter — it requires a
+  balanced `[...]` pair and rejects empty / trailing-comma index
+  lists with `MiliError::InvalidSubscript` before doing any
+  per-svar lookup. The five test_bugfixes.py:259-268 inputs
+  (`hx[0]`, `hx[9]`, `hx[-2]`, `hx[1,1]`) all round-trip through
+  `InvalidSubscript` and the resulting message is unambiguous.
+  Partial-dim subscripts (e.g. `g[1]` on a `dims=[3,4]` svar) are
+  rejected with `MiliError::Unsupported("partial-dim array
+  subscript...")` rather than silently raveled — no corpus
+  exercises them and the python behaviour is itself underspecified
+  (the comment at `miliinternal.py:1373-1375` flags this as a
+  known gap).
+- Bare component-name fallback (Step 11). Queries like `"sx"`
+  resolve to the parent VECTOR svar `"stress"` when no subrec
+  carries `"sx"` directly. The fallback uses `find_vector_parent`,
+  which walks the svar dictionary and accumulates the component's
+  atom offset from the prior comps' atom counts (handles components
+  that are themselves multi-atom vectors). VEC_ARRAY parents are
+  intentionally **not** auto-resolved — a vec_array bare-comp
+  query needs explicit IP composition because the component data
+  is striped across IP slots; defer until a fixture surfaces the
+  case (mili-python's `test_modify_database.py::sx-on-beam` is
+  the likely future driver, but it also requires the write path).
 - `MiliBuffer` public-vs-private (Step 8). Kept `pub(crate)` for now —
   `Nodes` / `Connectivity` / `ArrayParam` keep their existing public
   shapes (which already wrap the same bytes), and the byteswap path
@@ -145,12 +171,12 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   matching the simplest reading of `miliinternal.py:463-474`. Revisit
   once a fixture surfaces a non-integer setname.
 
-## Module shape (post-Step 10)
+## Module shape (post-Step 11)
 
 ```
 crates/mili-rs/src/
-├── lib.rs              done (re-exports for Steps 0-10, including `QueryArgs`)
-├── error.rs            done — `MiliError` (+ `Unsupported`, `NoMatchingSubrec`, `LabelNotFound`, `IpOutOfRange`, `IpFilterNotApplicable`, `UnknownMaterial`)
+├── lib.rs              done (re-exports for Steps 0-11, including `QueryArgs`)
+├── error.rs            done — `MiliError` (+ `Unsupported`, `NoMatchingSubrec`, `LabelNotFound`, `IpOutOfRange`, `IpFilterNotApplicable`, `UnknownMaterial`, `InvalidSubscript`, `SubscriptNotApplicable`)
 ├── header.rs           done — Step 1
 ├── directory.rs        done — Step 2
 ├── param.rs            done — Step 3
@@ -162,7 +188,7 @@ crates/mili-rs/src/
 ├── srec.rs             done — Step 7 (includes `derive_lumps`)
 ├── endian.rs           done — Step 8 (`ByteSwap`, `for_each_swap`, `swap_*_slice`)
 ├── buffer.rs           done — Step 8 (`MiliBuffer<T>`, `pub(crate)`)
-└── query.rs            done — Step 10 (RESULT_ORDERED + OBJECT_ORDERED gather, label / IP filters, multi-state `ReadPlan::rebased`); Step 11 adds component-name lookups (`"sx"` → `"stress"`, `hx[3]`)
+└── query.rs            done — Step 10 (RESULT_ORDERED + OBJECT_ORDERED gather, label / IP filters, multi-state `ReadPlan::rebased`) + Step 11 (`parse_query_name` + `resolve_target` + `AtomPicker::{AllAtoms, PerIp, Specific}`; ARRAY-svar subscript `"hx[3]"` and bare-component `"sx"`-on-VECTOR-parent lookup share the `Specific` atom-indices gather path)
 ```
 
 ## How to update this file
