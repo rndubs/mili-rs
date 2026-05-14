@@ -60,8 +60,14 @@ count, `STRING_QTY` = 1 (element class short_name).
 **Empty payload** — `LENGTH` is `DONT_CARE`. All the information is
 in the directory entry itself:
 
-- `MODIFIER1` = superclass code (`M_NODE`, `M_HEX`, …).
-- `MODIFIER2` = superclass code (redundant).
+- `MODIFIER1` = 0 in every fixture in the corpus. The C source at
+  `mesh_u.c:480-548` documents `MODIFIER1` as the superclass code,
+  but the modern writer leaves it 0 and stores the superclass in
+  `MODIFIER2` instead. The Rust reader pulls superclass from
+  `MODIFIER2`; if a v1-era fixture surfaces with the superclass in
+  `MODIFIER1`, extend `mesh.rs` to fall back when `MODIFIER2 = 0`.
+- `MODIFIER2` = superclass code (`M_NODE`, `M_HEX`, …) — the field
+  the reader actually consumes.
 - `STRING_QTY` = 2 → consumes two names from the name pool:
   short_name (first), long_name (second).
 
@@ -187,6 +193,26 @@ atom counts, and the organization. A reader must replicate this
 derivation; see `srec.c:1409+` for the canonical algorithm. We do
 not write these to disk.
 
+### `M_MESH`-superclass subrecs (implicit one-object payload)
+
+Subrecords whose mclass has superclass `M_MESH` (e.g. `glob`,
+`cpu_time` on the `glob` mclass) are written by older mili variants
+with `qty_id_blks = 0` and no id-block pairs, but the reader treats
+them as carrying **one** object's worth of data per state. The
+on-disk shape is therefore ambiguous on the M_MESH path —
+`qty_id_blks` does not pin down `object_count` for these subrecs and
+a reader has to apply an M_MESH-specific patch regardless.
+mili-python's `afileIO.py:439-441` synthesises `[(1, 1)]` during
+ingestion; `mili-rs` does the same in
+`SrecTable::patch_m_mesh_classes` at open time so the per-state
+offset math matches mili-python and the file's actual layout. A
+corpus scan during the Step-14 pyo3 parity work found the bug
+active on 9/13 reference fixtures (basic1, d3samp4, beam_udi,
+vrt_BS, rigid_body_1, tet, fdamp1, sstate, d3samp6 `.pltA`
+variants); newer `.thA` / `.plt_cA` / `dblpltA` writers emit
+explicit `(1, 1)` for M_MESH and need no patch, but the reader
+applies it uniformly.
+
 ---
 
 ## `MILI_PARAM`, `APPLICATION_PARAM`, `TI_PARAM` (`param.c:219-333,
@@ -258,7 +284,7 @@ reader until a real fixture exercises it; emit an explicit
 |------------------|--------------|---------------|-----------:|-----------------------------------------------|
 | NODES            | mesh_id      | node count    | 1          | `2 * sizeof(M_INT) + N * sizeof(M_FLOAT)`     |
 | ELEM_CONNS       | mesh_id      | element count | 1          | header + block list + connectivity            |
-| CLASS_DEF        | superclass   | superclass    | 2          | 0 — empty payload                             |
+| CLASS_DEF        | 0 (unused)   | superclass    | 2          | 0 — empty payload (modern writer; see § CLASS_DEF) |
 | CLASS_IDENTS     | mesh_id      | element count | 1          | `3 * sizeof(M_INT)`                           |
 | STATE_VAR_DICT   | DONT_CARE    | DONT_CARE     | 0          | int stream bytes + char stream bytes          |
 | STATE_REC_DATA   | int words    | char bytes    | 0          | computed from the two stream lengths          |

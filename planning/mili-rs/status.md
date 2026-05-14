@@ -82,8 +82,9 @@ Track in `plan.md` § "Resolved questions". Current entries:
 - `CLASS_DEF` superclass field (Step 6 fix-up). `entry-payloads.md`
   documented MODIFIER1 as the superclass, but every fixture in the
   corpus stores MODIFIER1 = 0 and the actual superclass in MODIFIER2.
-  Reader now reads MODIFIER2; the entry-payloads doc will be tightened
-  to match in the next planning pass.
+  Reader reads MODIFIER2; `entry-payloads.md` § `CLASS_DEF` and the
+  summary table were updated in Step 15 to document the
+  `MODIFIER1 = 0 / MODIFIER2 = superclass` shape.
 - Multiple `NODES` / `ELEM_CONNS` per `(mesh, class)` (Step 6 fix-up).
   Real-world databases (basic1) split non-contiguous element-id
   ranges across multiple `ELEM_CONNS` entries; the table now indexes
@@ -108,28 +109,31 @@ Track in `plan.md` § "Resolved questions". Current entries:
   (mili-python's `afileIO.py:444-445`) is deferred to the query layer
   so the table preserves writer-side intent.
 - Per-state header in state files (Step 9 fix-up). `format.md` § "Top-
-  level file inventory" claims state files have "**No per-state
-  header**" — that's wrong. `reference/mili/src/mili.c:3042-3043` and
-  `srec.c:2332-2333` both add `sizeof(int) + sizeof(float)` (i32
+  level file inventory" claimed state files have "**No per-state
+  header**" — that was wrong. `reference/mili/src/mili.c:3042-3043`
+  and `srec.c:2332-2333` both add `sizeof(int) + sizeof(float)` (i32
   srec_id + f32 time) before the subrec data when computing read /
   write offsets. The Rust reader skips 8 bytes after `state.offset`
-  before computing subrec offsets. The format doc needs a fix-up in
-  the next planning pass.
+  before computing subrec offsets. `format.md` § "File set" was
+  updated in Step 15 to document the 8-byte per-state header
+  explicitly.
 - VEC_ARRAY inner-order: components-fastest, IP-slowest (Step 10).
-  `planning/shared/format.md` § "Subrecord byte-layout matrix" reads
-  "array-dim indices vary fastest, then component (vector) index" —
-  for a 1-D `dims=[n_ip]` vec_array this would put IPs fastest. The
-  Python writer / reader (`reference/mili-python/src/mili/datatypes.py:
-  236-247`, the `[sv.comp_layout for sv in svars] * prod(dims)` line)
-  lays out components inner, IPs outer, and the d3samp4 `es_1a`
-  fixture round-trips that layout against direct file reads (see
+  `planning/shared/format.md` § "Subrecord byte-layout matrix" used
+  to read "array-dim indices vary fastest, then component (vector)
+  index" — for a 1-D `dims=[n_ip]` vec_array this would put IPs
+  fastest. The Python writer / reader
+  (`reference/mili-python/src/mili/datatypes.py:236-247`, the
+  `[sv.comp_layout for sv in svars] * prod(dims)` line) lays out
+  components inner, IPs outer, and the d3samp4 `es_1a` fixture
+  round-trips that layout against direct file reads (see
   `tests/query_fixtures.rs::d3samp4_vec_array_*`). The Rust IP filter
-  follows Python; the format doc needs the same fix-up that Step 9
-  flagged for the per-state header. mili-python's `test_bugfixes.py::
-  VectorsInVectorArrays` numeric goldens couldn't be cross-checked
-  without a working mili-python install in this environment; the Rust
-  layout is verified self-consistent against direct decode of the
-  state-file bytes.
+  follows Python; `format.md` § "Subrecord byte-layout matrix" was
+  updated in Step 15 to document the components-fastest, IP-slowest
+  layout with an explicit byte-order diagram. mili-python's
+  `test_bugfixes.py::VectorsInVectorArrays` numeric goldens couldn't
+  be cross-checked without a working mili-python install in this
+  environment; the Rust layout is verified self-consistent against
+  direct decode of the state-file bytes.
 - `Svar::atoms` for nested aggregates (Step 10 fix-up). Step 7's
   `parse_one` computed `atoms = comps.len()` for vector svars and
   `prod(dims) * comps.len()` for vec_array. That under-counts a
@@ -187,6 +191,10 @@ Track in `plan.md` § "Resolved questions". Current entries:
   udi, vrt_BS, rigid_body_1, tet, fdamp1, sstate, d3samp6 ⟵ `pltA`
   variants); newer `.thA` / `.plt_cA` / `dblpltA` writers emit
   explicit `(1, 1)` for `M_MESH` and were already correct.
+  `entry-payloads.md` § `STATE_REC_DATA` gained an
+  "`M_MESH`-superclass subrecs (implicit one-object payload)"
+  subsection in Step 15 to document the patch and the on-disk
+  ambiguity.
 - `MiliBuffer` public-vs-private (Step 8). Kept `pub(crate)` for now —
   `Nodes` / `Connectivity` / `ArrayParam` keep their existing public
   shapes (which already wrap the same bytes), and the byteswap path
