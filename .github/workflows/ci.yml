@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly fuzz cron at 07:00 UTC (low-traffic hour). Only the
+    # `fuzz` job below runs on this trigger.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -58,3 +63,38 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e reference/mili-python
       - run: cargo test --workspace --features parity
+
+  fuzz:
+    # Long-running cargo-fuzz cron. Each target runs for 30 minutes on
+    # nightly Rust (libfuzzer-sys's link step is nightly-only). Not a
+    # PR merge gate — only triggers on the nightly schedule above or a
+    # manual `workflow_dispatch`.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [header, directory, param]
+    env:
+      # libfuzzer-sys + nightly emit benign warnings we don't want to
+      # treat as errors in this job.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          rustflags: ""
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Fuzz ${{ matrix.target }} (30 min)
+        working-directory: crates/mili-rs/fuzz
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=1800
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: crates/mili-rs/fuzz/artifacts/

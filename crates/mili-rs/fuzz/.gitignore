@@ -1,4 +1,9 @@
 target
-corpus
 artifacts
 coverage
+
+# Seed corpora are tracked (committed under corpus/<target>/) so the
+# cron job starts from valid inputs. cargo-fuzz writes hash-named
+# entries alongside them during runs — those are ignored.
+corpus/*/*
+!corpus/*/basic1.pltA
