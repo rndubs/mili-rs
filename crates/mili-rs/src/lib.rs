@@ -14,6 +14,7 @@ pub mod family;
 pub mod header;
 pub mod mesh;
 pub mod param;
+pub mod query;
 pub mod srec;
 pub mod state;
 pub mod svar;
@@ -28,6 +29,7 @@ pub use mesh::{
     ObjectClass, Superclass,
 };
 pub use param::{AggType, ArrayParam, DataType, ParamTable, ParamValue, ScalarValue};
+pub use query::StateValues;
 pub use srec::{derive_lumps, Lumps, Organization, Srec, SrecTable, Subrecord};
 pub use state::{StateMapSource, StateMeta};
 pub use svar::{NumType, Svar, SvarAgg, SvarTable};

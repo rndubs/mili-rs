@@ -69,6 +69,12 @@ pub enum MiliError {
 
     #[error("misaligned mmap: offset {0} not aligned for {1}-byte type")]
     Misaligned(usize, usize),
+
+    #[error("query feature not implemented yet: {0}")]
+    Unsupported(&'static str),
+
+    #[error("no subrecord covers svar {svar:?} on class {class:?}")]
+    NoMatchingSubrec { svar: String, class: String },
 }
 
 pub type Result<T, E = MiliError> = core::result::Result<T, E>;

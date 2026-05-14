@@ -19,7 +19,7 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 6    | high-level TI accessors (labels, materials, element_sets)   | ✅ done    | TBD   | `Database::{labels, materials, element_sets, integration_points}`; `MaterialId` newtype. |
 | 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | ✅ done    | TBD   | Dual int/char stream parsers; `derive_lumps` covers both organisations; svar count on basic1 = 93 (with recursive components). |
 | 8    | `buffer.rs` and `endian.rs`                                 | ✅ done    | TBD   | `MiliBuffer<T: ByteSwap>` (pub(crate)) with `Mmap`/`Owned` storage, alignment check, byteswap fallbacks; `ByteSwap` trait for `i32`/`i64`/`f32`/`f64`. Mesh / connectivity / TI int-array decoders all route through `endian::for_each_swap`. Phase 1 exit. |
-| 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ⏳ pending |       |                                                             |
+| 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ✅ done    | TBD   | `Database::state_var_values(svar, class, state) -> StateValues::{F32,F64,I32,I64}`; lazy state-file mmap cache; per-state header skip is 8 bytes (i32 srec_id + f32 time); `OBJECT_ORDERED`, label / material / IP filters, and component-name lookups return typed errors until Steps 10 / 11. |
 | 10   | `query.rs` full filter set, `OBJECT_ORDERED`, vec_array     | ⏳ pending |       |                                                             |
 | 11   | array-svar subscript notation (`"hx[3]"`, 1-based)          | ⏳ pending |       | `test_bugfixes.py:251-296`.                                 |
 | 12   | rayon over states; criterion benches                        | ⏳ pending |       | Target ≥ 2× mili-python throughput.                         |
@@ -48,8 +48,8 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | 131   | Step 8       |
-| Fixture parity (corpus reads)  | 36    | Step 8       |
+| `cargo test --workspace`       | 145   | Step 9       |
+| Fixture parity (corpus reads)  | 42    | Step 9       |
 | mili-python parity (`pyo3`)    | —     | not wired yet — Phase 2 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
 | Criterion benches              | —     | Step 12      |
@@ -90,6 +90,14 @@ Track in `plan.md` § "Resolved questions". Current entries:
   ids. Normalisation to 0-based ordinals + half-open intervals
   (mili-python's `afileIO.py:444-445`) is deferred to the query layer
   so the table preserves writer-side intent.
+- Per-state header in state files (Step 9 fix-up). `format.md` § "Top-
+  level file inventory" claims state files have "**No per-state
+  header**" — that's wrong. `reference/mili/src/mili.c:3042-3043` and
+  `srec.c:2332-2333` both add `sizeof(int) + sizeof(float)` (i32
+  srec_id + f32 time) before the subrec data when computing read /
+  write offsets. The Rust reader skips 8 bytes after `state.offset`
+  before computing subrec offsets. The format doc needs a fix-up in
+  the next planning pass.
 - `MiliBuffer` public-vs-private (Step 8). Kept `pub(crate)` for now —
   `Nodes` / `Connectivity` / `ArrayParam` keep their existing public
   shapes (which already wrap the same bytes), and the byteswap path
@@ -113,24 +121,24 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   matching the simplest reading of `miliinternal.py:463-474`. Revisit
   once a fixture surfaces a non-integer setname.
 
-## Module shape (post-Step 8)
+## Module shape (post-Step 9)
 
 ```
 crates/mili-rs/src/
-├── lib.rs              done (re-exports for Steps 0-8)
-├── error.rs            done — `MiliError`
+├── lib.rs              done (re-exports for Steps 0-9)
+├── error.rs            done — `MiliError` (+ `Unsupported`, `NoMatchingSubrec`)
 ├── header.rs           done — Step 1
 ├── directory.rs        done — Step 2
 ├── param.rs            done — Step 3
 ├── ti.rs               done — Step 3 (v1 stub)
 ├── state.rs            done — Step 4
-├── family.rs           done — Step 4 (Database open) + svars/srecs
+├── family.rs           done — Step 4 (Database open) + Step 9 (state-file mmap cache, `state_var_values`)
 ├── mesh.rs             done — Step 5
 ├── svar.rs             done — Step 7
 ├── srec.rs             done — Step 7 (includes `derive_lumps`)
 ├── endian.rs           done — Step 8 (`ByteSwap`, `for_each_swap`, `swap_*_slice`)
 ├── buffer.rs           done — Step 8 (`MiliBuffer<T>`, `pub(crate)`)
-└── query.rs            todo — Steps 9-11
+└── query.rs            done — Step 9 (RESULT_ORDERED single-svar single-state); Steps 10-11 add filters / OBJECT_ORDERED / subscript
 ```
 
 ## How to update this file
