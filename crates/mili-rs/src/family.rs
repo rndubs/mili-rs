@@ -22,13 +22,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use memmap2::Mmap;
+use rayon::prelude::*;
 
 use crate::directory::{DirEntry, DirEntryType, Directory};
 use crate::error::{MiliError, Result};
 use crate::header::Header;
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
-use crate::query::{plan_state_svar, Filter, StateValues};
+use crate::query::{plan_state_svar, Filter, ReadPlan, StateValues};
 use crate::srec::SrecTable;
 use crate::state::{self, StateMapSource, StateMeta};
 use crate::svar::{NumType, SvarTable};
@@ -417,28 +418,33 @@ impl Database {
                 .ok_or(MiliError::MalformedDirectory(
                     "query: total byte count overflow",
                 ))?;
-        let count = total_bytes / plan.num_type.width();
+        let width = plan.num_type.width();
+        let count = total_bytes / width;
+        let count_per_state = bytes_per_state / width;
+
+        // Per-state context: rebased plan + mmap + path. Resolving the
+        // mmap touches `state_mmaps: Mutex<HashMap>` so do it once up
+        // front rather than inside the parallel iterator. The rebase
+        // also touches a checked-arithmetic path that can fail; keep
+        // it serial so errors short-circuit cleanly.
+        let ctxs: Vec<StateCtx> = self.build_state_contexts(args.states, &plan)?;
 
         macro_rules! gather {
             ($ty:ty, $variant:ident) => {{
-                let mut v: Vec<$ty> = Vec::with_capacity(count);
-                for (i, &sidx) in args.states.iter().enumerate() {
-                    let state = self.states[sidx];
-                    let mmap = self.state_mmap(state.file)?;
-                    let path = state_file_path(&self.a_path, self.header.suffix_width, state.file)
-                        .ok_or(MiliError::MalformedDirectory(
-                            "cannot derive state-file path from .A path",
-                        ))?;
-                    let rebased = if i == 0 {
-                        plan.clone()
-                    } else {
-                        plan.rebased(state_data_start(state)?)?
-                    };
-                    for slab in &rebased.slabs {
-                        let b = slab_bytes(&mmap, &path, slab.start, slab.len)?;
-                        crate::endian::for_each_swap::<$ty, _>(b, byteswap, |x| v.push(x));
-                    }
-                }
+                let mut v: Vec<$ty> = vec![<$ty>::default(); count];
+                v.par_chunks_mut(count_per_state)
+                    .zip(ctxs.par_iter())
+                    .try_for_each(|(chunk, ctx)| -> Result<()> {
+                        let mut out_idx = 0usize;
+                        for slab in &ctx.plan.slabs {
+                            let b = slab_bytes(&ctx.mmap, &ctx.path, slab.start, slab.len)?;
+                            crate::endian::for_each_swap::<$ty, _>(b, byteswap, |x| {
+                                chunk[out_idx] = x;
+                                out_idx += 1;
+                            });
+                        }
+                        Ok(())
+                    })?;
                 StateValues::$variant(v)
             }};
         }
@@ -449,6 +455,33 @@ impl Database {
             NumType::Int4 => gather!(i32, I32),
             NumType::Int8 => gather!(i64, I64),
         })
+    }
+
+    /// Prefetch the per-state read context (rebased plan, state-file
+    /// mmap, state-file path) for every requested state. Touches
+    /// `state_mmaps` and the rebase math single-threaded so the
+    /// parallel gather pass sees only `&self` and disjoint output
+    /// chunks.
+    fn build_state_contexts(&self, states: &[usize], plan: &ReadPlan) -> Result<Vec<StateCtx>> {
+        let mut ctxs = Vec::with_capacity(states.len());
+        for (i, &sidx) in states.iter().enumerate() {
+            let state = self.states[sidx];
+            let mmap = self.state_mmap(state.file)?;
+            let path = state_file_path(&self.a_path, self.header.suffix_width, state.file).ok_or(
+                MiliError::MalformedDirectory("cannot derive state-file path from .A path"),
+            )?;
+            let rebased = if i == 0 {
+                plan.clone()
+            } else {
+                plan.rebased(state_data_start(state)?)?
+            };
+            ctxs.push(StateCtx {
+                plan: rebased,
+                mmap,
+                path,
+            });
+        }
+        Ok(ctxs)
     }
 
     /// Walk `ELEM_CONNS` for `classname` and return the labels whose
@@ -619,6 +652,15 @@ pub struct QueryArgs<'a> {
     pub states: &'a [usize],
     pub materials: Option<&'a [i32]>,
     pub ips: Option<&'a [usize]>,
+}
+
+/// Per-state read context built before the parallel gather pass.
+/// `plan` is rebased to this state's `state_data_start`; `mmap` and
+/// `path` are owned (Arc-shared) handles for the slab reads.
+struct StateCtx {
+    plan: ReadPlan,
+    mmap: Arc<Mmap>,
+    path: PathBuf,
 }
 
 /// Byte offset of a state's data block inside its state file. Skips

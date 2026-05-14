@@ -1,6 +1,6 @@
 //! State-data read path: byte-offset math and gather planning for
-//! single-svar queries with label, integration-point, and multi-state
-//! filters across both subrecord organisations.
+//! single-svar queries with label, integration-point, atom-subscript,
+//! and multi-state filters across both subrecord organisations.
 //!
 //! The byte-layout matrix in `planning/shared/format.md` § "Subrecord
 //! byte-layout matrix" is the source of truth. For svar `s` at ordinal
@@ -25,6 +25,14 @@
 //! `VEC_ARRAY` is wrong (logged under `status.md` § "Resolved questions
 //! log") — the writer / reader treat components as fastest. Both
 //! layouts agree for the common `prod(dims) == n_ip` case used here.
+//!
+//! Array-svar subscript (`"hx[3]"`, 1-based) and bare-component lookups
+//! (`"sx"` resolving to the `sx` component of a `stress` VECTOR svar)
+//! both go through [`parse_query_name`] + [`resolve_target`]. They
+//! collapse onto the same gather primitive: an [`AtomPicker::Specific`]
+//! list of 0-based atom indices into the per-object slot of the base
+//! svar that actually appears in the subrecord. (`reference/mili-
+//! python/src/mili/miliinternal.py:976-1016, 1272-1286`.)
 
 use crate::error::{MiliError, Result};
 use crate::srec::{derive_lumps, Lumps, Organization, Srec, Subrecord};
@@ -142,36 +150,271 @@ pub(crate) struct Filter<'a> {
 pub(crate) fn plan_state_svar(
     srec: &Srec,
     svars: &SvarTable,
-    svar_name: &str,
+    svar_input: &str,
     class_name: &str,
     state_data_start: u64,
     filter: Filter<'_>,
 ) -> Result<ReadPlan> {
-    let target = svars
-        .get(svar_name)
-        .ok_or_else(|| MiliError::UnknownSvar(svar_name.to_owned()))?;
-    let num_type = target.num_type;
+    let parsed = parse_query_name(svar_input)?;
+    let mut resolved = resolve_target(svars, parsed, filter.ips)?;
 
-    let ip_kept = resolve_ip_kept(target, filter.ips)?;
+    let mut matches = collect_matching_subrecs(
+        srec,
+        svars,
+        &resolved.base_name,
+        class_name,
+        state_data_start,
+    )?;
 
-    let matches = collect_matching_subrecs(srec, svars, svar_name, class_name, state_data_start)?;
+    // Bare component-name fallback: if no subrec carries the named svar
+    // directly, see whether it is a component of a VECTOR parent
+    // (`reference/mili-python/src/mili/miliinternal.py:990-996`) and
+    // retry against that parent. VEC_ARRAY parents are intentionally
+    // not auto-resolved here — the component data is spread across IP
+    // slots and needs explicit `ips` filter composition; defer that to
+    // when a fixture demands it.
+    if matches.is_empty() && filter.ips.is_none() {
+        if let Some(parent) = find_vector_parent(svars, &resolved.base_name) {
+            let parent_matches =
+                collect_matching_subrecs(srec, svars, &parent.name, class_name, state_data_start)?;
+            if !parent_matches.is_empty() {
+                resolved = Resolved {
+                    base_name: parent.name.clone(),
+                    num_type: resolved.num_type,
+                    picker: AtomPicker::Specific {
+                        atom_indices: parent.comp_atom_indices,
+                    },
+                };
+                matches = parent_matches;
+            }
+        }
+    }
+
     if matches.is_empty() {
         return Err(MiliError::NoMatchingSubrec {
-            svar: svar_name.to_owned(),
+            svar: svar_input.to_owned(),
             class: class_name.to_owned(),
         });
     }
 
+    let width = resolved.num_type.width();
     let slabs = match filter.labels {
-        None => gather_all(&matches, target, &ip_kept),
-        Some(labels) => gather_by_labels(&matches, target, &ip_kept, labels, class_name)?,
+        None => gather_all(&matches, width, &resolved.picker),
+        Some(labels) => gather_by_labels(&matches, width, &resolved.picker, labels, class_name)?,
     };
 
     Ok(ReadPlan {
-        num_type,
+        num_type: resolved.num_type,
         slabs,
         state_data_start,
     })
+}
+
+/// Parsed form of a user-supplied svar query name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum QueryName<'a> {
+    /// `"hx"`, `"sx"` — plain name lookup.
+    Plain(&'a str),
+    /// `"hx[3]"`, `"hx[1,2]"` — 1-based subscript into an ARRAY svar.
+    /// Indices are signed so out-of-range / 0 / negative values can be
+    /// rejected by `resolve_target` with a typed `InvalidSubscript`,
+    /// matching mili-python's error contract
+    /// (`reference/mili-python/src/mili/miliinternal.py:1276-1286`).
+    Subscript { base: &'a str, indices: Vec<i64> },
+}
+
+/// Parse a query-name string. The grammar is intentionally minimal:
+/// a bare name, or `name[i,j,k,...]` where each component is a signed
+/// integer literal. Whitespace inside the bracket is tolerated.
+pub(crate) fn parse_query_name(input: &str) -> Result<QueryName<'_>> {
+    let Some(open) = input.find('[') else {
+        return Ok(QueryName::Plain(input));
+    };
+    if !input.ends_with(']') {
+        return Err(MiliError::InvalidSubscript {
+            input: input.to_owned(),
+            reason: "missing closing ']'",
+        });
+    }
+    let base = &input[..open];
+    if base.is_empty() {
+        return Err(MiliError::InvalidSubscript {
+            input: input.to_owned(),
+            reason: "missing svar name before '['",
+        });
+    }
+    let inner = &input[open + 1..input.len() - 1];
+    if inner.is_empty() {
+        return Err(MiliError::InvalidSubscript {
+            input: input.to_owned(),
+            reason: "empty subscript",
+        });
+    }
+    let mut indices = Vec::new();
+    for tok in inner.split(',') {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            return Err(MiliError::InvalidSubscript {
+                input: input.to_owned(),
+                reason: "empty subscript index",
+            });
+        }
+        let n: i64 = tok.parse().map_err(|_| MiliError::InvalidSubscript {
+            input: input.to_owned(),
+            reason: "subscript index is not an integer",
+        })?;
+        indices.push(n);
+    }
+    Ok(QueryName::Subscript { base, indices })
+}
+
+/// Resolution of a parsed [`QueryName`] against the svar dictionary.
+/// `base_name` is the svar name to look up in `subrec.svar_names`;
+/// `picker` describes how to extract from each per-object slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Resolved {
+    base_name: String,
+    num_type: NumType,
+    picker: AtomPicker,
+}
+
+fn resolve_target(
+    svars: &SvarTable,
+    name: QueryName<'_>,
+    ips: Option<&[usize]>,
+) -> Result<Resolved> {
+    match name {
+        QueryName::Plain(n) => {
+            let s = svars
+                .get(n)
+                .ok_or_else(|| MiliError::UnknownSvar(n.to_owned()))?;
+            let picker = resolve_atom_picker(s, ips)?;
+            Ok(Resolved {
+                base_name: n.to_owned(),
+                num_type: s.num_type,
+                picker,
+            })
+        }
+        QueryName::Subscript { base, indices } => {
+            let s = svars
+                .get(base)
+                .ok_or_else(|| MiliError::UnknownSvar(base.to_owned()))?;
+            if ips.is_some() {
+                return Err(MiliError::IpFilterNotApplicable {
+                    svar: base.to_owned(),
+                    agg: agg_label(&s.agg),
+                });
+            }
+            let dims = match &s.agg {
+                SvarAgg::Array { dims } => dims.clone(),
+                _ => {
+                    return Err(MiliError::SubscriptNotApplicable {
+                        svar: base.to_owned(),
+                        agg: agg_label(&s.agg),
+                    });
+                }
+            };
+            let atom_idx = ravel_subscript(base, &indices, &dims)?;
+            Ok(Resolved {
+                base_name: base.to_owned(),
+                num_type: s.num_type,
+                picker: AtomPicker::Specific {
+                    atom_indices: vec![atom_idx],
+                },
+            })
+        }
+    }
+}
+
+/// Convert a 1-based subscript `indices` for an `ARRAY` svar with
+/// shape `dims` into a row-major 0-based atom index. Errors mirror
+/// mili-python's behaviour:
+/// - `len(indices) > rank` → invalid.
+/// - `len(indices) < rank` → partial-dim slice, not yet supported (the
+///   only fixture exercising arrays is 1-D, so we defer multi-dim
+///   partials with a typed `Unsupported`).
+/// - any index `< 1` or `> dims[i]` → out-of-range (1-based).
+fn ravel_subscript(base: &str, indices: &[i64], dims: &[i32]) -> Result<usize> {
+    if indices.len() > dims.len() {
+        return Err(MiliError::InvalidSubscript {
+            input: format_subscript(base, indices),
+            reason: "too many indices for array svar",
+        });
+    }
+    if indices.len() < dims.len() {
+        return Err(MiliError::Unsupported(
+            "partial-dim array subscript (only full-rank indexing supported)",
+        ));
+    }
+    let mut atom_idx: usize = 0;
+    for (i, &idx) in indices.iter().enumerate() {
+        let dim = dims[i];
+        if idx < 1 || idx > i64::from(dim) {
+            return Err(MiliError::InvalidSubscript {
+                input: format_subscript(base, indices),
+                reason: "subscript index out of range (must be 1..=dim)",
+            });
+        }
+        let mut stride: usize = 1;
+        for &d in &dims[i + 1..] {
+            if d < 0 {
+                return Err(MiliError::MalformedDirectory("svar: negative dim"));
+            }
+            stride = stride
+                .checked_mul(d as usize)
+                .ok_or(MiliError::MalformedDirectory("svar: dim product overflow"))?;
+        }
+        let term = ((idx - 1) as usize)
+            .checked_mul(stride)
+            .ok_or(MiliError::MalformedDirectory("svar: index overflow"))?;
+        atom_idx = atom_idx
+            .checked_add(term)
+            .ok_or(MiliError::MalformedDirectory("svar: index overflow"))?;
+    }
+    Ok(atom_idx)
+}
+
+fn format_subscript(base: &str, indices: &[i64]) -> String {
+    let parts: Vec<String> = indices.iter().map(i64::to_string).collect();
+    format!("{base}[{}]", parts.join(","))
+}
+
+/// Vector-parent resolution result for a bare component name.
+struct VectorParent {
+    name: String,
+    /// Atom indices of the component within the parent's per-object slot.
+    comp_atom_indices: Vec<usize>,
+}
+
+/// If `name` is a component of exactly one VECTOR parent svar, return
+/// it. VEC_ARRAY parents are skipped — their component data is striped
+/// across IP slots and needs explicit IP composition; deferring until a
+/// fixture exercises it. If multiple VECTOR parents claim the same
+/// component name, also skip (ambiguous).
+fn find_vector_parent(svars: &SvarTable, name: &str) -> Option<VectorParent> {
+    let mut found: Option<VectorParent> = None;
+    for parent in svars.iter() {
+        let SvarAgg::Vector { comps } = &parent.agg else {
+            continue;
+        };
+        let Some(idx) = comps.iter().position(|c| c == name) else {
+            continue;
+        };
+        let mut offset = 0usize;
+        for c in &comps[..idx] {
+            offset += svars.get(c).map_or(0, |sv| sv.atoms);
+        }
+        let count = svars.get(name).map_or(1, |sv| sv.atoms);
+        let indices: Vec<usize> = (offset..offset + count).collect();
+        if found.is_some() {
+            return None;
+        }
+        found = Some(VectorParent {
+            name: parent.name.clone(),
+            comp_atom_indices: indices,
+        });
+    }
+    found
 }
 
 /// One subrecord that carries the queried `(svar, class)`. Holds the
@@ -231,11 +474,11 @@ fn collect_matching_subrecs<'a>(
     Ok(out)
 }
 
-fn gather_all(matches: &[SubrecMatch<'_>], target: &Svar, ip_kept: &IpKept) -> Vec<ByteSlab> {
+fn gather_all(matches: &[SubrecMatch<'_>], width: usize, picker: &AtomPicker) -> Vec<ByteSlab> {
     let mut slabs = Vec::new();
     for m in matches {
         for j in 0..m.n {
-            push_object_rows(&mut slabs, m, target, ip_kept, j);
+            push_object_rows(&mut slabs, m, width, picker, j);
         }
     }
     slabs
@@ -243,8 +486,8 @@ fn gather_all(matches: &[SubrecMatch<'_>], target: &Svar, ip_kept: &IpKept) -> V
 
 fn gather_by_labels(
     matches: &[SubrecMatch<'_>],
-    target: &Svar,
-    ip_kept: &IpKept,
+    width: usize,
+    picker: &AtomPicker,
     labels: &[i32],
     class_name: &str,
 ) -> Result<Vec<ByteSlab>> {
@@ -258,7 +501,7 @@ fn gather_by_labels(
                         "query: label ordinal exceeds subrec object count",
                     ));
                 }
-                push_object_rows(&mut slabs, m, target, ip_kept, ord);
+                push_object_rows(&mut slabs, m, width, picker, ord);
                 found = true;
                 break;
             }
@@ -276,8 +519,8 @@ fn gather_by_labels(
 fn push_object_rows(
     slabs: &mut Vec<ByteSlab>,
     m: &SubrecMatch<'_>,
-    target: &Svar,
-    ip_kept: &IpKept,
+    width: usize,
+    picker: &AtomPicker,
     ordinal: usize,
 ) {
     let s = m.svar_idx;
@@ -291,18 +534,25 @@ fn push_object_rows(
             (m.subrec_start as usize) + ordinal * m.lumps.bytes_per_object() + svar_off
         }
     };
-    match ip_kept {
-        IpKept::All => slabs.push(ByteSlab {
+    match picker {
+        AtomPicker::AllAtoms => slabs.push(ByteSlab {
             start: base,
             len: svar_size,
         }),
-        IpKept::Subset { atoms_per_ip, ips } => {
-            let w = target.num_type.width();
-            let stride = *atoms_per_ip * w;
+        AtomPicker::PerIp { atoms_per_ip, ips } => {
+            let stride = *atoms_per_ip * width;
             for &ip in ips {
                 slabs.push(ByteSlab {
                     start: base + ip * stride,
                     len: stride,
+                });
+            }
+        }
+        AtomPicker::Specific { atom_indices } => {
+            for &a in atom_indices {
+                slabs.push(ByteSlab {
+                    start: base + a * width,
+                    len: width,
                 });
             }
         }
@@ -322,21 +572,27 @@ pub(crate) fn ordinal_in_subrec(id_blocks: &[(i32, i32)], label: i32) -> Option<
     None
 }
 
-/// Resolved IP filter for a particular svar.
-enum IpKept {
-    /// No IP filter, or no `dims`-axis to slice — read the whole per-
-    /// object atom run.
-    All,
-    /// Selected IP indices; each emits `atoms_per_ip` atoms.
-    Subset {
+/// Per-object atom selection for the gather pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AtomPicker {
+    /// Read every atom of the svar slot — one contiguous slab per object.
+    AllAtoms,
+    /// `vec_array` `ips` filter: emit one slab per selected IP, each
+    /// `atoms_per_ip` atoms wide.
+    PerIp {
         atoms_per_ip: usize,
         ips: Vec<usize>,
     },
+    /// Pick a specific list of 0-based atom indices from the per-object
+    /// slot — used for array subscript (`"hx[3]"`) and for the
+    /// bare-component lookup that maps a VECTOR's component name onto
+    /// the parent svar's atom range.
+    Specific { atom_indices: Vec<usize> },
 }
 
-fn resolve_ip_kept(target: &Svar, ips: Option<&[usize]>) -> Result<IpKept> {
+fn resolve_atom_picker(target: &Svar, ips: Option<&[usize]>) -> Result<AtomPicker> {
     let Some(req) = ips else {
-        return Ok(IpKept::All);
+        return Ok(AtomPicker::AllAtoms);
     };
     let dims = match &target.agg {
         SvarAgg::VecArray { dims, .. } => dims.clone(),
@@ -353,15 +609,13 @@ fn resolve_ip_kept(target: &Svar, ips: Option<&[usize]>) -> Result<IpKept> {
             "vec_array svar has zero atoms or zero dims",
         ));
     }
-    // `atoms` already accounts for vector components within each IP
-    // slot (see `Svar::atoms` doc); per-IP atom count is total / IPs.
     let atoms_per_ip = target.atoms / n_ip;
     for &ip in req {
         if ip >= n_ip {
             return Err(MiliError::IpOutOfRange { ip, atoms: n_ip });
         }
     }
-    Ok(IpKept::Subset {
+    Ok(AtomPicker::PerIp {
         atoms_per_ip,
         ips: req.to_vec(),
     })
@@ -990,6 +1244,412 @@ mod tests {
     }
 
     // ---------------------------- rebased ----------------------------------
+
+    // ---------------------------- query-name parser ------------------------
+
+    #[test]
+    fn parse_query_name_plain_passes_through() {
+        let q = parse_query_name("hx").unwrap();
+        assert_eq!(q, QueryName::Plain("hx"));
+    }
+
+    #[test]
+    fn parse_query_name_single_subscript() {
+        let q = parse_query_name("hx[3]").unwrap();
+        assert_eq!(
+            q,
+            QueryName::Subscript {
+                base: "hx",
+                indices: vec![3]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_query_name_multi_subscript_with_whitespace() {
+        // Whitespace inside the bracket should be tolerated.
+        let q = parse_query_name("hx[1, 2 ,3]").unwrap();
+        assert_eq!(
+            q,
+            QueryName::Subscript {
+                base: "hx",
+                indices: vec![1, 2, 3]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_query_name_keeps_negative_and_zero_indices_for_later_validation() {
+        // Parsing accepts any signed integer literal; range-checking
+        // happens in `resolve_target`. Matches mili-python.
+        let q = parse_query_name("hx[-2]").unwrap();
+        assert_eq!(
+            q,
+            QueryName::Subscript {
+                base: "hx",
+                indices: vec![-2]
+            }
+        );
+        let q = parse_query_name("hx[0]").unwrap();
+        assert_eq!(
+            q,
+            QueryName::Subscript {
+                base: "hx",
+                indices: vec![0]
+            }
+        );
+    }
+
+    #[test]
+    fn parse_query_name_rejects_unbalanced_bracket() {
+        assert!(matches!(
+            parse_query_name("hx[3").unwrap_err(),
+            MiliError::InvalidSubscript { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_query_name_rejects_empty_index() {
+        assert!(matches!(
+            parse_query_name("hx[]").unwrap_err(),
+            MiliError::InvalidSubscript { .. }
+        ));
+        assert!(matches!(
+            parse_query_name("hx[1,]").unwrap_err(),
+            MiliError::InvalidSubscript { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_query_name_rejects_non_integer_index() {
+        assert!(matches!(
+            parse_query_name("hx[abc]").unwrap_err(),
+            MiliError::InvalidSubscript { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_query_name_rejects_missing_base() {
+        assert!(matches!(
+            parse_query_name("[3]").unwrap_err(),
+            MiliError::InvalidSubscript { .. }
+        ));
+    }
+
+    // ---------------------------- array subscript ravel --------------------
+
+    #[test]
+    fn ravel_subscript_one_d_is_index_minus_one() {
+        assert_eq!(ravel_subscript("hx", &[1], &[8]).unwrap(), 0);
+        assert_eq!(ravel_subscript("hx", &[3], &[8]).unwrap(), 2);
+        assert_eq!(ravel_subscript("hx", &[8], &[8]).unwrap(), 7);
+    }
+
+    #[test]
+    fn ravel_subscript_two_d_is_row_major() {
+        // dims=[3,4]; subscript [2,3] (1-based) → 0-based [1,2] → 1*4+2=6.
+        assert_eq!(ravel_subscript("g", &[2, 3], &[3, 4]).unwrap(), 6);
+        assert_eq!(ravel_subscript("g", &[1, 1], &[3, 4]).unwrap(), 0);
+        assert_eq!(ravel_subscript("g", &[3, 4], &[3, 4]).unwrap(), 11);
+    }
+
+    #[test]
+    fn ravel_subscript_rejects_out_of_range() {
+        let err = ravel_subscript("hx", &[0], &[8]).unwrap_err();
+        assert!(matches!(err, MiliError::InvalidSubscript { .. }));
+        let err = ravel_subscript("hx", &[9], &[8]).unwrap_err();
+        assert!(matches!(err, MiliError::InvalidSubscript { .. }));
+        let err = ravel_subscript("hx", &[-2], &[8]).unwrap_err();
+        assert!(matches!(err, MiliError::InvalidSubscript { .. }));
+    }
+
+    #[test]
+    fn ravel_subscript_rejects_extra_indices() {
+        let err = ravel_subscript("hx", &[1, 1], &[8]).unwrap_err();
+        assert!(matches!(err, MiliError::InvalidSubscript { .. }));
+    }
+
+    #[test]
+    fn ravel_subscript_defers_partial_dim_with_typed_error() {
+        // dims=[3,4], only one index given → partial-dim slice (not yet
+        // implemented; surface a typed Unsupported rather than silently
+        // raveling as if rank-1).
+        let err = ravel_subscript("g", &[1], &[3, 4]).unwrap_err();
+        assert!(matches!(err, MiliError::Unsupported(_)));
+    }
+
+    // ---------------------------- subscript plan ---------------------------
+
+    #[test]
+    fn plan_array_subscript_picks_atom_from_each_object() {
+        // hx as an ARRAY svar with dims=[8] of f32, in a RO subrec over
+        // 5 objects. `hx[3]` should emit per-object 4-byte slabs at
+        // svar_base + 2*4 = svar_base + 8.
+        let svars = make_svars(&[("hx", NumType::Float4, 8)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["hx"],
+                &[(1, 5)],
+            )],
+        };
+        let plan = plan_state_svar(&srec, &svars, "hx[3]", "brick", 0, no_filter()).unwrap();
+        assert_eq!(plan.num_type, NumType::Float4);
+        // RO over N=5, svar_size = 32; svar_off = 0; per-obj base = j*32.
+        // Atom 2 of each → base + 8, len 4.
+        assert_eq!(plan.slabs.len(), 5);
+        for (j, slab) in plan.slabs.iter().enumerate() {
+            assert_eq!(slab.start, j * 32 + 8);
+            assert_eq!(slab.len, 4);
+        }
+    }
+
+    #[test]
+    fn plan_array_subscript_in_object_ordered_subrec() {
+        // Same hx[8] f32 array, but in an OO subrec — per-object stride
+        // is the svar slot itself = 32 bytes. `hx[3]` slabs at j*32 + 8.
+        let svars = make_svars(&[("hx", NumType::Float4, 8)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ObjectOrdered,
+                &["hx"],
+                &[(1, 3)],
+            )],
+        };
+        let plan = plan_state_svar(&srec, &svars, "hx[3]", "brick", 100, no_filter()).unwrap();
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab { start: 108, len: 4 },
+                ByteSlab { start: 140, len: 4 },
+                ByteSlab { start: 172, len: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_array_subscript_composes_with_label_filter() {
+        let svars = make_svars(&[("hx", NumType::Float4, 8)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["hx"],
+                &[(1, 4)],
+            )],
+        };
+        // labels [3, 1] → ordinals [2, 0]. Each emits one 4-byte slab
+        // for hx[3] at svar_base + 2*4.
+        let f = Filter {
+            labels: Some(&[3, 1]),
+            ips: None,
+        };
+        let plan = plan_state_svar(&srec, &svars, "hx[3]", "brick", 0, f).unwrap();
+        // N=4, svar_size=32 → per-obj base = ord*32; atom2 byte off = 8.
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab { start: 72, len: 4 },
+                ByteSlab { start: 8, len: 4 },
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_array_subscript_on_scalar_errors() {
+        let svars = make_svars(&[("svA", NumType::Float4, 1)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "node",
+                Organization::ResultOrdered,
+                &["svA"],
+                &[(1, 4)],
+            )],
+        };
+        let err = plan_state_svar(&srec, &svars, "svA[1]", "node", 0, no_filter()).unwrap_err();
+        assert!(matches!(err, MiliError::SubscriptNotApplicable { .. }));
+    }
+
+    #[test]
+    fn plan_array_subscript_on_vec_array_errors() {
+        let svars = make_vec_array_svars("stress", NumType::Float4, &[2], &["sx", "sy"]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "shell",
+                Organization::ResultOrdered,
+                &["stress"],
+                &[(1, 2)],
+            )],
+        };
+        let err = plan_state_svar(&srec, &svars, "stress[1]", "shell", 0, no_filter()).unwrap_err();
+        assert!(matches!(err, MiliError::SubscriptNotApplicable { .. }));
+    }
+
+    #[test]
+    fn plan_array_subscript_rejects_out_of_range_index() {
+        let svars = make_svars(&[("hx", NumType::Float4, 8)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["hx"],
+                &[(1, 4)],
+            )],
+        };
+        for bad in ["hx[0]", "hx[9]", "hx[-2]"] {
+            let err = plan_state_svar(&srec, &svars, bad, "brick", 0, no_filter()).unwrap_err();
+            assert!(
+                matches!(err, MiliError::InvalidSubscript { .. }),
+                "expected InvalidSubscript for {bad}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_array_subscript_rejects_too_many_indices() {
+        let svars = make_svars(&[("hx", NumType::Float4, 8)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["hx"],
+                &[(1, 4)],
+            )],
+        };
+        let err = plan_state_svar(&srec, &svars, "hx[1,1]", "brick", 0, no_filter()).unwrap_err();
+        assert!(matches!(err, MiliError::InvalidSubscript { .. }));
+    }
+
+    #[test]
+    fn plan_array_subscript_with_ips_filter_errors() {
+        let svars = make_svars(&[("hx", NumType::Float4, 8)]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["hx"],
+                &[(1, 4)],
+            )],
+        };
+        let f = Filter {
+            labels: None,
+            ips: Some(&[0]),
+        };
+        let err = plan_state_svar(&srec, &svars, "hx[1]", "brick", 0, f).unwrap_err();
+        assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
+    }
+
+    // ---------------------------- bare component lookup --------------------
+
+    /// Build a `SvarTable` with a single VECTOR svar `parent` of f32,
+    /// whose components are inline scalar f32s named per `comps`.
+    fn make_vector_svars(parent: &str, nt: NumType, comps: &[&str]) -> SvarTable {
+        let code = match nt {
+            NumType::Float4 => 2,
+            NumType::Float8 => 4,
+            NumType::Int4 => 5,
+            NumType::Int8 => 7,
+        };
+        let mut svar_ints: Vec<i32> = Vec::new();
+        let mut chars: Vec<u8> = Vec::new();
+        svar_ints.push(1);
+        svar_ints.push(code);
+        svar_ints.push(comps.len() as i32);
+        chars.extend_from_slice(parent.as_bytes());
+        chars.push(0);
+        chars.extend_from_slice(parent.as_bytes());
+        chars.push(0);
+        for c in comps {
+            chars.extend_from_slice(c.as_bytes());
+            chars.push(0);
+        }
+        for c in comps {
+            svar_ints.push(0);
+            svar_ints.push(code);
+            chars.extend_from_slice(c.as_bytes());
+            chars.push(0);
+            chars.extend_from_slice(c.as_bytes());
+            chars.push(0);
+        }
+        finalize_svar_table(&svar_ints, &chars)
+    }
+
+    #[test]
+    fn plan_bare_component_resolves_to_parent_vector_atom_range() {
+        // VECTOR `stress` with comps [sx, sy, sz] in a RO subrec over
+        // 4 objects. Querying "sy" should resolve to the parent and
+        // pick the second atom (atom_idx = 1) from each object.
+        let svars = make_vector_svars("stress", NumType::Float4, &["sx", "sy", "sz"]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["stress"],
+                &[(1, 4)],
+            )],
+        };
+        let plan = plan_state_svar(&srec, &svars, "sy", "brick", 0, no_filter()).unwrap();
+        // N=4, lump_size=12 (3 atoms * 4); per-obj base = j*12. sy → atom 1 → +4.
+        assert_eq!(plan.slabs.len(), 4);
+        for (j, slab) in plan.slabs.iter().enumerate() {
+            assert_eq!(slab.start, j * 12 + 4);
+            assert_eq!(slab.len, 4);
+        }
+    }
+
+    #[test]
+    fn plan_bare_component_prefers_direct_match_when_subrec_carries_it() {
+        // sx exists both as a top-level scalar svar (parsed via vector
+        // recursion) AND in a subrec that holds it directly. The direct
+        // match wins — the gather is one slab per object of svar_size.
+        let svars = make_vector_svars("stress", NumType::Float4, &["sx", "sy"]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "brick",
+                Organization::ResultOrdered,
+                &["sx"],
+                &[(1, 3)],
+            )],
+        };
+        let plan = plan_state_svar(&srec, &svars, "sx", "brick", 0, no_filter()).unwrap();
+        assert_eq!(plan.slabs.len(), 3);
+        for (j, slab) in plan.slabs.iter().enumerate() {
+            assert_eq!(slab.start, j * 4);
+            assert_eq!(slab.len, 4);
+        }
+    }
 
     #[test]
     fn rebased_shifts_all_slabs_by_delta() {

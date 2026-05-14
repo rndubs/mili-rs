@@ -87,6 +87,12 @@ pub enum MiliError {
 
     #[error("material {material} not declared")]
     UnknownMaterial { material: i32 },
+
+    #[error("invalid svar subscript {input:?}: {reason}")]
+    InvalidSubscript { input: String, reason: &'static str },
+
+    #[error("subscript notation not applicable to svar {svar:?} ({agg} agg)")]
+    SubscriptNotApplicable { svar: String, agg: &'static str },
 }
 
 pub type Result<T, E = MiliError> = core::result::Result<T, E>;
