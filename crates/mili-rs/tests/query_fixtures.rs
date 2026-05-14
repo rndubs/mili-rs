@@ -11,14 +11,14 @@
 //!    bytes at the offset computed by hand from the C formula
 //!    `state.offset + 8 + sum_prior_subrec_sizes + N * lump_offsets[s]`
 //!    (`reference/mili/src/srec.c:2332-2333`).
-//! 3. OBJECT_ORDERED rejection — basic1's brick subrecs are
-//!    object-ordered, so querying a brick-only svar returns the
-//!    Step-10 `Unsupported` error.
+//! 3. OBJECT_ORDERED gather — basic1's brick subrecs are
+//!    object-ordered, so querying a brick-only svar must return
+//!    typed values from the OO offset math.
 //! 4. Error semantics — unknown svar / class / state.
 
 use std::path::{Path, PathBuf};
 
-use mili_rs::{Database, MiliError, StateValues};
+use mili_rs::{Database, MiliError, QueryArgs, StateValues};
 
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -94,19 +94,26 @@ fn basic1_nodvel_at_state_50_self_consistent() {
 }
 
 #[test]
-fn basic1_object_ordered_subrec_errors_until_step_10() {
+fn basic1_object_ordered_sand_decodes_one_f32_per_brick() {
     let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
     if !path.exists() {
         return;
     }
     let db = Database::open(&path).unwrap();
-    // basic1's `sand` lives in OBJECT_ORDERED brick subrecs. Step 10
-    // adds the OBJECT_ORDERED gather; Step 9 surfaces a clean error.
-    let err = db.state_var_values("sand", "brick", 0).unwrap_err();
-    assert!(
-        matches!(err, MiliError::Unsupported(_)),
-        "expected Unsupported, got {err:?}"
-    );
+    // basic1's `sand` lives in OBJECT_ORDERED brick subrecs (one f32
+    // per element). The brick class spans 36 elements in basic1.
+    let values = db.state_var_values("sand", "brick", 0).unwrap();
+    let StateValues::F32(v) = values else {
+        panic!("expected f32 for sand");
+    };
+    let bricks = db
+        .meshes()
+        .mesh(mili_rs::MeshId(0))
+        .unwrap()
+        .class("brick")
+        .unwrap()
+        .element_count() as usize;
+    assert_eq!(v.len(), bricks);
 }
 
 #[test]
@@ -134,6 +141,385 @@ fn basic1_unknown_class_errors() {
     // 'brick' must surface NoMatchingSubrec.
     let err = db.state_var_values("nodpos", "brick", 0).unwrap_err();
     assert!(matches!(err, MiliError::NoMatchingSubrec { .. }));
+}
+
+#[test]
+fn basic1_nodpos_label_filter_returns_subset_in_argument_order() {
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+
+    // Pull all-nodes nodpos at state 0, then a 3-label subset and
+    // confirm bytes match the corresponding rows of the full read.
+    let all = db.state_var_values("nodpos", "node", 0).unwrap();
+    let StateValues::F32(all) = all else {
+        panic!("nodpos is f32");
+    };
+    let labels = [5_i32, 1, 1400];
+    let states = [0_usize];
+    let subset = db
+        .query(&QueryArgs {
+            svar: "nodpos",
+            class: "node",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(subset) = subset else {
+        panic!("nodpos is f32");
+    };
+    assert_eq!(subset.len(), 3 * 3);
+    for (i, &label) in labels.iter().enumerate() {
+        let ord = (label - 1) as usize;
+        for c in 0..3 {
+            assert_eq!(
+                subset[i * 3 + c].to_bits(),
+                all[ord * 3 + c].to_bits(),
+                "label {label}, comp {c}"
+            );
+        }
+    }
+}
+
+#[test]
+fn basic1_multi_state_nodpos_concatenates_in_state_order() {
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let s0 = db.state_var_values("nodpos", "node", 0).unwrap();
+    let s50 = db.state_var_values("nodpos", "node", 50).unwrap();
+    let StateValues::F32(s0) = s0 else {
+        unreachable!()
+    };
+    let StateValues::F32(s50) = s50 else {
+        unreachable!()
+    };
+
+    let states = [0_usize, 50];
+    let multi = db
+        .query(&QueryArgs {
+            svar: "nodpos",
+            class: "node",
+            labels: None,
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(multi) = multi else {
+        unreachable!()
+    };
+    assert_eq!(multi.len(), s0.len() + s50.len());
+    for (a, b) in multi.iter().zip(s0.iter().chain(s50.iter())) {
+        assert_eq!(a.to_bits(), b.to_bits());
+    }
+}
+
+#[test]
+fn basic1_label_filter_routes_to_object_ordered_brick() {
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let all = db.state_var_values("sand", "brick", 0).unwrap();
+    let StateValues::F32(all) = all else {
+        panic!("sand is f32");
+    };
+    let labels = [3_i32, 1];
+    let states = [0_usize];
+    let subset = db
+        .query(&QueryArgs {
+            svar: "sand",
+            class: "brick",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(subset) = subset else {
+        panic!("sand is f32");
+    };
+    assert_eq!(subset.len(), 2);
+    assert_eq!(subset[0].to_bits(), all[2].to_bits()); // label 3 -> ord 2
+    assert_eq!(subset[1].to_bits(), all[0].to_bits()); // label 1 -> ord 0
+}
+
+#[test]
+fn basic1_label_not_found_errors() {
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let labels = [999_999_i32];
+    let states = [0_usize];
+    let err = db
+        .query(&QueryArgs {
+            svar: "nodpos",
+            class: "node",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap_err();
+    assert!(matches!(err, MiliError::LabelNotFound { .. }));
+}
+
+#[test]
+fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
+    // d3samp4's `es_1a` is a vec_array svar with dims=[2] (two
+    // integration points) and components ["stress" (6 atoms), "eps"
+    // (1 atom)] — 14 atoms per object total. We confirm the inner
+    // ordering is components-fastest, IP-slowest (per mili-python's
+    // `comp_layout` in `reference/mili-python/src/mili/datatypes.py:
+    // 236-247`): an `ips=[0]` filter must return atoms [0..7] of the
+    // unfiltered read, `ips=[1]` must return atoms [7..14], and
+    // requesting both must concatenate them in order.
+    let path = corpus_path(&["serial", "d3samp4", "d3samp4.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let labels = [24_i32];
+    let states = [9_usize];
+
+    let full = db
+        .query(&QueryArgs {
+            svar: "es_1a",
+            class: "shell",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(full) = full else {
+        panic!("es_1a is f32");
+    };
+    assert_eq!(full.len(), 14);
+
+    let ips_first = [0_usize];
+    let only_ip0 = db
+        .query(&QueryArgs {
+            svar: "es_1a",
+            class: "shell",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: Some(&ips_first),
+        })
+        .unwrap();
+    let StateValues::F32(only_ip0) = only_ip0 else {
+        unreachable!()
+    };
+    assert_eq!(only_ip0.len(), 7);
+    for i in 0..7 {
+        assert_eq!(only_ip0[i].to_bits(), full[i].to_bits());
+    }
+
+    let ips_second = [1_usize];
+    let only_ip1 = db
+        .query(&QueryArgs {
+            svar: "es_1a",
+            class: "shell",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: Some(&ips_second),
+        })
+        .unwrap();
+    let StateValues::F32(only_ip1) = only_ip1 else {
+        unreachable!()
+    };
+    assert_eq!(only_ip1.len(), 7);
+    for i in 0..7 {
+        assert_eq!(only_ip1[i].to_bits(), full[7 + i].to_bits());
+    }
+
+    // Requesting both IPs in reverse order: ip1-block then ip0-block.
+    let ips_rev = [1_usize, 0];
+    let rev = db
+        .query(&QueryArgs {
+            svar: "es_1a",
+            class: "shell",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: Some(&ips_rev),
+        })
+        .unwrap();
+    let StateValues::F32(rev) = rev else {
+        unreachable!()
+    };
+    assert_eq!(rev.len(), 14);
+    for i in 0..7 {
+        assert_eq!(rev[i].to_bits(), full[7 + i].to_bits());
+        assert_eq!(rev[7 + i].to_bits(), full[i].to_bits());
+    }
+}
+
+#[test]
+fn d3samp4_vec_array_object_ordered_self_consistent() {
+    // d3samp4's `1shell_mmsvn_rec` is OBJECT_ORDERED carrying only
+    // `es_1a` over labels (1, 3844) — per-object byte size 56. Verify
+    // the API output for one label matches a direct decode of bytes
+    // at the computed in-state offset.
+    let path = corpus_path(&["serial", "d3samp4", "d3samp4.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let state = db.states()[9];
+    let state_file = corpus_path(&["serial", "d3samp4", "d3samp4.plt00"]);
+    let raw = std::fs::read(&state_file).unwrap();
+
+    // Compute 1shell_mmsvn_rec start by walking subrecs to it.
+    let srec = db.srecs().get(state.srec_format).unwrap();
+    let mut running: u64 = (state.offset as u64) + 8;
+    let mut target_start: Option<u64> = None;
+    for sub in &srec.subrecords {
+        if sub.name == "1shell_mmsvn_rec" {
+            target_start = Some(running);
+            break;
+        }
+        let mut per_obj: u64 = 0;
+        for sn in &sub.svar_names {
+            let sv = db.svars().get(sn).unwrap();
+            per_obj += (sv.atoms * sv.num_type.width()) as u64;
+        }
+        let n: u64 = sub.id_blocks.iter().map(|&(s, e)| (e - s + 1) as u64).sum();
+        running += n * per_obj;
+    }
+    let start = target_start.unwrap() as usize;
+    let label = 24usize;
+    let ord = label - 1;
+    let off = start + ord * 56;
+    let direct: Vec<f32> = raw[off..off + 56]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+
+    let labels = [label as i32];
+    let states = [9_usize];
+    let api = db
+        .query(&QueryArgs {
+            svar: "es_1a",
+            class: "shell",
+            labels: Some(&labels),
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(api) = api else {
+        unreachable!()
+    };
+    assert_eq!(api.len(), direct.len());
+    for (a, b) in api.iter().zip(direct.iter()) {
+        assert_eq!(a.to_bits(), b.to_bits(), "API differs from direct decode");
+    }
+}
+
+#[test]
+fn basic1_material_filter_selects_matching_brick_labels() {
+    // basic1's brick class splits 238 elements across 7 materials of
+    // 34 elements each (labels 1..34 are mat 1, 35..68 mat 2, etc.).
+    // Material 1 must select exactly its 34 labels and an unknown
+    // material id must surface a typed `UnknownMaterial` error.
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let all = db.state_var_values("sand", "brick", 0).unwrap();
+    let StateValues::F32(all) = all else {
+        panic!("sand is f32");
+    };
+    assert_eq!(all.len(), 238);
+
+    let materials = [1_i32];
+    let states = [0_usize];
+    let by_mat = db
+        .query(&QueryArgs {
+            svar: "sand",
+            class: "brick",
+            labels: None,
+            states: &states,
+            materials: Some(&materials),
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(by_mat) = by_mat else {
+        unreachable!()
+    };
+    assert_eq!(by_mat.len(), 34);
+    for i in 0..34 {
+        assert_eq!(by_mat[i].to_bits(), all[i].to_bits());
+    }
+
+    // Material 3 → labels 69..=102 → ordinals 68..=101 in the all-read.
+    let materials = [3_i32];
+    let mat3 = db
+        .query(&QueryArgs {
+            svar: "sand",
+            class: "brick",
+            labels: None,
+            states: &states,
+            materials: Some(&materials),
+            ips: None,
+        })
+        .unwrap();
+    let StateValues::F32(mat3) = mat3 else {
+        unreachable!()
+    };
+    assert_eq!(mat3.len(), 34);
+    for i in 0..34 {
+        assert_eq!(mat3[i].to_bits(), all[68 + i].to_bits());
+    }
+
+    let bogus = [9999_i32];
+    let err = db
+        .query(&QueryArgs {
+            svar: "sand",
+            class: "brick",
+            labels: None,
+            states: &states,
+            materials: Some(&bogus),
+            ips: None,
+        })
+        .unwrap_err();
+    assert!(matches!(err, MiliError::UnknownMaterial { material: 9999 }));
+}
+
+#[test]
+fn basic1_ips_filter_on_scalar_svar_errors() {
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        return;
+    }
+    let db = Database::open(&path).unwrap();
+    let ips = [0_usize];
+    let states = [0_usize];
+    let err = db
+        .query(&QueryArgs {
+            svar: "sand",
+            class: "brick",
+            labels: None,
+            states: &states,
+            materials: None,
+            ips: Some(&ips),
+        })
+        .unwrap_err();
+    assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
 }
 
 #[test]

@@ -28,7 +28,7 @@ use crate::error::{MiliError, Result};
 use crate::header::Header;
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
-use crate::query::{plan_state_svar, StateValues};
+use crate::query::{plan_state_svar, Filter, StateValues};
 use crate::srec::SrecTable;
 use crate::state::{self, StateMapSource, StateMeta};
 use crate::svar::{NumType, SvarTable};
@@ -312,85 +312,208 @@ impl Database {
     /// state index `state_idx`, returning a typed flat vector keyed by
     /// the svar's numeric type.
     ///
-    /// Step 9 scope (`planning/mili-rs/plan.md` § "Incremental build
-    /// order"): a single (svar, class, state) tuple,
-    /// `RESULT_ORDERED` subrecords only. Concatenates across multiple
-    /// matching subrecs in srec order. The flat layout is
-    /// `[object][atom]` row-major; per-object atom count is
-    /// `Svar::atoms`. `OBJECT_ORDERED` queries and component-name
-    /// lookups (e.g. `"sx"` for `"stress"`) land in Step 10 / 11.
+    /// Equivalent to a [`Self::query`] with no filters and a single
+    /// state. Flat output layout is `[object][atom]` row-major over the
+    /// concatenated set of matching subrecs in directory order; per-
+    /// object atom count is `Svar::atoms`.
     pub fn state_var_values(
         &self,
         svar_name: &str,
         class: &str,
         state_idx: usize,
     ) -> Result<StateValues> {
-        let state = self
-            .states
-            .get(state_idx)
-            .ok_or(MiliError::StateOutOfRange(state_idx, self.states.len()))?;
+        let states = [state_idx];
+        self.query(&QueryArgs {
+            svar: svar_name,
+            class,
+            labels: None,
+            states: &states,
+            materials: None,
+            ips: None,
+        })
+    }
+
+    /// Run a filtered, multi-state query for one svar against one class.
+    ///
+    /// Output layout is flat `[state][label][atom]` row-major. With no
+    /// filters, the `label` axis is every object of every matching
+    /// subrec in directory order; with [`QueryArgs::labels`] set, it is
+    /// the labels in argument order. With [`QueryArgs::ips`] set the
+    /// `atom` axis is `comps * ips.len()` instead of `Svar::atoms`.
+    ///
+    /// Materials are translated to a label list through this database's
+    /// `ELEM_CONNS` payload (`mesh_u.c:1556-1678` write side,
+    /// `miliinternal.py:225-228` read side). A material that selects
+    /// the same label twice via overlapping element-conns is collapsed
+    /// to a single occurrence, but the relative order of labels in
+    /// connectivity is preserved.
+    pub fn query(&self, args: &QueryArgs<'_>) -> Result<StateValues> {
+        if args.states.is_empty() {
+            return Err(MiliError::MalformedDirectory(
+                "query: states must be non-empty",
+            ));
+        }
+        for &s in args.states {
+            if s >= self.states.len() {
+                return Err(MiliError::StateOutOfRange(s, self.states.len()));
+            }
+        }
+
+        // Resolve material filter into a label list. If both materials
+        // and labels are provided, take their intersection in
+        // `args.labels` order — mili-python's `query` accepts either
+        // form but never both for the same call; we accept both for
+        // forward compatibility.
+        let material_labels: Option<Vec<i32>> = match args.materials {
+            Some(mats) => Some(self.labels_for_materials(args.class, mats)?),
+            None => None,
+        };
+        let resolved_labels: Option<Vec<i32>> = match (args.labels, material_labels.as_deref()) {
+            (None, None) => None,
+            (None, Some(m)) => Some(m.to_vec()),
+            (Some(l), None) => Some(l.to_vec()),
+            (Some(l), Some(m)) => Some(l.iter().copied().filter(|x| m.contains(x)).collect()),
+        };
+
+        let filter = Filter {
+            labels: resolved_labels.as_deref(),
+            ips: args.ips,
+        };
+
+        // Build a plan against the first state, then rebase per state.
+        // All requested states must share an srec format — mixed srec
+        // formats break the precomputable-offsets invariant
+        // (`reference/mili-python/src/mili/miliinternal.py:1393`).
+        let first = self.states[args.states[0]];
+        let first_srec_format = first.srec_format;
+        for &s in &args.states[1..] {
+            if self.states[s].srec_format != first_srec_format {
+                return Err(MiliError::Unsupported(
+                    "query across states with differing srec formats",
+                ));
+            }
+        }
         let srec = self
             .srecs
-            .get(state.srec_format)
+            .get(first_srec_format)
             .ok_or(MiliError::MalformedDirectory(
                 "state references unknown srec_format",
             ))?;
-        let state_offset = u64::try_from(state.offset)
-            .map_err(|_| MiliError::MalformedDirectory("state offset negative"))?;
-        // Each state's data block opens with an 8-byte per-state
-        // header: i32 srec_id then f32 time
-        // (`reference/mili/src/mili.c:3042-3043`,
-        // `mili_internal.h:215-250`). Skip it; subrecord bytes start
-        // immediately after.
-        let data_start = state_offset
-            .checked_add(8)
-            .ok_or(MiliError::MalformedDirectory(
-                "state offset + header overflow",
-            ))?;
-        let plan = plan_state_svar(srec, &self.svars, svar_name, class, data_start)?;
-
-        let path = state_file_path(&self.a_path, self.header.suffix_width, state.file).ok_or(
-            MiliError::MalformedDirectory("cannot derive state-file path from .A path"),
+        let first_data_start = state_data_start(first)?;
+        let plan = plan_state_svar(
+            srec,
+            &self.svars,
+            args.svar,
+            args.class,
+            first_data_start,
+            filter,
         )?;
-        let mmap = self.state_mmap(state.file)?;
-        let bytes: &[u8] = &mmap;
+
         let byteswap = !self.header.is_native_endian();
-        let count = plan.total_bytes() / plan.num_type.width();
+        let bytes_per_state = plan.total_bytes();
+        let total_bytes =
+            bytes_per_state
+                .checked_mul(args.states.len())
+                .ok_or(MiliError::MalformedDirectory(
+                    "query: total byte count overflow",
+                ))?;
+        let count = total_bytes / plan.num_type.width();
+
+        macro_rules! gather {
+            ($ty:ty, $variant:ident) => {{
+                let mut v: Vec<$ty> = Vec::with_capacity(count);
+                for (i, &sidx) in args.states.iter().enumerate() {
+                    let state = self.states[sidx];
+                    let mmap = self.state_mmap(state.file)?;
+                    let path = state_file_path(&self.a_path, self.header.suffix_width, state.file)
+                        .ok_or(MiliError::MalformedDirectory(
+                            "cannot derive state-file path from .A path",
+                        ))?;
+                    let rebased = if i == 0 {
+                        plan.clone()
+                    } else {
+                        plan.rebased(state_data_start(state)?)?
+                    };
+                    for slab in &rebased.slabs {
+                        let b = slab_bytes(&mmap, &path, slab.start, slab.len)?;
+                        crate::endian::for_each_swap::<$ty, _>(b, byteswap, |x| v.push(x));
+                    }
+                }
+                StateValues::$variant(v)
+            }};
+        }
 
         Ok(match plan.num_type {
-            NumType::Float4 => {
-                let mut v: Vec<f32> = Vec::with_capacity(count);
-                for slab in &plan.slabs {
-                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
-                    crate::endian::for_each_swap::<f32, _>(b, byteswap, |x| v.push(x));
-                }
-                StateValues::F32(v)
-            }
-            NumType::Float8 => {
-                let mut v: Vec<f64> = Vec::with_capacity(count);
-                for slab in &plan.slabs {
-                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
-                    crate::endian::for_each_swap::<f64, _>(b, byteswap, |x| v.push(x));
-                }
-                StateValues::F64(v)
-            }
-            NumType::Int4 => {
-                let mut v: Vec<i32> = Vec::with_capacity(count);
-                for slab in &plan.slabs {
-                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
-                    crate::endian::for_each_swap::<i32, _>(b, byteswap, |x| v.push(x));
-                }
-                StateValues::I32(v)
-            }
-            NumType::Int8 => {
-                let mut v: Vec<i64> = Vec::with_capacity(count);
-                for slab in &plan.slabs {
-                    let b = slab_bytes(bytes, &path, slab.start, slab.len)?;
-                    crate::endian::for_each_swap::<i64, _>(b, byteswap, |x| v.push(x));
-                }
-                StateValues::I64(v)
-            }
+            NumType::Float4 => gather!(f32, F32),
+            NumType::Float8 => gather!(f64, F64),
+            NumType::Int4 => gather!(i32, I32),
+            NumType::Int8 => gather!(i64, I64),
         })
+    }
+
+    /// Walk `ELEM_CONNS` for `classname` and return the labels whose
+    /// `mat_id` column matches any value in `materials`. Order follows
+    /// connectivity-row order across all matching `ELEM_CONNS` entries;
+    /// each label appears at most once.
+    fn labels_for_materials(&self, classname: &str, materials: &[i32]) -> Result<Vec<i32>> {
+        if materials.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mesh_id = MeshId(0);
+        let mesh = self
+            .meshes
+            .mesh(mesh_id)
+            .ok_or(MiliError::UnknownClass(classname.to_owned()))?;
+        let class = mesh
+            .class(classname)
+            .ok_or_else(|| MiliError::UnknownClass(classname.to_owned()))?;
+        let conn_idxs = self.meshes.conns_entry_indices(mesh_id, classname);
+        if conn_idxs.is_empty() {
+            return Err(MiliError::UnknownMaterial {
+                material: materials[0],
+            });
+        }
+
+        let class_labels = self
+            .labels(mesh_id, classname)?
+            .unwrap_or_else(|| label_range(&class.id_blocks));
+        let mut keep_indices: Vec<usize> = Vec::new();
+        let mut row_offset: usize = 0;
+        let mut seen_materials: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        for &idx in conn_idxs {
+            let entry = &self.directory.entries[idx];
+            let conn = mesh::decode_elem_conns(&self.a_mmap, entry, self.header)?;
+            let words = conn.conn_words;
+            if words < 2 {
+                return Err(MiliError::MalformedDirectory(
+                    "material filter: connectivity has no mat_id column",
+                ));
+            }
+            let row_count = conn.data.len() / (words * 4);
+            let raw = conn.to_i32_vec()?;
+            // mat_id is the second-to-last column; the last is part_id.
+            for row in 0..row_count {
+                let mat = raw[row * words + words - 2];
+                if materials.contains(&mat) {
+                    seen_materials.insert(mat);
+                    keep_indices.push(row_offset + row);
+                }
+            }
+            row_offset += row_count;
+        }
+        for &m in materials {
+            if !seen_materials.contains(&m) {
+                return Err(MiliError::UnknownMaterial { material: m });
+            }
+        }
+
+        let mut out = Vec::with_capacity(keep_indices.len());
+        for idx in keep_indices {
+            if let Some(&label) = class_labels.get(idx) {
+                out.push(label);
+            }
+        }
+        Ok(out)
     }
 
     fn state_mmap(&self, file_idx: i32) -> Result<Arc<Mmap>> {
@@ -475,6 +598,50 @@ fn append_i32_array(
     let byteswap = !header.is_native_endian();
     crate::endian::for_each_swap::<i32, _>(arr.data, byteswap, |v| out.push(v));
     Ok(())
+}
+
+/// Filter inputs for a single-svar query against a [`Database`].
+///
+/// `svar` is the svar's short name; `class` the object-class short
+/// name as written by `CLASS_DEF`. `labels` is a list of 1-based mili
+/// object ids (the same id space as `Subrecord::id_blocks`); `None`
+/// means "all objects". `states` is a non-empty list of state indices
+/// into [`Database::states`]. `materials` selects element labels by
+/// `mat_id` column from the class's `ELEM_CONNS`; combining with
+/// `labels` takes the intersection. `ips` is 0-based integration-point
+/// indices into the vec_array inner order; only valid against a
+/// vec_array svar.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryArgs<'a> {
+    pub svar: &'a str,
+    pub class: &'a str,
+    pub labels: Option<&'a [i32]>,
+    pub states: &'a [usize],
+    pub materials: Option<&'a [i32]>,
+    pub ips: Option<&'a [usize]>,
+}
+
+/// Byte offset of a state's data block inside its state file. Skips
+/// the 8-byte per-state header (i32 srec_id + f32 time;
+/// `reference/mili/src/mili.c:3042-3043`).
+fn state_data_start(state: StateMeta) -> Result<u64> {
+    let state_offset = u64::try_from(state.offset)
+        .map_err(|_| MiliError::MalformedDirectory("state offset negative"))?;
+    state_offset
+        .checked_add(8)
+        .ok_or(MiliError::MalformedDirectory(
+            "state offset + header overflow",
+        ))
+}
+
+fn label_range(id_blocks: &[(i32, i32)]) -> Vec<i32> {
+    let mut out = Vec::new();
+    for &(s, e) in id_blocks {
+        for label in s..=e {
+            out.push(label);
+        }
+    }
+    out
 }
 
 fn slab_bytes<'a>(bytes: &'a [u8], path: &Path, start: usize, len: usize) -> Result<&'a [u8]> {
