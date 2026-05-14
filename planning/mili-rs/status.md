@@ -15,8 +15,8 @@ Reference plan: [`plan.md`](plan.md) — step numbers below match the
 | 2    | `directory.rs` for v3, then v2 (v1 deferred)                | ✅ done    | #2    | Trailer walk, name pool UTF-8 validation, v2 i32→i64 widen. |
 | 3    | `param.rs` scalar/string/array decode; `ti.rs` open stub    | ✅ done    | #3    | `ParamTable` indexes inline TI_PARAMs; base26 v1 stub.      |
 | 4    | `family.rs` open path, `state_map` resolution, end-marker   | ✅ done    | #3    | mmap-backed `Database`, inline + tfile state-map dispatch.  |
-| 5    | `mesh.rs`: CLASS_DEF + CLASS_IDENTS, nodes, connectivity    | ✅ done    | TBD   | `MeshTable`, `Nodes`, `Connectivity`, superclass table.     |
-| 6    | high-level TI accessors (labels, materials, element_sets)   | ⏳ pending |       | TI_PARAM-as-storage pattern (`format.md` § same).           |
+| 5    | `mesh.rs`: CLASS_DEF + CLASS_IDENTS, nodes, connectivity    | ✅ done    | #4    | `MeshTable`, `Nodes`, `Connectivity`, superclass table.     |
+| 6    | high-level TI accessors (labels, materials, element_sets)   | ✅ done    | TBD   | `Database::{labels, materials, element_sets, integration_points}`; `MaterialId` newtype. |
 | 7    | `svar.rs`, `srec.rs`, `derive_lumps`                        | ⏳ pending |       | Dual int/char stream parser; offset-math unit tests.        |
 | 8    | `buffer.rs` and `endian.rs`                                 | ⏳ pending |       | Misalignment + byteswap fallbacks. Phase 1 exit criterion.  |
 | 9    | `query.rs` single-svar single-state, `RESULT_ORDERED`       | ⏳ pending |       |                                                             |
@@ -48,8 +48,8 @@ Snapshot at PR merge time — refresh on every step bump.
 
 | Suite                          | Tests | Last touched |
 |--------------------------------|------:|:-------------|
-| `cargo test --workspace`       | ~70   | Step 5       |
-| Fixture parity (corpus reads)  | 18    | Step 5       |
+| `cargo test --workspace`       | 79    | Step 6       |
+| Fixture parity (corpus reads)  | 23    | Step 6       |
 | mili-python parity (`pyo3`)    | —     | not wired yet — planned for Step 8 |
 | cargo-fuzz (nightly cron)      | —     | Step 13      |
 | Criterion benches              | —     | Step 12      |
@@ -62,6 +62,20 @@ Track in `plan.md` § "Resolved questions". Current entries:
 - Format-v1 directory support — deferred with typed `UnsupportedDir(1)`.
 - Label / material trailing convention — labels and elem-ids are
   separate TI arrays of equal length, not split halves.
+- `CLASS_DEF` superclass field (Step 6 fix-up). `entry-payloads.md`
+  documented MODIFIER1 as the superclass, but every fixture in the
+  corpus stores MODIFIER1 = 0 and the actual superclass in MODIFIER2.
+  Reader now reads MODIFIER2; the entry-payloads doc will be tightened
+  to match in the next planning pass.
+- Multiple `NODES` / `ELEM_CONNS` per `(mesh, class)` (Step 6 fix-up).
+  Real-world databases (basic1) split non-contiguous element-id
+  ranges across multiple `ELEM_CONNS` entries; the table now indexes
+  them as `Vec<usize>` and `load_ident_ranges` collects id-blocks from
+  `CLASS_IDENTS`, `NODES`, and `ELEM_CONNS` so `element_count` is
+  correct even for classes that ship no `CLASS_IDENTS`.
+- Idempotent `CLASS_DEF` re-declaration (Step 6 fix-up). Writer can
+  emit the same class twice; reader accepts the second declaration
+  when superclass and long name match, errors only on real conflicts.
 
 ## Open questions (still active)
 
@@ -75,8 +89,12 @@ Surfaced in `plan.md` § "Open questions to revisit during implementation":
   feature flag if a real fixture breaks.
 - `MiliBuffer` public-vs-private — keep `pub(crate)` until Step 8 has
   a concrete need from `mili-py` / `mili-viz`.
+- Element-set name → material id parse rule — Step 6 currently maps
+  only sets whose name parses as `i32` to `integration_points`,
+  matching the simplest reading of `miliinternal.py:463-474`. Revisit
+  once a fixture surfaces a non-integer setname.
 
-## Module shape (post-Step 5)
+## Module shape (post-Step 6)
 
 ```
 crates/mili-rs/src/
