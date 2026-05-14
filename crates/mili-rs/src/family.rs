@@ -68,7 +68,8 @@ impl Database {
         meshes.load_ident_ranges(&a_mmap, header, &directory)?;
 
         let svars = SvarTable::build(&a_mmap, &directory, header)?;
-        let srecs = SrecTable::build(&a_mmap, &directory, header)?;
+        let mut srecs = SrecTable::build(&a_mmap, &directory, header)?;
+        srecs.patch_m_mesh_classes(&meshes);
 
         let states = match StateMapSource::pick(&header, &directory) {
             StateMapSource::InlineA(range) => state::parse_inline(&a_mmap, range, &header)?,

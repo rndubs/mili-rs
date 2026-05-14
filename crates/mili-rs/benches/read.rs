@@ -11,14 +11,22 @@
 //! - `query_many`   — same query repeated over a handful of svars.
 //!
 //! Phase-1 pass criterion (≥ 2× mili-python throughput on `query_*`)
-//! is checked by a separate pyo3 harness that lands with the Phase-2
-//! cross-impl parity tests; this file is the Rust-only baseline.
+//! is checked under the `parity` cargo feature: the
+//! `mili_python_baseline` bench group runs the same workload through
+//! `mili.reader.open_database` via pyo3, so a single `cargo bench
+//! --features parity` produces side-by-side numbers. Without the
+//! feature this file is the Rust-only baseline.
 
 use std::path::{Path, PathBuf};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 use mili_rs::{Database, MeshId, QueryArgs, StateValues};
+
+#[cfg(feature = "parity")]
+use pyo3::prelude::*;
+#[cfg(feature = "parity")]
+use pyo3::types::{PyDict, PyList};
 
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -152,11 +160,118 @@ fn bench_query_many(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "parity")]
+fn py_states_one_based(rust_states: &[usize]) -> Vec<i32> {
+    rust_states.iter().map(|&s| (s as i32) + 1).collect()
+}
+
+#[cfg(feature = "parity")]
+fn py_open<'py>(py: Python<'py>, base: &Path) -> PyResult<Bound<'py, PyAny>> {
+    let reader = py.import_bound("mili.reader")?;
+    let kwargs = PyDict::new_bound(py);
+    kwargs.set_item("suppress_parallel", true)?;
+    reader.call_method(
+        "open_database",
+        (base.to_str().expect("utf-8 path"),),
+        Some(&kwargs),
+    )
+}
+
+#[cfg(feature = "parity")]
+fn py_query<'py>(
+    py: Python<'py>,
+    db: &Bound<'py, PyAny>,
+    svar: &str,
+    class: &str,
+    states: &[i32],
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new_bound(py);
+    kwargs.set_item("states", PyList::new_bound(py, states))?;
+    db.call_method("query", (svar, class), Some(&kwargs))
+}
+
+/// mili-python baseline for the same workload as `bench_query_single`
+/// / `bench_query_many`. Pass criterion for Phase 1: the Rust groups
+/// land ≥ 2× the throughput of these (see `planning/mili-rs/plan.md`
+/// § "Benchmarks").
+#[cfg(feature = "parity")]
+fn bench_python_baseline(c: &mut Criterion) {
+    let plt_a = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    let base = corpus_path(&["serial", "basic1", "basic1.plt"]);
+    if !plt_a.exists() {
+        eprintln!("skip mili_python_baseline: basic1 absent");
+        return;
+    }
+    let mili_importable = Python::with_gil(|py| py.import_bound("mili").is_ok());
+    if !mili_importable {
+        eprintln!("skip mili_python_baseline: mili-python not importable");
+        return;
+    }
+    let rust_db = Database::open(&plt_a).expect("open");
+    let rust_states: Vec<usize> = (0..rust_db.state_count()).collect();
+    let py_states = py_states_one_based(&rust_states);
+
+    let nodpos_bytes = match rust_db
+        .query(&QueryArgs {
+            svar: "nodpos",
+            class: "node",
+            labels: None,
+            states: &rust_states,
+            materials: None,
+            ips: None,
+        })
+        .expect("rust nodpos")
+    {
+        StateValues::F32(v) => (v.len() * 4) as u64,
+        _ => 0,
+    };
+
+    let mut group = c.benchmark_group("mili_python_baseline");
+    group.throughput(Throughput::Bytes(nodpos_bytes));
+    group.bench_function("basic1_nodpos_all_states", |b| {
+        Python::with_gil(|py| {
+            let pdb = py_open(py, &base).expect("py open");
+            b.iter(|| {
+                let r = py_query(py, &pdb, "nodpos", "node", &py_states).expect("py query");
+                black_box(r);
+            });
+        });
+    });
+    group.bench_function("basic1_four_svars_all_states", |b| {
+        let svars: &[(&str, &str)] = &[
+            ("nodpos", "node"),
+            ("nodvel", "node"),
+            ("nodacc", "node"),
+            ("sand", "brick"),
+        ];
+        Python::with_gil(|py| {
+            let pdb = py_open(py, &base).expect("py open");
+            b.iter(|| {
+                for (svar, class) in svars {
+                    let r = py_query(py, &pdb, svar, class, &py_states).expect("py query");
+                    black_box(r);
+                }
+            });
+        });
+    });
+    group.finish();
+}
+
+#[cfg(feature = "parity")]
 criterion_group!(
     benches,
     bench_open,
     bench_nodes,
     bench_query_single,
-    bench_query_many
+    bench_query_many,
+    bench_python_baseline,
+);
+#[cfg(not(feature = "parity"))]
+criterion_group!(
+    benches,
+    bench_open,
+    bench_nodes,
+    bench_query_single,
+    bench_query_many,
 );
 criterion_main!(benches);
