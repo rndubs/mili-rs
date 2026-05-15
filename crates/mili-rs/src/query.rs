@@ -219,6 +219,13 @@ impl IntPoints {
     fn parents(&self, comp: &str) -> &[IpParent] {
         self.map.get(comp).map_or(&[], Vec::as_slice)
     }
+
+    /// Public (in-crate) view of the `(es_svar, payload)` parents of a
+    /// component, used by the `int_points_of_state_variable` reshape
+    /// (`reshape.rs`). Mirrors upstream `__int_points[svar]` iteration.
+    pub(crate) fn parents_of(&self, comp: &str) -> &[IpParent] {
+        self.parents(comp)
+    }
 }
 
 /// Build the read plan for one `(svar, class, state)` tuple under the

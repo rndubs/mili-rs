@@ -19,7 +19,16 @@ from ._native import (
     MiliPythonError,
     PyMiliDatabase,
 )
-from . import afileIO, datatypes, mdg_defines, milidatabase, miliinternal, parallel, reader
+from . import (
+    afileIO,
+    datatypes,
+    geometric_mesh_info,
+    mdg_defines,
+    milidatabase,
+    miliinternal,
+    parallel,
+    reader,
+)
 from .milidatabase import MiliDatabase
 from .reader import open_database as _open_database
 
@@ -38,6 +47,7 @@ __all__ = [
     "afileIO",
     "datatypes",
     "mdg_defines",
+    "geometric_mesh_info",
 ]
 
 

@@ -17,9 +17,27 @@ already happened in core (m1–m3 precedent).
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any
 
+from ._native import MiliPythonError
 from .miliinternal import _MiliInternal
+
+__all__ = ["MiliDatabase", "MiliPythonError", "ResultModifier"]
+
+
+class ResultModifier(Enum):
+    """Verbatim port of upstream ``mili.milidatabase.ResultModifier``
+    (the query-result reduction selector). Pure enum, zero parity
+    risk."""
+
+    CUMMIN = "cummin"
+    CUMMAX = "cummax"
+    MIN = "min"
+    MAX = "max"
+    AVERAGE = "average"
+    MEDIAN = "median"
+    STDDEV = "stddev"
 
 
 class MiliDatabase:

@@ -355,6 +355,46 @@ impl Database {
         Ok(None)
     }
 
+    /// Whether `classname` had a real *ident* source — a TI
+    /// `Node Labels` / `Element Labels` entry or a `CLASS_IDENTS`
+    /// entry — i.e. whether it would be in upstream's pre-finalisation
+    /// `__labels` (`miliinternal.py:175-202`). Deliberately ignores the
+    /// `NODES` / `ELEM_CONNS` id-range fallback that
+    /// [`Self::labels`] folds in, because upstream's
+    /// `MeshObjectClass.idents_exist` is `False` exactly when the class
+    /// reaches finalisation *without* such a source
+    /// (`miliinternal.py:276-282`).
+    pub fn idents_exist(&self, mesh_id: MeshId, classname: &str) -> Result<bool> {
+        let prefix = if classname == "node" {
+            "Node Labels"
+        } else {
+            "Element Labels"
+        };
+        let sname_token = format!("Sname-{classname}");
+        for entry in &self.directory.entries {
+            match entry.entry_type {
+                DirEntryType::TiParam if entry.name_count > 0 => {
+                    let name = self.directory.names.get(entry.name_start as usize);
+                    if name.starts_with(prefix)
+                        && !name.contains("ElemIds")
+                        && descriptor_matches(name, mesh_id, &sname_token)
+                    {
+                        return Ok(true);
+                    }
+                }
+                DirEntryType::ClassIdents if entry.name_count > 0 => {
+                    let (eid, ecls) =
+                        crate::mesh::mesh_and_classname(entry, &self.directory.names)?;
+                    if eid == mesh_id && ecls == classname {
+                        return Ok(true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
     /// Materials discovered via `MAT_NAME_<n>` TI_PARAM entries.
     ///
     /// Returns a map from material name (the entry's string payload) to
