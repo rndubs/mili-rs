@@ -190,7 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 23    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); `scripts/setup-parity.sh` then `cargo test --features parity` |
-| `milox` M1+M2 parity           | 222   | `import milox` vs upstream `mili` on the serial corpus + xmilics multi-fragment families; all 10 M1 metadata accessors bit-exact + decision-4 rank-0 `state_maps()` assertion (171) + M2 `nodes()`/`connectivity()` dtype/shape/values bit-exact (51). Dedicated `test-milox` CI job (`pip install ./crates/mili-py`); `mili-py` excluded from default `cargo test --workspace` |
+| `milox` M1+M2+M3 parity        | 239   | `import milox` vs upstream `mili` on the serial corpus + xmilics multi-fragment families; M1 metadata (171) + M2 `nodes()`/`connectivity()` (51) + M3 primal `query()` QueryDict bit-exact (17: class_name/source/title/components/labels/states/data/times). Dedicated `test-milox` CI job (`pip install ./crates/mili-py`); `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 

@@ -29,10 +29,10 @@ use crate::error::{MiliError, Result};
 use crate::header::Header;
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
-use crate::query::{plan_state_svar, Filter, ReadPlan, StateValues};
+use crate::query::{plan_state_svar, Filter, QueryResult, ReadPlan, StateValues};
 use crate::srec::SrecTable;
 use crate::state::{self, StateMapSource, StateMeta};
-use crate::svar::{NumType, SvarTable};
+use crate::svar::{NumType, SvarAgg, SvarTable};
 
 /// An opened mili family — the read-side handle through which all
 /// parsed metadata and state byte ranges are reachable.
@@ -585,6 +585,60 @@ impl Database {
             plan.labels
         };
         Ok((values, labels))
+    }
+
+    /// QueryDict-shaped result (`planning/mili-py/m3.md`). Reuses
+    /// [`Self::query_with_labels`] for the value/label axes and derives
+    /// the parity-sensitive `components` / `title` from the svar table
+    /// (`reference/mili-python/src/mili/miliinternal.py:1320-1336`).
+    /// Primal only; `states`/`times` are attached caller-side.
+    pub fn query_full(&self, args: &QueryArgs<'_>) -> Result<QueryResult> {
+        let (values, labels) = self.query_with_labels(args)?;
+        let (components, title) = self.svar_query_meta(args.svar)?;
+        Ok(QueryResult {
+            values,
+            labels,
+            components,
+            title,
+            class_name: args.class.to_owned(),
+        })
+    }
+
+    /// Component-name list + title for the queried svar, mirroring
+    /// upstream's `svars_to_query` expansion: scalar → `[name]`;
+    /// array → `name[1..=dims0]`; vector / vec-array → its component
+    /// svars expanded recursively. Bare-name resolution only — the
+    /// subscript (`hx[3]`) and ip-filtered component-name forms are
+    /// M4.
+    pub(crate) fn svar_query_meta(&self, svar_name: &str) -> Result<(Vec<String>, String)> {
+        let base = svar_name.split('[').next().unwrap_or(svar_name);
+        let svar = self
+            .svars
+            .get(base)
+            .ok_or_else(|| MiliError::UnknownSvar(base.to_owned()))?;
+        let mut comps = Vec::new();
+        self.expand_components(base, &svar.agg, &mut comps);
+        Ok((comps, svar.title.clone()))
+    }
+
+    fn expand_components(&self, name: &str, agg: &SvarAgg, out: &mut Vec<String>) {
+        match agg {
+            SvarAgg::Scalar => out.push(name.to_owned()),
+            SvarAgg::Array { dims } => {
+                let n = dims.first().copied().unwrap_or(0);
+                for i in 1..=n {
+                    out.push(format!("{name}[{i}]"));
+                }
+            }
+            SvarAgg::Vector { comps } | SvarAgg::VecArray { comps, .. } => {
+                for c in comps {
+                    match self.svars.get(c) {
+                        Some(cs) => self.expand_components(c, &cs.agg, out),
+                        None => out.push(c.clone()),
+                    }
+                }
+            }
+        }
     }
 
     /// Map the unfiltered-query entity axis from subrecord mesh-object

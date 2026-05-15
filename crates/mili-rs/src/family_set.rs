@@ -55,7 +55,7 @@ use rayon::prelude::*;
 use crate::error::{MiliError, Result};
 use crate::family::{Database, QueryArgs};
 use crate::mesh::{MaterialId, MeshId, ObjectClass};
-use crate::query::StateValues;
+use crate::query::{QueryResult, StateValues};
 use crate::state::StateMeta;
 use crate::svar::NumType;
 
@@ -497,6 +497,27 @@ impl DatabaseSet {
             labels: final_labels,
             atoms_per_label,
             state_count,
+        })
+    }
+
+    /// QueryDict-shaped merged result (`planning/mili-py/m3.md`).
+    /// Entity axis merged by [`Self::query`]; the parity-sensitive
+    /// `components` / `title` come from the first fragment that
+    /// resolves the svar (every fragment shares the svar dictionary —
+    /// a fragment that lacks the class still carries the svar table).
+    pub fn query_full(&self, args: &QueryArgs<'_>) -> Result<QueryResult> {
+        let merged = self.query(args)?;
+        let (components, title) = self
+            .fragments
+            .iter()
+            .find_map(|f| f.svar_query_meta(args.svar).ok())
+            .ok_or_else(|| MiliError::UnknownSvar(args.svar.to_owned()))?;
+        Ok(QueryResult {
+            values: merged.values,
+            labels: merged.labels,
+            components,
+            title,
+            class_name: args.class.to_owned(),
         })
     }
 }

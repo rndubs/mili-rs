@@ -47,7 +47,7 @@ pub use mesh::{Connectivity, MaterialId, Mesh, MeshId, Nodes, ObjectClass, Super
 #[doc(hidden)]
 pub use param::ParamTable;
 pub use param::{AggType, ArrayParam, DataType, ParamValue, ScalarValue};
-pub use query::StateValues;
+pub use query::{QueryResult, StateValues};
 pub use srec::Organization;
 #[doc(hidden)]
 pub use srec::{derive_lumps, Lumps, Srec, SrecTable, Subrecord};
