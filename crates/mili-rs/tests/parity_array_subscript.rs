@@ -40,6 +40,7 @@ fn parity_d3samp6_hx_full_array() {
             states: &rust_states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(rust) = rust else {
@@ -99,6 +100,7 @@ fn parity_d3samp6_hx_subscript_each_atom() {
                 states: &rust_states,
                 materials: None,
                 ips: None,
+                subrec: None,
             })
             .unwrap();
         let StateValues::F32(rust) = rust else {

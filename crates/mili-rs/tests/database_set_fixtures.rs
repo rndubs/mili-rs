@@ -137,6 +137,7 @@ fn basic1_query_matches_concat_of_fragments() {
         states: &states,
         materials: None,
         ips: None,
+        subrec: None,
     };
 
     // Skip silently if even rank 0 doesn't carry this svar — the basic1

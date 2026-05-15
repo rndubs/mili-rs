@@ -203,6 +203,7 @@ fn smoke_one(label: &str, base: &Path) -> Option<String> {
         states: &states_to_sample,
         materials: None,
         ips: None,
+        subrec: None,
     };
     match set.query(&args) {
         Ok(r) => {

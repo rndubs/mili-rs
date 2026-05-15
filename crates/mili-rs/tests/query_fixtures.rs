@@ -172,6 +172,7 @@ fn basic1_nodpos_label_filter_returns_subset_in_argument_order() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(subset) = subset else {
@@ -215,6 +216,7 @@ fn basic1_multi_state_nodpos_concatenates_in_state_order() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(multi) = multi else {
@@ -247,6 +249,7 @@ fn basic1_label_filter_routes_to_object_ordered_brick() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(subset) = subset else {
@@ -274,6 +277,7 @@ fn basic1_label_not_found_errors() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap_err();
     assert!(matches!(err, MiliError::LabelNotFound { .. }));
@@ -305,6 +309,7 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(full) = full else {
@@ -321,6 +326,7 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
             states: &states,
             materials: None,
             ips: Some(&ips_first),
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(only_ip0) = only_ip0 else {
@@ -340,6 +346,7 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
             states: &states,
             materials: None,
             ips: Some(&ips_second),
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(only_ip1) = only_ip1 else {
@@ -360,6 +367,7 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
             states: &states,
             materials: None,
             ips: Some(&ips_rev),
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(rev) = rev else {
@@ -423,6 +431,7 @@ fn d3samp4_vec_array_object_ordered_self_consistent() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(api) = api else {
@@ -461,6 +470,7 @@ fn basic1_material_filter_selects_matching_brick_labels() {
             states: &states,
             materials: Some(&materials),
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(by_mat) = by_mat else {
@@ -481,6 +491,7 @@ fn basic1_material_filter_selects_matching_brick_labels() {
             states: &states,
             materials: Some(&materials),
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(mat3) = mat3 else {
@@ -500,6 +511,7 @@ fn basic1_material_filter_selects_matching_brick_labels() {
             states: &states,
             materials: Some(&bogus),
             ips: None,
+            subrec: None,
         })
         .unwrap_err();
     assert!(matches!(err, MiliError::UnknownMaterial { material: 9999 }));
@@ -522,6 +534,7 @@ fn basic1_ips_filter_on_scalar_svar_errors() {
             states: &states,
             materials: None,
             ips: Some(&ips),
+            subrec: None,
         })
         .unwrap_err();
     assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
@@ -572,6 +585,7 @@ fn d3samp6_hx_subscript_matches_full_array_atom() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(full) = full else {
@@ -587,6 +601,7 @@ fn d3samp6_hx_subscript_matches_full_array_atom() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(sub) = sub else {
@@ -625,6 +640,7 @@ fn d3samp6_hx_subscript_matches_mili_python_golden() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(v) = v else {
@@ -662,6 +678,7 @@ fn d3samp6_hx_subscript_errors_match_mili_python() {
                 states: &states,
                 materials: None,
                 ips: None,
+                subrec: None,
             })
             .unwrap_err();
         assert!(

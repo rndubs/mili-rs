@@ -169,6 +169,7 @@ fn run_row(row: &Row) {
                 states: row.states,
                 materials: None,
                 ips: None,
+                subrec: None,
             })
             .unwrap_or_else(|e| panic!("{}: rust query: {e}", row.fixture));
         let StateValues::F64(rust) = rust else {
@@ -199,6 +200,7 @@ fn run_row(row: &Row) {
                 states: row.states,
                 materials: None,
                 ips: None,
+                subrec: None,
             })
             .unwrap_or_else(|e| panic!("{}: rust query: {e}", row.fixture));
         let StateValues::F32(rust) = rust else {

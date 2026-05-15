@@ -58,6 +58,7 @@ fn parity_basic1_nodpos_all_states_all_nodes() {
             states: &rust_states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .expect("rust query");
     let StateValues::F32(rust) = rust else {
@@ -110,6 +111,7 @@ fn parity_basic1_nodvel_label_filter_sorted() {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(rust) = rust else {
@@ -162,6 +164,7 @@ fn parity_basic1_sand_material_filter() {
                 states: &states,
                 materials: Some(&materials),
                 ips: None,
+                subrec: None,
             })
             .unwrap();
         let StateValues::F32(rust) = rust else {
@@ -212,6 +215,7 @@ fn parity_basic1_nodpos_multi_state_subset() {
             states: STATES_FOR_MULTI,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .unwrap();
     let StateValues::F32(rust) = rust else {

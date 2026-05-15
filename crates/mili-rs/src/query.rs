@@ -163,6 +163,10 @@ pub(crate) struct Filter<'a> {
     /// inner order (components-fastest, IP-slowest). `None` means
     /// "every IP".
     pub ips: Option<&'a [usize]>,
+    /// Restrict the gather to the single subrecord with this name
+    /// (the `subrec=` query kwarg, `miliinternal.py:1246-1247`).
+    /// `None` means "every matching subrecord".
+    pub subrec: Option<&'a str>,
 }
 
 /// Build the read plan for one `(svar, class, state)` tuple under the
@@ -192,6 +196,7 @@ pub(crate) fn plan_state_svar(
         &resolved.base_name,
         class_name,
         state_data_start,
+        filter.subrec,
     )?;
 
     // Bare component-name fallback: if no subrec carries the named svar
@@ -203,8 +208,14 @@ pub(crate) fn plan_state_svar(
     // when a fixture demands it.
     if matches.is_empty() && filter.ips.is_none() {
         if let Some(parent) = find_vector_parent(svars, &resolved.base_name) {
-            let parent_matches =
-                collect_matching_subrecs(srec, svars, &parent.name, class_name, state_data_start)?;
+            let parent_matches = collect_matching_subrecs(
+                srec,
+                svars,
+                &parent.name,
+                class_name,
+                state_data_start,
+                filter.subrec,
+            )?;
             if !parent_matches.is_empty() {
                 resolved = Resolved {
                     base_name: parent.name.clone(),
@@ -500,6 +511,7 @@ fn collect_matching_subrecs<'a>(
     svar_name: &str,
     class_name: &str,
     state_data_start: u64,
+    subrec: Option<&str>,
 ) -> Result<Vec<SubrecMatch<'a>>> {
     let mut running: u64 = state_data_start;
     let mut out = Vec::new();
@@ -519,6 +531,11 @@ fn collect_matching_subrecs<'a>(
 
         if sub.mclass != class_name {
             continue;
+        }
+        if let Some(want) = subrec {
+            if sub.name != want {
+                continue;
+            }
         }
         let Some(svar_idx) = sub.svar_names.iter().position(|n| n == svar_name) else {
             continue;
@@ -882,6 +899,7 @@ mod tests {
         Filter {
             labels: None,
             ips: None,
+            subrec: None,
         }
     }
 
@@ -1028,6 +1046,45 @@ mod tests {
     }
 
     #[test]
+    fn plan_subrec_filter_restricts_to_named_subrecord() {
+        // Two `node` subrecs both carrying svA; `subrec=` selects one.
+        let svars = make_svars(&[("svA", NumType::Float4, 1)]);
+        let mut first = mk_subrec("node", Organization::ResultOrdered, &["svA"], &[(1, 3)]);
+        first.name = "first_rec".to_owned();
+        let mut second = mk_subrec("node", Organization::ResultOrdered, &["svA"], &[(100, 102)]);
+        second.name = "second_rec".to_owned();
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![first, second],
+        };
+        // No filter → both subrecs (6 objects).
+        let all = plan_state_svar(&srec, &svars, "svA", "node", 0, no_filter()).unwrap();
+        assert_eq!(all.slabs.len(), 6);
+        // subrec="second_rec" → only that subrec's 3 objects, and the
+        // labels come from its id_block [100..102] (offset accounts
+        // for the skipped first subrec's bytes).
+        let f = Filter {
+            labels: None,
+            ips: None,
+            subrec: Some("second_rec"),
+        };
+        let only = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap();
+        assert_eq!(only.slabs.len(), 3);
+        assert_eq!(only.labels, vec![100, 101, 102]);
+        assert_eq!(only.slabs[0], ByteSlab { start: 12, len: 4 });
+        // A name that matches no subrec → no-match error (mirrors
+        // upstream "No subrecords found").
+        let none = Filter {
+            labels: None,
+            ips: None,
+            subrec: Some("nope"),
+        };
+        assert!(plan_state_svar(&srec, &svars, "svA", "node", 0, none).is_err());
+    }
+
+    #[test]
     fn plan_label_filter_emits_only_requested_labels_in_argument_order() {
         // 4 objects, RO scalar f32. Request labels [3,1] → ordinals
         // [2,0], slabs in that order.
@@ -1046,6 +1103,7 @@ mod tests {
         let f = Filter {
             labels: Some(&[3, 1]),
             ips: None,
+            subrec: None,
         };
         let plan = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap();
         assert_eq!(
@@ -1073,6 +1131,7 @@ mod tests {
         let f = Filter {
             labels: Some(&[11, 2]),
             ips: None,
+            subrec: None,
         };
         let plan = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap();
         // N=6, lump_size=4. ord=4 → 16; ord=1 → 4.
@@ -1102,6 +1161,7 @@ mod tests {
         let f = Filter {
             labels: Some(&[5]),
             ips: None,
+            subrec: None,
         };
         let err = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap_err();
         assert!(matches!(err, MiliError::LabelNotFound { label: 5, .. }));
@@ -1192,6 +1252,7 @@ mod tests {
         let f = Filter {
             labels: Some(&[4, 1]),
             ips: None,
+            subrec: None,
         };
         let plan = plan_state_svar(&srec, &svars, "eps", "shell", 0, f).unwrap();
         assert_eq!(
@@ -1237,6 +1298,7 @@ mod tests {
         let f = Filter {
             labels: None,
             ips: Some(&[0, 2]),
+            subrec: None,
         };
         let plan = plan_state_svar(&srec, &svars, "stress", "shell", 0, f).unwrap();
         // obj 0 base = 0; obj 1 base = 72.
@@ -1271,6 +1333,7 @@ mod tests {
         let f = Filter {
             labels: None,
             ips: Some(&[0]),
+            subrec: None,
         };
         let err = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap_err();
         assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
@@ -1293,6 +1356,7 @@ mod tests {
         let f = Filter {
             labels: None,
             ips: Some(&[5]),
+            subrec: None,
         };
         let err = plan_state_svar(&srec, &svars, "stress", "shell", 0, f).unwrap_err();
         assert!(matches!(err, MiliError::IpOutOfRange { ip: 5, .. }));
@@ -1542,6 +1606,7 @@ mod tests {
         let f = Filter {
             labels: Some(&[3, 1]),
             ips: None,
+            subrec: None,
         };
         let plan = plan_state_svar(&srec, &svars, "hx[3]", "brick", 0, f).unwrap();
         // N=4, svar_size=32 → per-obj base = ord*32; atom2 byte off = 8.
@@ -1648,6 +1713,7 @@ mod tests {
         let f = Filter {
             labels: None,
             ips: Some(&[0]),
+            subrec: None,
         };
         let err = plan_state_svar(&srec, &svars, "hx[1]", "brick", 0, f).unwrap_err();
         assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
