@@ -11,11 +11,13 @@
 //!    for a representative query on each fragment.
 //! 2. **Set-level parity** — `DatabaseSet::open(<base>.plt)` vs.
 //!    `mili.reader.open_database(<base>.plt)` (LoopWrapper /
-//!    ServerWrapper merge) on the full multi-fragment family. Times +
-//!    state count parity for now; query-merge parity is left as a
-//!    follow-up because mili-python's merge has its own subtleties
-//!    (e.g. column dedup heuristics) that need fixture-by-fixture
-//!    triage before pinning as oracle.
+//!    ServerWrapper merge) on the full multi-fragment family. Covers
+//!    both the state axis (times + state count) *and* the merged
+//!    `query` result (entity axis labels + values, bit-exact) for
+//!    `nodpos`/`node` on d3samp6. The query-merge row replicates
+//!    mili-python's `merge_result_dictionaries` post-pass exactly
+//!    (`np.unique(return_index=True)` sorted-on-duplicate; raw
+//!    concatenation order otherwise).
 //!
 //! Skip-on-absent: requires both the `reference/mili` submodule and
 //! the `mili` Python package importable. `parity` feature gates
@@ -239,5 +241,78 @@ fn parity_d3samp6_set_state_count_and_times() {
                 "time mismatch at state {i}: rust={r} py={p}"
             );
         }
+    });
+}
+
+#[test]
+fn parity_d3samp6_set_query_nodpos() {
+    // Full DatabaseSet::query vs mili-python's merged query (LoopWrapper
+    // + merge_result_dictionaries) for nodpos/node on the 8-fragment
+    // d3samp6 family. Asserts the merged entity axis (labels) and the
+    // flat value buffer are both bit-exact. This is the row that was
+    // previously deferred; closing it required fixing the
+    // `query_with_labels` entity axis to emit real labels (was emitting
+    // subrecord mesh-object ordinals) and aligning the merge post-pass
+    // with `np.unique(return_index=True)` semantics.
+    if !xmilics_dir("d3samp6").exists() {
+        eprintln!("skip: reference/mili submodule absent");
+        return;
+    }
+    if skip_if_no_mili_python() {
+        eprintln!("skip: mili-python not importable");
+        return;
+    }
+    let base = xmilics_path("d3samp6", "d3samp6.plt");
+    let set = DatabaseSet::open(&base).expect("rust DatabaseSet::open d3samp6");
+    assert_eq!(set.fragment_count(), 8);
+
+    let nstates = set.state_count();
+    assert!(nstates > 0);
+    let mut states: Vec<usize> = vec![0];
+    if nstates >= 2 {
+        states.push(nstates / 2);
+    }
+    if nstates > 2 {
+        states.push(nstates - 1);
+    }
+
+    let args = QueryArgs {
+        svar: "nodpos",
+        class: "node",
+        labels: None,
+        states: &states,
+        materials: None,
+        ips: None,
+    };
+    let merged = set.query(&args).expect("DatabaseSet::query nodpos/node");
+    let StateValues::F32(rust_vals) = &merged.values else {
+        panic!("nodpos expected f32");
+    };
+
+    let py_states = rust_to_py_states(&states);
+    Python::with_gil(|py| {
+        let pdb = open_database(py, &base).expect("py open d3samp6 multi-frag");
+        let oracle = query_f32(
+            py,
+            &pdb,
+            "nodpos",
+            "node",
+            &OracleQuery {
+                states: Some(&py_states),
+                ..Default::default()
+            },
+        )
+        .expect("py merged query nodpos/node");
+
+        assert_eq!(
+            merged.labels, oracle.layout_labels,
+            "d3samp6 set query: merged entity axis (labels) mismatch"
+        );
+        assert_eq!(
+            oracle.shape,
+            (states.len(), merged.labels.len(), merged.atoms_per_label),
+            "d3samp6 set query: shape mismatch"
+        );
+        assert_flat_eq_f32(rust_vals, &oracle.flat, "d3samp6 set query: nodpos");
     });
 }
