@@ -299,48 +299,74 @@ impl DatabaseSet {
         Ok(Some(out))
     }
 
-    /// Concatenated nodal-coordinate buffer across fragments for
-    /// `(mesh_id, "node")`. Per-fragment rows are emitted in rank
-    /// order; no remap is applied. Returns `Ok(None)` only when no
-    /// fragment carries a `NODES` payload for the mesh.
-    pub fn nodes(&self, mesh_id: MeshId) -> Result<Option<Vec<f32>>> {
-        let mut out: Vec<f32> = Vec::new();
+    /// Owned nodal coordinates merged across fragments for
+    /// `(mesh_id, "node")`, matching upstream's merged `nodes()`
+    /// (`milidatabase.py:167-185`). This is **not** plain concat: it
+    /// concatenates per-fragment node labels, keeps the first
+    /// occurrence of each unique node label (in rank-concat order),
+    /// and returns the corresponding coordinate rows. Ghost nodes
+    /// duplicated across ranks therefore appear once. Returns
+    /// `(flat_row_major, dims)`; `None` when no fragment carries a
+    /// `NODES` payload.
+    pub fn node_coords(&self, mesh_id: MeshId) -> Result<Option<(Vec<f32>, usize)>> {
+        let mut labels: Vec<i32> = Vec::new();
+        let mut coords: Vec<f32> = Vec::new();
+        let mut dims = 0usize;
         let mut any = false;
         for frag in &self.fragments {
-            let Some(local) = frag.nodes(mesh_id, "node")? else {
+            let Some((c, d)) = frag.node_coords(mesh_id)? else {
                 continue;
             };
+            let l = frag.labels(mesh_id, "node")?.unwrap_or_default();
             any = true;
-            let words = local.to_f32_vec()?;
-            out.extend_from_slice(&words);
+            dims = d;
+            labels.extend_from_slice(&l);
+            coords.extend_from_slice(&c);
         }
         if !any {
             return Ok(None);
         }
-        Ok(Some(out))
+        // First occurrence of each unique label, in concatenation
+        // order (numpy's `unique(return_index=True)` then
+        // `indexes.sort()` reduces to exactly this).
+        let mut seen = std::collections::HashSet::with_capacity(labels.len());
+        let mut out: Vec<f32> = Vec::with_capacity(coords.len());
+        for (row, &lab) in labels.iter().enumerate() {
+            if seen.insert(lab) {
+                out.extend_from_slice(&coords[row * dims..(row + 1) * dims]);
+            }
+        }
+        Ok(Some((out, dims)))
     }
 
-    /// Concatenated `ELEM_CONNS` rows for `(mesh_id, classname)` across
-    /// fragments. Per `reductions.reduce_connectivity` this is plain
-    /// row concatenation in rank order — node-id columns reference
-    /// each fragment's local node space and are intentionally not
-    /// remapped. Returns `Ok(None)` only when no fragment has a
-    /// connectivity payload for the class.
-    pub fn connectivity(&self, mesh_id: MeshId, classname: &str) -> Result<Option<Vec<i32>>> {
+    /// Owned element connectivity as **labels**, merged across
+    /// fragments for `(mesh_id, classname)`. Each fragment is
+    /// label-substituted with *its own* node labels
+    /// ([`Database::connectivity_labels`]) then rows are concatenated
+    /// in rank order — `reductions.reduce_connectivity` is plain
+    /// `list_concatenate` (axis 0, no cross-fragment remap, no dedup).
+    /// Returns `(flat_row_major, ncols)`; `None` when no fragment has
+    /// a connectivity payload for the class.
+    pub fn connectivity_labels(
+        &self,
+        mesh_id: MeshId,
+        classname: &str,
+    ) -> Result<Option<(Vec<i32>, usize)>> {
         let mut out: Vec<i32> = Vec::new();
+        let mut ncols = 0usize;
         let mut any = false;
         for frag in &self.fragments {
-            let Some(local) = frag.connectivity(mesh_id, classname)? else {
+            let Some((data, c)) = frag.connectivity_labels(mesh_id, classname)? else {
                 continue;
             };
             any = true;
-            let words = local.to_i32_vec()?;
-            out.extend_from_slice(&words);
+            ncols = c;
+            out.extend_from_slice(&data);
         }
         if !any {
             return Ok(None);
         }
-        Ok(Some(out))
+        Ok(Some((out, ncols)))
     }
 
     /// Run a multi-fragment query and merge along the entity axis.

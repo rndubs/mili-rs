@@ -10,6 +10,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -198,6 +200,88 @@ impl PyMiliDatabase {
         }
         Ok(d)
     }
+
+    /// Initial nodal coordinates — `np.float32`, shape
+    /// `(n_nodes, mesh_dim)`. Matches upstream `nodes()`
+    /// (`miliinternal.py:341` / merged `milidatabase.py:167`). The
+    /// owned `Vec<f32>` is moved into numpy via `into_pyarray_bound`
+    /// (no FFI byte copy); the core decode/merge runs GIL-free.
+    fn nodes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
+        let mesh = self.mesh;
+        let (data, dims) = py
+            .allow_threads(|| match &self.backend {
+                Backend::Single(db) => db.node_coords(mesh),
+                Backend::Set(s) => s.node_coords(mesh),
+            })
+            .map_err(|e| to_pyerr(&e))?
+            .unwrap_or_default();
+        array2(py, data, dims.max(1))
+    }
+
+    /// Element connectivity as element **labels** — `np.int32`.
+    ///
+    /// With `class_name`: a `(n_elem, nodes_per_elem + 1)` array (node
+    /// columns label-substituted, trailing column = raw material
+    /// number; the part column is dropped). A class with no
+    /// connectivity yields an empty 1-D array, matching upstream
+    /// `np.empty([0], np.int32)`.
+    ///
+    /// Without `class_name`: a `{class_name: array}` dict over element
+    /// classes only (upstream `__conns_labels` keys). Matches upstream
+    /// `connectivity()` (`miliinternal.py:608`, merged
+    /// `milidatabase.py:reduce_connectivity`).
+    #[pyo3(signature = (class_name=None))]
+    fn connectivity<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mesh = self.mesh;
+        if let Some(name) = class_name {
+            let got = py
+                .allow_threads(|| match &self.backend {
+                    Backend::Single(db) => db.connectivity_labels(mesh, &name),
+                    Backend::Set(s) => s.connectivity_labels(mesh, &name),
+                })
+                .map_err(|e| to_pyerr(&e))?;
+            return match got {
+                Some((data, ncols)) => Ok(array2(py, data, ncols)?.into_any()),
+                None => Ok(PyArray1::<i32>::zeros_bound(py, 0, false).into_any()),
+            };
+        }
+        let names = py.allow_threads(|| match &self.backend {
+            Backend::Single(db) => db.class_names(mesh),
+            Backend::Set(s) => s.class_names(mesh),
+        });
+        let d = PyDict::new_bound(py);
+        for name in names {
+            let got = py
+                .allow_threads(|| match &self.backend {
+                    Backend::Single(db) => db.connectivity_labels(mesh, &name),
+                    Backend::Set(s) => s.connectivity_labels(mesh, &name),
+                })
+                .map_err(|e| to_pyerr(&e))?;
+            if let Some((data, ncols)) = got {
+                d.set_item(name, array2(py, data, ncols)?)?;
+            }
+        }
+        Ok(d.into_any())
+    }
+}
+
+/// Reshape an owned flat row-major `Vec<T>` into a 2-D numpy array
+/// `(len / ncols, ncols)` via `into_pyarray_bound` (numpy adopts the
+/// heap buffer — the pinned zero-FFI-copy return path; M3's `query()`
+/// reuses this helper signature).
+fn array2<T: numpy::Element>(
+    py: Python<'_>,
+    data: Vec<T>,
+    ncols: usize,
+) -> PyResult<Bound<'_, PyArray2<T>>> {
+    let rows = if ncols == 0 { 0 } else { data.len() / ncols };
+    let arr = Array2::from_shape_vec((rows, ncols), data)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+    Ok(arr.into_pyarray_bound(py))
 }
 
 fn map_to_pydict(py: Python<'_>, m: HashMap<String, Vec<i32>>) -> PyResult<Bound<'_, PyDict>> {

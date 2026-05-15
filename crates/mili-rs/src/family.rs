@@ -217,6 +217,89 @@ impl Database {
         )?))
     }
 
+    /// Owned nodal coordinates for `(mesh_id, "node")`, concatenating
+    /// **every** `NODES` directory entry in directory order (upstream
+    /// iterates `afile.dirs[NODES].items()`,
+    /// `miliinternal.py:204-206`). Returns `(flat_row_major, dims)`
+    /// where the data is `[node][dim]` and `dims =
+    /// mesh_dimensions()`. `None` if the mesh declares no `NODES`
+    /// entry.
+    ///
+    /// This is the owned counterpart to [`Self::nodes`] (which returns
+    /// a single borrowed entry view); the binding needs owned data for
+    /// the `IntoPyArray` ownership-transfer return.
+    pub fn node_coords(&self, mesh_id: MeshId) -> Result<Option<(Vec<f32>, usize)>> {
+        let indices = self.meshes.nodes_entry_indices(mesh_id, "node");
+        if indices.is_empty() {
+            return Ok(None);
+        }
+        let dims = self.mesh_dimensions()?;
+        let dims_us = usize::try_from(dims)
+            .map_err(|_| MiliError::MalformedDirectory("mesh dimensions <= 0"))?;
+        let mut out: Vec<f32> = Vec::new();
+        for &idx in indices {
+            let entry = &self.directory.entries[idx];
+            let nodes = mesh::decode_nodes(&self.a_mmap, entry, self.header, dims)?;
+            out.extend_from_slice(&nodes.to_f32_vec()?);
+        }
+        Ok(Some((out, dims_us)))
+    }
+
+    /// Owned element connectivity as **labels**, matching upstream
+    /// `connectivity()` (`miliinternal.py:217-223`,
+    /// `miliinternal.py:608`): for each element, the per-disk row is
+    /// `[node_1..node_k, material, part]`; the returned row is
+    /// `[label(node_1)..label(node_k), material]` — the trailing
+    /// `part` column dropped, the `material` column kept verbatim, and
+    /// each fortran node id substituted by the node-class label at
+    /// position `id - 1` (`node_labels[id - 1]`).
+    ///
+    /// Returns `(flat_row_major, ncols)` with `ncols = conn_words -
+    /// 1`; `None` if the class declares no `ELEM_CONNS` entry. All
+    /// `ELEM_CONNS` entries for the class are concatenated in
+    /// directory order.
+    ///
+    /// Distinct from the raw [`Self::connectivity`] /
+    /// `Connectivity::to_i32_vec` primitive (which keeps fortran ids +
+    /// the part column).
+    pub fn connectivity_labels(
+        &self,
+        mesh_id: MeshId,
+        classname: &str,
+    ) -> Result<Option<(Vec<i32>, usize)>> {
+        let indices = self.meshes.conns_entry_indices(mesh_id, classname);
+        if indices.is_empty() {
+            return Ok(None);
+        }
+        let node_labels = self.labels(mesh_id, "node")?.unwrap_or_default();
+        let mut out: Vec<i32> = Vec::new();
+        let mut ncols = 0usize;
+        for &idx in indices {
+            let entry = &self.directory.entries[idx];
+            let conn = mesh::decode_elem_conns(&self.a_mmap, entry, self.header)?;
+            let words = conn.conn_words;
+            if words < 2 {
+                continue;
+            }
+            ncols = words - 1;
+            let n_nodes = words - 2;
+            let raw = conn.to_i32_vec()?;
+            for row in raw.chunks_exact(words) {
+                for &fid in &row[..n_nodes] {
+                    let pos = usize::try_from(fid - 1).ok().ok_or(
+                        MiliError::MalformedDirectory("connectivity: node id < 1"),
+                    )?;
+                    let label = *node_labels.get(pos).ok_or(MiliError::MalformedDirectory(
+                        "connectivity: node id past node-label array",
+                    ))?;
+                    out.push(label);
+                }
+                out.push(row[n_nodes]); // material (raw), part column dropped
+            }
+        }
+        Ok(Some((out, ncols)))
+    }
+
     /// Concatenated label array for `(mesh_id, classname)`.
     ///
     /// Implements the TI_PARAM-as-storage recipe from
