@@ -110,6 +110,23 @@ pub enum MiliError {
         class: String,
         counts: Vec<usize>,
     },
+
+    /// No A-files matched the discovery regex `<base>(\d*)A$` under the
+    /// resolved directory. Mirrors mili-python's `MiliFileNotFoundError`
+    /// from `afileIO.afiles_by_base` (`afileIO.py:54-56`).
+    #[error("no mili A-files matched base {base:?} in {dir:?}")]
+    NoFragments { dir: PathBuf, base: String },
+
+    /// Fragments of a multi-A-file family disagree on metadata that
+    /// must be shared for cross-fragment queries to be well-defined.
+    /// Currently fires for the time axis (state count or per-state
+    /// time value).
+    #[error("fragment {fragment} disagrees with fragment 0 on {field}: {detail}")]
+    FragmentMismatch {
+        fragment: usize,
+        field: &'static str,
+        detail: String,
+    },
 }
 
 pub type Result<T, E = MiliError> = core::result::Result<T, E>;

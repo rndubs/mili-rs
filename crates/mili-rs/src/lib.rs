@@ -25,6 +25,7 @@ mod directory;
 pub(crate) mod endian;
 mod error;
 pub mod family;
+pub mod family_set;
 pub mod header;
 mod mesh;
 mod param;
@@ -38,6 +39,7 @@ mod ti;
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};
 pub use error::{MiliError, Result};
 pub use family::{Database, QueryArgs};
+pub use family_set::{DatabaseSet, SetQueryResult};
 pub use header::{Endianness, Header, PartitionScheme, PrecisionLimit};
 #[doc(hidden)]
 pub use mesh::{decode_elem_conns, decode_nodes, MeshTable};

@@ -26,8 +26,8 @@ library and the upstream test corpora cover.
 
 | Step | Lands                                                                | Status |
 |-----:|----------------------------------------------------------------------|:-------|
-| 17   | Multi-A-file orchestration in Rust (`DatabaseSet`, parallel open)    | ⬜ todo |
-| 18   | C-library + `xmilics` parity coverage and end-to-end reader smoke    | ⬜ todo |
+| 17   | Multi-A-file orchestration in Rust (`DatabaseSet`, parallel open)    | ✅ done |
+| 18   | C-library + `xmilics` parity coverage and end-to-end reader smoke    | ✅ done |
 | 19   | numpy/rayon integration plan pinned in `plan.md` § FFI integration plan | ✅ done |
 
 **Step 17 — `DatabaseSet` (multi-A-file orchestration in Rust).**
@@ -119,12 +119,35 @@ mili-python throughput gate: ~4.7× single-svar / ~8× multi-svar on
 basic1 via the pyo3 baseline bench. Step 13 stays 🟡 only because the
 clean-run gate is time-based.
 
+**Phase 1.5 closeout decisions (Step 17).** The plan called for some
+cross-fragment behavior that the mili-python reference doesn't
+actually enforce. Resolved during implementation:
+
+- *Connectivity merge does **not** remap node ids.* `reduce_connectivity`
+  is plain `list_concatenate` — each fragment's connectivity references
+  its own local node space, and remapping would corrupt ghost-layer
+  rows. `DatabaseSet::connectivity` matches this and the docstring
+  flags it.
+- *`FragmentMismatch` is narrow.* Only the time axis (state count +
+  per-state f32 bit-pattern) is checked at open time. Divergent svar /
+  class metadata is per-call: a fragment that doesn't declare the
+  class or doesn't carry the svar on the class silently contributes
+  zero rows (mirrors `LoopWrapper`'s try/except).
+- *No path normalization.* The user passes the literal base
+  (`basic1.plt`, `d3samp6.th`) — same contract as
+  `mili.reader.open_database` after its `os.path.basename` step. No
+  trailing-`A` / digit / `.plt` stripping inside `DatabaseSet::open`.
+- *Query labels surfaced through `Database::query_with_labels`.*
+  Needed by `DatabaseSet` to merge along the entity axis. Old
+  `Database::query` is preserved as a thin wrapper that discards the
+  labels vector.
+
 ## Test coverage snapshot
 
 | Suite                          | Tests | Notes |
 |--------------------------------|------:|:------|
-| `cargo test --workspace`       | 191   | unit + fixture integration |
-| mili-python parity (`pyo3`)    | 17    | 12 corpus fixtures bit-exact; `cargo test --features parity` |
+| `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
+| mili-python parity (`pyo3`)    | 22    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level parity; `scripts/setup-parity.sh` then `cargo test --features parity` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
