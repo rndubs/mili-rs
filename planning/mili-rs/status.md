@@ -190,7 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 23    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); `scripts/setup-parity.sh` then `cargo test --features parity` |
-| `milox` M1 metadata parity     | 171   | `import milox` vs upstream `mili` on the serial corpus + xmilics multi-fragment families; all 10 M1 accessors bit-exact + decision-4 rank-0 `state_maps()` assertion. Dedicated `test-milox` CI job (`pip install ./crates/mili-py`); `mili-py` excluded from default `cargo test --workspace` |
+| `milox` M1+M2+M3 parity        | 239   | `import milox` vs upstream `mili` on the serial corpus + xmilics multi-fragment families; M1 metadata (171) + M2 `nodes()`/`connectivity()` (51) + M3 primal `query()` QueryDict bit-exact (17: class_name/source/title/components/labels/states/data/times). Dedicated `test-milox` CI job (`pip install ./crates/mili-py`); `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -268,6 +268,22 @@ were updated to match. Read the linked source for the full story.
   `list_concatenate_unique` and `element_sets`/`integration_points`
   are `dictionary_merge_no_concat` (`milidatabase.py`). See
   `family_set.rs` and `m1.md` resolved decision 8.
+- **Upstream `connectivity()` is label-substituted, not the raw
+  stream** — `miliinternal.py:217-223` drops the trailing part
+  column, keeps the raw material number, and replaces each fortran
+  node id with `node_labels[id-1]`. Distinct from raw
+  `Connectivity::to_i32_vec` / `connectivity_ids`. Core gained
+  `Database::connectivity_labels` /
+  `DatabaseSet::connectivity_labels`; the raw borrowed primitive is
+  unchanged. Found by `milox` M2 parity. (`m2.md` decisions 9, 11.)
+- **Multi-fragment `nodes()` is dedup-by-label, not plain concat** —
+  upstream `milidatabase.py:167-185` concatenates per-fragment node
+  labels, keeps the first occurrence of each unique label in
+  rank-concat order, returns those coordinate rows. The pre-M2
+  `DatabaseSet::nodes` plain concat was a multi-fragment parity bug;
+  fixed in `DatabaseSet::node_coords`. `Database::node_coords` also
+  concatenates **all** NODES entries, not just the first. Found by
+  `milox` M2 parity. (`m2.md` decision 10.)
 - **`CLASS_DEF` superclass is in `MODIFIER2`, not `MODIFIER1`** —
   `entry-payloads.md § CLASS_DEF`, `mesh.rs::add_class_def`.
 - **`CLASS_DEF` `long_name` re-declaration may disagree** (cosmetic;

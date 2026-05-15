@@ -75,6 +75,27 @@ impl StateValues {
     }
 }
 
+/// Owned, QueryDict-shaped result for one `(svar, class)` query —
+/// everything upstream `mili.query()[svar]` carries except the
+/// `states`/`times` layout axes (those are caller-side: the state
+/// numbers passed in and `Database::times()`). The `mili-py` binding
+/// attaches those and constructs the Python dict; this struct keeps
+/// the parity-sensitive `components`/`title` derivation in core (M1/M2
+/// precedent — the binding stays a thin pass-through).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryResult {
+    /// Flat `[state][label][atom]` row-major, same as [`StateValues`].
+    pub values: StateValues,
+    /// Entity-axis labels, one per `[label]` row.
+    pub labels: Vec<i32>,
+    /// Component names in `[atom]` order. Length == atoms-per-label.
+    pub components: Vec<String>,
+    /// Queried svar's title (`Svar::title` of the resolved base).
+    pub title: String,
+    /// Object-class short name (echoed from the query args).
+    pub class_name: String,
+}
+
 /// One contiguous byte range to read from a single state file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ByteSlab {
