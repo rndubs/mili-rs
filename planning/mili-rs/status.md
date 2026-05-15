@@ -142,12 +142,54 @@ actually enforce. Resolved during implementation:
   `Database::query` is preserved as a thin wrapper that discards the
   labels vector.
 
+## Resolved: deferred query-merge parity gap (was a real bug)
+
+The xmilics `DatabaseSet` parity row deferred in PR #13 (only the
+time axis was asserted) is **closed**, and closing it surfaced a real
+correctness bug shipped in PR #13 — not the dedup-heuristic nuance
+that was originally suspected.
+
+**Root cause.** `query.rs::gather_all` (the no-filter query path)
+built the entity axis from the subrecord's `id_blocks`, i.e. 1-based
+mesh-object ids, *not* user-facing labels. mili-python maps those
+through the class label array (`miliinternal.py:1297`,
+`class_labels[ordinals_in_srec]`). Single-fragment `Database::query`
+discards the label vector so this was invisible, but
+`DatabaseSet::query` merges and dedupes on it. On d3samp6 (8 frags),
+each fragment emitted ordinals `~1..35`; `dedupe_first` collapsed the
+220-row concatenation (144 truly-unique nodes) to **40 colliding
+ordinals** with first-fragment values winning — semantically corrupt.
+The existing `database_set_fixtures` test only checked
+`DatabaseSet::query` against `query_with_labels` self-consistently
+(both used the buggy ordinals), so it stayed green.
+
+**Fix.** `query_with_labels` now maps MO ids → real labels via the
+class `Labels` TI param (`Database::map_mo_ids_to_labels`), exactly
+mirroring `miliinternal.py:1297`; classes with no `Labels` param keep
+identity (matches `miliinternal.py:281`). The filtered path
+(`gather_by_labels`) already emitted real labels and is unchanged.
+
+**Secondary fix (the originally-suspected nuance).**
+`DatabaseSet::query`'s dedup now replicates
+`merge_result_dictionaries`'s post-pass exactly (`reductions.py:72`):
+`np.unique(labels, return_index=True, return_counts=True)` sorts, so
+when any label repeats across fragments the merged entity axis is
+reordered to **ascending-unique** order taking each label's first
+occurrence; with no duplicates the raw concatenation order is kept
+(it is *not* sorted). Implemented in `family_set.rs::merge_unique`.
+
+**Parity status.** `tests/parity_xmilics.rs::parity_d3samp6_set_query_nodpos`
+asserts `DatabaseSet::query("nodpos","node")` is **bit-exact**
+(entity-axis labels *and* flat values) against mili-python's merged
+`LoopWrapper` query on the 8-fragment d3samp6 family across sampled
+states. Green.
+
 ## Test coverage snapshot
 
 | Suite                          | Tests | Notes |
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
-| mili-python parity (`pyo3`)    | 22    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level parity; `scripts/setup-parity.sh` then `cargo test --features parity` |
+| mili-python parity (`pyo3`)    | 23    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); `scripts/setup-parity.sh` then `cargo test --features parity` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -221,6 +263,12 @@ were updated to match. Read the linked source for the full story.
   `entry-payloads.md § STATE_REC_DATA`.
 - **`PREC_LIMIT_DOUBLE` leaves `M_FLOAT` 4 bytes** — only explicit
   `M_FLOAT8` svars are 8 bytes. `format.md § Numeric types`.
+- **Unfiltered query entity axis is subrecord MO ids, not labels** —
+  `gather_all` emits 1-based mesh-object ordinals; the real labels
+  come from the class `Labels` TI param. `query_with_labels` does the
+  map (`family.rs::map_mo_ids_to_labels`, mirrors
+  `miliinternal.py:1297`). Load-bearing for `DatabaseSet` merge; see
+  § "Resolved: deferred query-merge parity gap".
 
 ## Open questions (still active)
 

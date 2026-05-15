@@ -467,7 +467,46 @@ impl Database {
             NumType::Int4 => gather!(i32, I32),
             NumType::Int8 => gather!(i64, I64),
         };
-        Ok((values, plan.labels))
+
+        // With an explicit label/material filter `gather_by_labels`
+        // already emitted real labels; the unfiltered `gather_all` path
+        // emits subrecord mesh-object ids that must be mapped through
+        // the class label array (see `map_mo_ids_to_labels`).
+        let labels = if resolved_labels.is_none() {
+            self.map_mo_ids_to_labels(args.class, plan.labels)?
+        } else {
+            plan.labels
+        };
+        Ok((values, labels))
+    }
+
+    /// Map the unfiltered-query entity axis from subrecord mesh-object
+    /// ids (1-based ordinals into the class) to user-facing entity
+    /// labels, mirroring mili-python's `miliinternal.py:1297`
+    /// (`class_labels[ordinals_in_srec]`).
+    ///
+    /// Single-fragment callers discard the label vector so the
+    /// distinction was historically invisible, but
+    /// [`crate::family_set::DatabaseSet`] merges and dedupes on it and
+    /// raw ordinals collide across fragments. When the class has no
+    /// `Labels` TI param mili-python defaults labels to the MO ids
+    /// themselves (`miliinternal.py:281`), so the ordinal vector is
+    /// already correct and is returned unchanged.
+    fn map_mo_ids_to_labels(&self, class: &str, mo_ids: Vec<i32>) -> Result<Vec<i32>> {
+        let Some(class_labels) = self.labels(MeshId(0), class)? else {
+            return Ok(mo_ids);
+        };
+        let mut mapped = Vec::with_capacity(mo_ids.len());
+        for &mo_id in &mo_ids {
+            let real = usize::try_from((mo_id as i64) - 1)
+                .ok()
+                .and_then(|i| class_labels.get(i).copied())
+                .ok_or(MiliError::MalformedDirectory(
+                    "query: subrecord mesh-object id outside class label range",
+                ))?;
+            mapped.push(real);
+        }
+        Ok(mapped)
     }
 
     /// Prefetch the per-state read context (rebased plan, state-file

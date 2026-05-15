@@ -31,8 +31,16 @@
 //!   its own local node space, and a remap pass would change physical
 //!   meaning for ghost-layer nodes.
 //! - [`DatabaseSet::query`]: concat per-fragment results along the
-//!   entity axis (rank-0 entities, rank-1 entities, …), then dedupe by
-//!   label keeping the first occurrence per `merge_result_dictionaries`.
+//!   entity axis (rank-0 entities, rank-1 entities, …). The entity
+//!   axis is the *real* per-fragment labels (via
+//!   [`Database::query_with_labels`], which maps subrecord mesh-object
+//!   ids through the class label array — matching mili-python's
+//!   `miliinternal.py:1297`). Then the `merge_result_dictionaries`
+//!   post-pass is applied: if any label repeats across fragments
+//!   (shared ghost/boundary entities), the axis is reordered to
+//!   ascending-unique label order taking each label's first
+//!   occurrence (`np.unique(return_index=True)`); with no duplicates
+//!   the raw concatenation order is preserved.
 //! - [`DatabaseSet::times`] / [`DatabaseSet::state_count`]: take
 //!   rank-0's value after checking every other fragment agrees. The
 //!   time axis is the one cross-fragment invariant a coherent query
@@ -286,9 +294,11 @@ impl DatabaseSet {
     ///
     /// Output is flat `[state][label][atom]` row-major, matching
     /// [`Database::query`]. The returned label vector is the merged
-    /// entity axis: per-fragment results are concatenated in rank
-    /// order, then deduplicated by label keeping the first occurrence
-    /// (matches `reductions.merge_result_dictionaries`).
+    /// entity axis: per-fragment real labels concatenated in rank
+    /// order, then run through the `merge_result_dictionaries`
+    /// post-pass — reordered to ascending-unique label order (first
+    /// occurrence) iff any label repeats, otherwise left in
+    /// concatenation order.
     ///
     /// Per-fragment errors are tolerated for the two leniencies
     /// mili-python's `LoopWrapper` provides — a fragment that does not
@@ -378,22 +388,29 @@ impl DatabaseSet {
 
         let values = concat_state_values(&non_empty, state_count, atoms_per_label, total_count)?;
 
-        // Dedupe by label keeping first occurrence — matches mili-
-        // python's `np.unique(return_index=True)` post-pass in
-        // `merge_result_dictionaries`. For well-formed MPI output with
-        // no ghost overlap this is a no-op; the path matters only when
-        // ranks share boundary entities.
-        let (final_labels, keep_idx) = dedupe_first(&merged_labels);
-        let values = if keep_idx.len() == total_labels {
-            values
-        } else {
-            select_labels(
-                &values,
-                state_count,
-                atoms_per_label,
-                total_labels,
-                &keep_idx,
-            )
+        // Mirror `merge_result_dictionaries`'s post-pass exactly
+        // (`reductions.py:72-75`):
+        //
+        //   _, indexes, counts = np.unique(labels, return_index=True,
+        //                                  return_counts=True)
+        //   if np.any(counts > 1):
+        //       data   = data[:, indexes, :]
+        //       labels = labels[indexes]
+        //
+        // `np.unique` sorts. So when any label is duplicated across
+        // fragments (ghost/boundary entities shared between MPI ranks),
+        // the merged entity axis is reordered to *ascending unique
+        // label* order, each row taken from that label's first
+        // occurrence in the rank-ordered concatenation. When there are
+        // no duplicates the post-pass is skipped entirely and the raw
+        // concatenation order is preserved (it is *not* sorted).
+        let (final_labels, keep_idx) = match merge_unique(&merged_labels) {
+            None => (merged_labels, None),
+            Some((sorted_unique, first_occ)) => (sorted_unique, Some(first_occ)),
+        };
+        let values = match &keep_idx {
+            None => values,
+            Some(idx) => select_labels(&values, state_count, atoms_per_label, total_labels, idx),
         };
 
         Ok(SetQueryResult {
@@ -483,18 +500,32 @@ fn concat_state_values(
     })
 }
 
-/// Return `(unique_labels_in_first_occurrence_order, indices_into_input)`.
-fn dedupe_first(labels: &[i32]) -> (Vec<i32>, Vec<usize>) {
-    let mut seen: HashSet<i32> = HashSet::with_capacity(labels.len());
-    let mut unique = Vec::with_capacity(labels.len());
-    let mut keep = Vec::with_capacity(labels.len());
+/// Replicate numpy's `np.unique(labels, return_index=True,
+/// return_counts=True)` post-pass from `merge_result_dictionaries`.
+///
+/// Returns `None` when every label is unique — the mili-python branch
+/// is gated on `np.any(counts > 1)`, so with no duplicates the raw
+/// concatenation order is preserved untouched (it is *not* sorted).
+///
+/// Returns `Some((sorted_unique_labels, first_occurrence_indices))`
+/// when at least one label repeats: `np.unique` sorts ascending, and
+/// `return_index` yields the index of each unique value's *first*
+/// occurrence in the input.
+fn merge_unique(labels: &[i32]) -> Option<(Vec<i32>, Vec<usize>)> {
+    let mut first: std::collections::HashMap<i32, usize> =
+        std::collections::HashMap::with_capacity(labels.len());
     for (i, &l) in labels.iter().enumerate() {
-        if seen.insert(l) {
-            unique.push(l);
-            keep.push(i);
-        }
+        first.entry(l).or_insert(i);
     }
-    (unique, keep)
+    if first.len() == labels.len() {
+        // Every label unique — mili-python's `np.any(counts > 1)`
+        // branch is not taken; preserve raw concatenation order.
+        return None;
+    }
+    let mut sorted_unique: Vec<i32> = first.keys().copied().collect();
+    sorted_unique.sort_unstable();
+    let idx: Vec<usize> = sorted_unique.iter().map(|l| first[l]).collect();
+    Some((sorted_unique, idx))
 }
 
 fn select_labels(
@@ -642,16 +673,20 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_first_keeps_first_occurrence() {
-        let (u, idx) = dedupe_first(&[1, 2, 3, 2, 4, 1]);
+    fn merge_unique_sorts_on_duplicates() {
+        // np.unique([3,1,2,1,4,3], return_index=True) ->
+        //   values  = [1, 2, 3, 4]   (sorted)
+        //   indexes = [1, 2, 0, 4]   (first occurrence of each)
+        let (u, idx) = merge_unique(&[3, 1, 2, 1, 4, 3]).expect("has duplicates");
         assert_eq!(u, vec![1, 2, 3, 4]);
-        assert_eq!(idx, vec![0, 1, 2, 4]);
+        assert_eq!(idx, vec![1, 2, 0, 4]);
     }
 
     #[test]
-    fn dedupe_first_noop_on_unique() {
-        let (u, idx) = dedupe_first(&[10, 20, 30]);
-        assert_eq!(u, vec![10, 20, 30]);
-        assert_eq!(idx, vec![0, 1, 2]);
+    fn merge_unique_noop_when_all_unique() {
+        // No duplicates -> mili-python skips the reorder entirely, so
+        // we return None and the caller keeps raw concatenation order
+        // (note: deliberately *not* sorted).
+        assert_eq!(merge_unique(&[30, 10, 20]), None);
     }
 }

@@ -156,16 +156,19 @@ fn basic1_query_matches_concat_of_fragments() {
         merged.state_count * merged.labels.len() * merged.atoms_per_label
     );
 
-    // Merged labels must be unique and identical to
-    // `DatabaseSet::labels` filtered to subrec coverage. For `node`/
-    // `nodpos` every node is covered, so labels match exactly.
+    // Merged labels must be unique.
     let mut merged_sorted = merged.labels.clone();
     merged_sorted.sort_unstable();
     merged_sorted.dedup();
     assert_eq!(merged_sorted.len(), merged.labels.len());
 
-    // Cross-check: per-state slice equals the concatenation of per-
-    // fragment per-state slices in rank order (modulo dedup).
+    // Cross-check against an independent re-implementation of
+    // `reductions.merge_result_dictionaries`: concatenate per-fragment
+    // real labels + values in rank order, then if any label repeats,
+    // reorder to ascending-unique order taking each label's first
+    // occurrence (`np.unique(return_index=True)`); otherwise keep the
+    // raw concatenation order.
+    let apl = merged.atoms_per_label;
     let mut expected_concat: Vec<f32> = Vec::new();
     let mut expected_labels: Vec<i32> = Vec::new();
     for rank in 0..set.fragment_count() {
@@ -181,18 +184,27 @@ fn basic1_query_matches_concat_of_fragments() {
         }
     }
 
-    // After dedup-by-first the values are a subset of expected_concat
-    // for the unique-label positions. Build the same subset and compare.
-    let mut seen: HashSet<i32> = HashSet::new();
-    let mut dedup_values: Vec<f32> = Vec::new();
+    let mut first: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
     for (i, &l) in expected_labels.iter().enumerate() {
-        if seen.insert(l) {
-            let start = i * merged.atoms_per_label;
-            dedup_values.extend_from_slice(&expected_concat[start..start + merged.atoms_per_label]);
-        }
+        first.entry(l).or_insert(i);
     }
+    let has_dups = first.len() != expected_labels.len();
+    let (exp_labels, exp_values): (Vec<i32>, Vec<f32>) = if has_dups {
+        let mut uniq: Vec<i32> = first.keys().copied().collect();
+        uniq.sort_unstable();
+        let mut vals = Vec::with_capacity(uniq.len() * apl);
+        for &l in &uniq {
+            let src = first[&l] * apl;
+            vals.extend_from_slice(&expected_concat[src..src + apl]);
+        }
+        (uniq, vals)
+    } else {
+        (expected_labels.clone(), expected_concat.clone())
+    };
+
+    assert_eq!(merged.labels, exp_labels, "merged entity axis");
     match &merged.values {
-        StateValues::F32(v) => assert_eq!(v, &dedup_values),
+        StateValues::F32(v) => assert_eq!(v, &exp_values, "merged values"),
         other => panic!("expected F32 merged values, got {:?}", other.num_type()),
     }
 }

@@ -7,9 +7,13 @@
 > wrap-up and the "Known gaps Phase 2 inherits" section before
 > starting M1.
 
-A drop-in replacement for the existing pure-Python `mili` package,
-backed by `mili-rs` under the hood. The Python-facing API is the same;
-the implementation is Rust.
+An API-compatible reimplementation of the pure-Python `mili` package
+(upstream `mili-python`), backed by `mili-rs` under the hood. The
+Python-facing API is the same; the implementation is Rust. Published
+on PyPI as **`milox`** (`mili` + ox — oxidized; the upstream `mili`
+name is taken by an unrelated project) and imported as `milox`
+(`import milox`). The method/return surface mirrors `mili-python` so
+existing code ports with only the import line changed.
 
 ## Objectives
 
@@ -37,7 +41,7 @@ the implementation is Rust.
 Identical to the current `MiliDatabase`:
 
 ```python
-from mili import open_database
+from milox import open_database
 db = open_database("/path/to/run")
 db.query(svar_names, entity_type, material=..., labels=..., states=..., ips=...)
 db.nodes()
@@ -155,25 +159,45 @@ that converts each `MiliError` variant to the right Python class.
 crates/mili-py/
 ├── Cargo.toml         # crate-type = ["cdylib"]
 ├── src/
-│   ├── lib.rs         # #[pymodule] mili._native
+│   ├── lib.rs         # #[pymodule] milox._native
 │   ├── database.rs    # PyMiliDatabase wrapping mili_rs::Database
 │   ├── query.rs       # PyQuery + result conversion
 │   ├── arrays.rs      # MiliBuffer → numpy bridge (capsule + Pod)
 │   └── errors.rs      # MiliError → Python exception hierarchy
-└── python/mili/
+└── python/milox/
     ├── __init__.py    # re-exports + thin shims
     ├── derived.py     # derived results (ported from upstream)
     └── ...
 ```
 
-The Rust `cdylib` is named `mili._native`. User-facing imports stay
-`from mili import open_database`; the `__init__.py` re-exports the
-Rust types and keeps the Python-only helpers (derived results,
-post-processing utilities) where they already live.
+The workspace crate stays `mili-py` (`crates/mili-py/`); the built
+PyPI distribution and the importable package are both **`milox`**
+(`pip install milox`, `import milox`). The Rust `cdylib` is the
+private extension module `milox._native`; `python/milox/__init__.py`
+re-exports the Rust types and keeps the Python-only helpers (derived
+results, post-processing utilities). `pyproject.toml` sets
+`[project] name = "milox"` and `tool.maturin.module-name =
+"milox._native"`.
 
 ## Zero-copy plan
 
-For each result buffer:
+> **Superseded by [`../mili-rs/plan.md`](../mili-rs/plan.md) § "FFI
+> integration plan (Phase 1.5 — Step 19)".** That section is the
+> authoritative contract (pinned after this README was drafted). The
+> capsule/`borrow_from_array` design below is the *deferred M5 path*,
+> not the default. Summary of the resolved decision:
+>
+> - **Default return:** `IntoPyArray::into_pyarray_bound(py)` on an
+>   owned `Vec<T>` / `ndarray::Array<T,_>` — numpy adopts the heap
+>   buffer, no byte copy. This is what every `query()` / `nodes()` /
+>   `connectivity()` return uses unless profiling says otherwise.
+> - **`ToPyArray`** only when ownership cannot transfer (borrowed
+>   `&[T]`); avoid on the hot path.
+> - **`Arc<Mmap>` + `PyCapsule` zero-decode view:** deferred to M5,
+>   profiling-driven. Only wins when aligned + native-endian +
+>   single contiguous slab (rare in practice).
+
+Original (now M5-only) sketch, for each result buffer:
 
 1. `mili-rs` returns a `MiliBuffer<T>`.
 2. `arrays.rs` decides: aligned + native-endian → wrap in numpy via
