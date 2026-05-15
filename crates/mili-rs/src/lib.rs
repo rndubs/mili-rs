@@ -20,6 +20,7 @@
 
 #![allow(clippy::result_large_err)] // MiliError carries enough context that boxing isn't worth it.
 
+mod adjacency;
 pub(crate) mod buffer;
 mod directory;
 pub(crate) mod endian;
@@ -37,6 +38,7 @@ mod state;
 mod svar;
 mod ti;
 
+pub use adjacency::NeighborElems;
 #[doc(hidden)]
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};
 pub use error::{MiliError, Result};

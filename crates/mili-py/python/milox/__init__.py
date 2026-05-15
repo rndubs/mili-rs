@@ -20,6 +20,7 @@ from ._native import (
     PyMiliDatabase,
 )
 from . import (
+    adjacency,
     afileIO,
     datatypes,
     geometric_mesh_info,
@@ -48,6 +49,7 @@ __all__ = [
     "datatypes",
     "mdg_defines",
     "geometric_mesh_info",
+    "adjacency",
 ]
 
 

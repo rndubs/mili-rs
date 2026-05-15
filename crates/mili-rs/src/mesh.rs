@@ -112,6 +112,33 @@ impl Superclass {
     pub fn node_count(self) -> usize {
         [0, 0, 2, 3, 3, 4, 4, 5, 6, 8, 0, 0, 0, 1, 10, 1][self as usize]
     }
+
+    /// Nodal-connections map — verbatim from upstream
+    /// `Superclass.node_connections`
+    /// (`reference/mili-python/src/mili/datatypes.py:91-124`). For each
+    /// node in an element's connectivity, the indices of the nodes that
+    /// share an element edge with it. `None` for superclasses upstream
+    /// raises `NotImplementedError` on.
+    pub fn node_connections(self) -> Option<&'static [&'static [usize]]> {
+        Some(match self {
+            Self::Truss | Self::Beam => &[&[1], &[0]],
+            Self::Tri => &[&[1, 2], &[0, 2], &[0, 1]],
+            Self::Quad => &[&[1, 3], &[0, 2], &[1, 3], &[0, 2]],
+            Self::Tet => &[&[1, 2, 3], &[0, 2, 3], &[0, 1, 3], &[0, 1, 2]],
+            Self::Hex => &[
+                &[1, 3, 4],
+                &[0, 2, 5],
+                &[1, 3, 6],
+                &[0, 2, 7],
+                &[0, 5, 7],
+                &[1, 4, 6],
+                &[2, 5, 7],
+                &[3, 4, 6],
+            ],
+            Self::Particle | Self::Inode => &[&[0]],
+            _ => return None,
+        })
+    }
 }
 
 /// One object class within one mesh.

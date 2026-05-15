@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use numpy::ndarray::{Array2, Array3};
-use numpy::{IntoPyArray, PyArray1, PyArray2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
@@ -711,6 +711,220 @@ impl PyMiliDatabase {
         Ok((dist.into_pyarray_bound(py), st.into_pyarray_bound(py)))
     }
 
+    // ---- Phase H: geometric-mesh-info + adjacency (serial) ----
+    //
+    // The GeometricMeshInfo / serial AdjacencyMapping surface; each is
+    // a bit-exact Rust-core port (`mili_rs::adjacency`) — the milox
+    // `geometric_mesh_info` / `adjacency` modules are thin adapters.
+
+    /// `GeometricMeshInfo.compute_centroid` — `None` mirrors upstream's
+    /// `return None` (unknown class / missing label / no connectivity).
+    #[pyo3(signature = (class_name, label, state))]
+    fn gmi_compute_centroid(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+        label: i32,
+        state: i64,
+    ) -> PyResult<Option<Vec<f64>>> {
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.db0()
+                .gmi_compute_centroid(mesh, class_name, label, state)
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// `GeometricMeshInfo.nearest_node` → `(label, distance)`.
+    #[pyo3(signature = (point, state, material=None))]
+    fn gmi_nearest_node(
+        &self,
+        py: Python<'_>,
+        point: &Bound<'_, PyAny>,
+        state: i64,
+        material: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(i32, f64)> {
+        let pt = float_vec(point)?;
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.db0()
+                .gmi_nearest_node(mesh, &pt, state, mats.as_deref())
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// `GeometricMeshInfo.nearest_element` → `(class, label, distance)`.
+    #[pyo3(signature = (point, state, material=None, entity_type=None, superclass=None))]
+    fn gmi_nearest_element(
+        &self,
+        py: Python<'_>,
+        point: &Bound<'_, PyAny>,
+        state: i64,
+        material: Option<&Bound<'_, PyAny>>,
+        entity_type: Option<String>,
+        superclass: Option<i32>,
+    ) -> PyResult<(String, i32, f64)> {
+        let pt = float_vec(point)?;
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.db0().gmi_nearest_element(
+                mesh,
+                &pt,
+                state,
+                mats.as_deref(),
+                entity_type.as_deref(),
+                superclass,
+            )
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// `GeometricMeshInfo.nodes_within_radius` → node labels.
+    #[pyo3(signature = (center, radius, state, material=None))]
+    fn gmi_nodes_within_radius(
+        &self,
+        py: Python<'_>,
+        center: &Bound<'_, PyAny>,
+        radius: f64,
+        state: i64,
+        material: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Vec<i32>> {
+        let c = float_vec(center)?;
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.db0()
+                .gmi_nodes_within_radius(mesh, &c, radius, state, mats.as_deref())
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// `GeometricMeshInfo.elems_of_nodes` → ordered `{class: labels}`.
+    #[pyo3(signature = (node_labels, material=None))]
+    fn gmi_elems_of_nodes<'py>(
+        &self,
+        py: Python<'py>,
+        node_labels: &Bound<'py, PyAny>,
+        material: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let labels = extract_int_list::<i32>(node_labels)?;
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        let out = py
+            .allow_threads(|| {
+                self.db0()
+                    .gmi_elems_of_nodes(mesh, &labels, mats.as_deref())
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        ordered_class_dict(py, out)
+    }
+
+    /// `AdjacencyMapping.mesh_entities_near_coordinate` (serial).
+    #[pyo3(signature = (coordinate, state, radius, material=None))]
+    fn adj_mesh_entities_near_coordinate<'py>(
+        &self,
+        py: Python<'py>,
+        coordinate: &Bound<'py, PyAny>,
+        state: i64,
+        radius: f64,
+        material: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let c = float_vec(coordinate)?;
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        let out = py
+            .allow_threads(|| {
+                self.db0().adj_mesh_entities_near_coordinate(
+                    mesh,
+                    &c,
+                    state,
+                    radius,
+                    mats.as_deref(),
+                )
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        ordered_class_dict(py, out)
+    }
+
+    /// `AdjacencyMapping.mesh_entities_within_radius` (serial). `None`
+    /// → upstream raises `ValueError` (centroid not computable).
+    #[pyo3(signature = (class_name, label, state, radius, material=None))]
+    fn adj_mesh_entities_within_radius<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: &str,
+        label: i32,
+        state: i64,
+        radius: f64,
+        material: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Option<Bound<'py, PyDict>>> {
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        let out = py
+            .allow_threads(|| {
+                self.db0().adj_mesh_entities_within_radius(
+                    mesh,
+                    class_name,
+                    label,
+                    state,
+                    radius,
+                    mats.as_deref(),
+                )
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        match out {
+            Some(v) => Ok(Some(ordered_class_dict(py, v)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// `AdjacencyMapping.neighbor_elements` (serial). Returns
+    /// `(code, dict)`; code 0 = ok, 1 = no labels for the class,
+    /// 2 = label missing (upstream raises `ValueError` for 1/2).
+    #[pyo3(signature = (class_name, label, material=None, neighbor_radius=1))]
+    fn adj_neighbor_elements<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: &str,
+        label: i32,
+        material: Option<&Bound<'py, PyAny>>,
+        neighbor_radius: i64,
+    ) -> PyResult<(i32, Bound<'py, PyDict>)> {
+        let mats = material_args(material)?;
+        let mesh = self.mesh;
+        let res = py
+            .allow_threads(|| {
+                self.db0().adj_neighbor_elements(
+                    mesh,
+                    class_name,
+                    label,
+                    mats.as_deref(),
+                    neighbor_radius,
+                )
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        match res {
+            mili_rs::NeighborElems::NoLabels => Ok((1, PyDict::new_bound(py))),
+            mili_rs::NeighborElems::LabelMissing => Ok((2, PyDict::new_bound(py))),
+            mili_rs::NeighborElems::Ok(v) => Ok((0, ordered_class_dict(py, v)?)),
+        }
+    }
+
+    /// `AdjacencyMapping.neighbor_nodes` (serial) → neighbour node
+    /// labels (sorted unique, minus the searched nodes).
+    fn adj_neighbor_nodes(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+        label: i32,
+    ) -> PyResult<Vec<i32>> {
+        let mesh = self.mesh;
+        py.allow_threads(|| self.db0().adj_neighbor_nodes(mesh, class_name, label))
+            .map_err(|e| to_pyerr(&e))
+    }
+
     /// Primal `query()` — the upstream `QueryDict` shape (M3,
     /// `planning/mili-py/m3.md`): `{svar: {class_name, source, title,
     /// data, layout:{states,labels,components,times}, modifier}}`.
@@ -1071,6 +1285,64 @@ fn material_arg(obj: &Bound<'_, PyAny>) -> PyResult<MaterialArg> {
         .extract()
         .map_err(|_| MiliPythonError::new_err("material must be string or int"))?;
     Ok(MaterialArg::Name(s))
+}
+
+/// A `material=` adjacency argument: `None`, a scalar (`str`/`int`),
+/// or a list/tuple thereof → `Option<Vec<MaterialArg>>` (upstream's
+/// `[material] if isinstance(material,(str,int)) else material`).
+fn material_args(obj: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<MaterialArg>>> {
+    let Some(o) = obj else { return Ok(None) };
+    if o.is_none() {
+        return Ok(None);
+    }
+    // A string is iterable but must be treated as one scalar material.
+    if o.extract::<String>().is_err() {
+        if let Ok(list) = o.downcast::<PyList>() {
+            let mut v = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                v.push(material_arg(&item)?);
+            }
+            return Ok(Some(v));
+        }
+        if let Ok(tup) = o.downcast::<pyo3::types::PyTuple>() {
+            let mut v = Vec::with_capacity(tup.len());
+            for item in tup.iter() {
+                v.push(material_arg(&item)?);
+            }
+            return Ok(Some(v));
+        }
+    }
+    Ok(Some(vec![material_arg(o)?]))
+}
+
+/// A point/coordinate argument (Python list or numpy float array) →
+/// `Vec<f64>`.
+fn float_vec(obj: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
+    if let Ok(v) = obj.extract::<Vec<f64>>() {
+        return Ok(v);
+    }
+    if let Ok(a) = obj.downcast::<numpy::PyArray1<f64>>() {
+        return Ok(a.to_owned_array().to_vec());
+    }
+    if let Ok(a) = obj.downcast::<numpy::PyArray1<f32>>() {
+        return Ok(a.to_owned_array().iter().map(|&x| f64::from(x)).collect());
+    }
+    Err(MiliPythonError::new_err(
+        "expected a list of floats or a numpy float array",
+    ))
+}
+
+/// An ordered `[(class, labels)]` → an insertion-ordered Python dict
+/// of `np.int32` arrays (matching upstream's ordered dict result).
+fn ordered_class_dict(
+    py: Python<'_>,
+    items: Vec<(String, Vec<i32>)>,
+) -> PyResult<Bound<'_, PyDict>> {
+    let d = PyDict::new_bound(py);
+    for (k, v) in items {
+        d.set_item(k, v.into_pyarray_bound(py))?;
+    }
+    Ok(d)
 }
 
 /// [`ParamPy`] → a native Python scalar / str / list.
