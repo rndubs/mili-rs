@@ -360,7 +360,10 @@ impl PyMiliDatabase {
             entry.set_item("class_name", &res.class_name)?;
             entry.set_item("source", "primal")?;
             entry.set_item("title", &res.title)?;
-            entry.set_item("data", state_values_3d(py, res.values, n_st, n_lab, n_comp)?)?;
+            entry.set_item(
+                "data",
+                state_values_3d(py, res.values, n_st, n_lab, n_comp)?,
+            )?;
             entry.set_item("layout", layout)?;
             entry.set_item("modifier", "")?;
             out.set_item(svar, entry)?;

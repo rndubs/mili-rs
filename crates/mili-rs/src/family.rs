@@ -286,9 +286,9 @@ impl Database {
             let raw = conn.to_i32_vec()?;
             for row in raw.chunks_exact(words) {
                 for &fid in &row[..n_nodes] {
-                    let pos = usize::try_from(fid - 1).ok().ok_or(
-                        MiliError::MalformedDirectory("connectivity: node id < 1"),
-                    )?;
+                    let pos = usize::try_from(fid - 1)
+                        .ok()
+                        .ok_or(MiliError::MalformedDirectory("connectivity: node id < 1"))?;
                     let label = *node_labels.get(pos).ok_or(MiliError::MalformedDirectory(
                         "connectivity: node id past node-label array",
                     ))?;
