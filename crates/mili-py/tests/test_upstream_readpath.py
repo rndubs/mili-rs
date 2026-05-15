@@ -1,4 +1,4 @@
-"""M4-followup Phase F — upstream read-path suite via import redirect.
+"""M4-followup Phase F/G — upstream read-path suite via import redirect.
 
 Aliases ``mili`` (and the submodules the read-path modules import)
 onto the milox compatibility surface, then loads the *actual* upstream
@@ -6,12 +6,14 @@ test module from ``reference/mili-python/tests/`` and runs its
 ``unittest`` cases. Skip-not-fail when the submodule corpus is absent
 (mirrors conftest.py / the Rust parity tests).
 
-Phase F redirects only the modules the existing 13-method Rust surface
-already satisfies (``test_reader`` — engine identity + open_database
-kwargs). The data-bearing read-path modules
-(``test_milidatabase``/``test_miliinternal``/``test_derived``/…) come
-online in Phases G/H as the core surface lands; the write modules stay
-Phase 3. See planning/mili-py/m4.md decision 19.
+Phase F redirected ``test_reader`` (engine identity + open_database
+kwargs). Phase G adds ``test_miliinternal`` (the primal-only reshape
+surface) and the **read half** of ``test_milidatabase`` (the
+``MiliDatabase`` wrapper: return-code raising + mdg-enum coercion over
+the same Rust core). The geometry/derived/projection/adjacency and
+write modules stay Phase G-tail / Phase H / Phase 3 — their cases are
+honestly ``xfail``ed with the phase that lands them. See
+planning/mili-py/m4.md decision 19.
 """
 
 from __future__ import annotations
@@ -45,15 +47,63 @@ _REDIRECT = {
 # Honestly xfailed with the phase that lands them — never silently
 # passed, never deleted (planning/mili-py/m4.md decision 19). Strict:
 # if one starts passing, the harness fails so it gets promoted.
+# Keyed by ``module::Class::method``.
 _XFAIL = {
-    "test_miliinternal::test_geometry_property": "Phase H: GeometricMeshInfo",
-    "test_miliinternal::test_supported_variables": "Phase H: derived engine",
-    "test_miliinternal::test_derived_variables_of_class": "Phase H: derived engine",
-    "test_miliinternal::test_classes_of_derived_variable": "Phase H: derived engine",
-    "test_miliinternal::test_faces": "Phase H: geometry (faces)",
-    "test_miliinternal::test_nodes_label": "Phase H: nodes_of_elems",
-    "test_miliinternal::test_nodes_material": "Phase H: nodes_of_material",
+    "test_miliinternal::TestMiliInternal::test_geometry_property": "Phase H: GeometricMeshInfo",
+    "test_miliinternal::TestMiliInternal::test_supported_variables": "Phase H: derived engine",
+    "test_miliinternal::TestMiliInternal::test_derived_variables_of_class": "Phase H: derived engine",
+    "test_miliinternal::TestMiliInternal::test_classes_of_derived_variable": "Phase H: derived engine",
+    "test_miliinternal::TestMiliInternal::test_faces": "Phase H: geometry (faces)",
+    "test_miliinternal::TestMiliInternal::test_nodes_label": "Phase H: nodes_of_elems",
+    "test_miliinternal::TestMiliInternal::test_nodes_material": "Phase H: nodes_of_material",
 }
+
+# test_milidatabase: milox collapses upstream's per-proc fan-out in the
+# Rust DatabaseSet, so the parallel handler classes' merge_results=False
+# per-proc-unmerged shapes legitimately differ — that is parallel /
+# Phase-H scope, not the Phase-G read half. Whole classes xfail.
+_MDB_PARALLEL_CLASSES = (
+    "TestReturnCodes",
+    "LoopWrapperParallelTests",
+    "ServerWrapperParallelTests",
+    "LoopWrapperContextManagerParallelTests",
+    "ServerWrapperContextManagerParallelTests",
+)
+# Serial read-half methods that need a still-unported core engine
+# (geometry / derived / projection / query result-modifiers — none of
+# which the Phase-G primal surface provides). Honest Phase-H xfail.
+_MDB_PHASE_H_METHODS = {
+    "test_faces": "Phase H: geometry (faces)",
+    "test_derived_variables_of_class": "Phase H: derived engine",
+    "test_nodes_material": "Phase H: nodes_of_material",
+    "test_nodes_of_elems": "Phase H: nodes_of_elems",
+    "test_measure": "Phase H: geometry (measure)",
+    "test_query_project_to_nodes": "Phase H: projection engine",
+    "test_cummin": "Phase H: query result modifiers (reductions)",
+    "test_cummax": "Phase H: query result modifiers (reductions)",
+    "test_query_min": "Phase H: query result modifiers (reductions)",
+    "test_query_min_dataframe": "Phase H: query result modifiers (reductions)",
+    "test_query_max": "Phase H: query result modifiers (reductions)",
+    "test_query_max_dataframe": "Phase H: query result modifiers (reductions)",
+    "test_query_average": "Phase H: query result modifiers (reductions)",
+    "test_query_average_dataframe": "Phase H: query result modifiers (reductions)",
+    "test_query_median": "Phase H: query result modifiers (reductions)",
+    "test_query_median_dataframe": "Phase H: query result modifiers (reductions)",
+    "test_query_stddev": "Phase H: query result modifiers (reductions)",
+    "test_query_stddev_dataframe": "Phase H: query result modifiers (reductions)",
+}
+
+
+def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
+    key = f"{mod}::{cls}::{meth}"
+    if key in _XFAIL:
+        return _XFAIL[key]
+    if mod == "test_milidatabase":
+        if cls in _MDB_PARALLEL_CLASSES:
+            return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
+        if meth in _MDB_PHASE_H_METHODS:
+            return _MDB_PHASE_H_METHODS[meth]
+    return None
 
 
 def _load_upstream(mod_name: str):
@@ -88,7 +138,12 @@ def _collect(module):
     return cases
 
 
-_REDIRECTED = ["test_reader", "test_miliinternal"]
+def _case_key(test) -> tuple[str, str]:
+    parts = test.id().split(".")
+    return parts[-2], parts[-1]
+
+
+_REDIRECTED = ["test_reader", "test_miliinternal", "test_milidatabase"]
 
 
 def _ids():
@@ -98,7 +153,8 @@ def _ids():
     for m in _REDIRECTED:
         mod = _load_upstream(m)
         for t in _collect(mod):
-            ids.append(f"{m}::{t.id().split('.')[-1]}")
+            cls, meth = _case_key(t)
+            ids.append(f"{m}::{cls}::{meth}")
     return ids
 
 
@@ -111,10 +167,10 @@ _DATA = UPSTREAM_TESTS / "data" / "serial" / "sstate"
 )
 @pytest.mark.parametrize("case_id", _ids())
 def test_upstream_redirected(case_id):
-    mod_name, method = case_id.split("::", 1)
+    mod_name, cls, method = case_id.split("::", 2)
     module = _load_upstream(mod_name)
     case = next(
-        t for t in _collect(module) if t.id().split(".")[-1] == method
+        t for t in _collect(module) if _case_key(t) == (cls, method)
     )
     result = unittest.TestResult()
     sys.modules.update(_REDIRECT)
@@ -127,12 +183,12 @@ def test_upstream_redirected(case_id):
     if result.skipped:
         pytest.skip(result.skipped[0][1])
     failed = bool(result.failures or result.errors)
-    xfail_reason = _XFAIL.get(case_id)
+    xfail_reason = _xfail_reason(mod_name, cls, method)
     if xfail_reason is not None:
         if failed:
             pytest.xfail(xfail_reason)
         pytest.fail(
-            f"{case_id} now passes — promote it out of _XFAIL "
+            f"{case_id} now passes — promote it out of the xfail set "
             f"(was: {xfail_reason})",
             pytrace=False,
         )

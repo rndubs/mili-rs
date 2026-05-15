@@ -749,16 +749,29 @@ impl Database {
         // Subscript form (`hx[3]`, `g[1,2]`): one combined component
         // name carrying the original 1-based indices, not the full
         // `hx[1..=dims0]` expansion. Mirrors upstream line 1371.
-        if let crate::query::QueryName::Subscript { base: b, indices } =
-            crate::query::parse_query_name(svar_name)?
-        {
-            let joined = indices
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(",");
-            comps.push(format!("{b}[{joined}]"));
-            return Ok((comps, svar.title.clone()));
+        match crate::query::parse_query_name(svar_name)? {
+            crate::query::QueryName::Subscript { base: b, indices } => {
+                let joined = indices
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                comps.push(format!("{b}[{joined}]"));
+                return Ok((comps, svar.title.clone()));
+            }
+            // Named-component subscript `parent[comp]`: the component
+            // names are the fallback `components`, the title is the
+            // *parent's* (`miliinternal.py:1217` keys title by the
+            // resolved svar = the parent). The ip-filtered
+            // `f"{comp} ipt. {label}"` form, when present, arrives as
+            // the caller's `comp_override` and wins.
+            crate::query::QueryName::CompSubscript { comps: cs, .. } => {
+                for c in cs {
+                    comps.push(c.to_owned());
+                }
+                return Ok((comps, svar.title.clone()));
+            }
+            crate::query::QueryName::Plain(_) => {}
         }
         self.expand_components(base, &svar.agg, &mut comps);
         Ok((comps, svar.title.clone()))

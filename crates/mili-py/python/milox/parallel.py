@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .datatypes import ReturnCode
+
 
 class _EngineWrapper:
     """Base: hold a ``PyMiliDatabase`` and forward to it."""
@@ -26,6 +28,15 @@ class _EngineWrapper:
     def __getattr__(self, name: str) -> Any:
         # Only reached when the attribute is not found normally.
         return getattr(self.__dict__["_db"], name)
+
+    def returncode(self) -> Any:
+        """The Rust ``DatabaseSet`` collapses upstream's per-proc
+        fan-out and raises directly, so there is no per-proc return
+        code to surface — always OK for ``MiliDatabase``'s check."""
+        return (ReturnCode.OK, "")
+
+    def clear_return_code(self) -> None:
+        """No-op: see :meth:`returncode`."""
 
     def close(self) -> None:
         """No subprocesses to tear down (fan-out is in Rust)."""

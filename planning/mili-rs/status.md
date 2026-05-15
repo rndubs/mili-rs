@@ -190,7 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 24    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); **+ `parity_reshape` — every Phase-G `_MiliInternal` reshape bit-exact vs. the upstream oracle across the full serial corpus**; `scripts/setup-parity.sh` then `cargo test --workspace --exclude mili-py --features parity` |
-| `milox` parity + redirect      | 303 + 7 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`). Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (34 pass, 7 honest `xfail` = Phase H)** green. Phase G remaining: `test_milidatabase.py` read half (needs the upstream-signature `MiliDatabase` wrapper + return-code `__postprocess`). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
+| `milox` parity + redirect      | 384 + 201 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`) **+ the `test_milidatabase.py` read half closed**: `MiliDatabase` wrapper does return-code raising (`parse_return_codes`) + mdg-enum arg coercion, `_MiliInternal` gained upstream-signature `query`/`connectivity` input validation, and the Rust core query gained **named-component subscript** (`nodpos[ux]`/`stress[sy]`) + **multi-parent bare-component disambiguation by subrec membership** (`sx` on `brick`), each bit-exact vs the upstream oracle (`tests/parity_component_subscript.rs`). Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (34 pass, 7 Phase-H `xfail`) + `test_milidatabase.py` read half** green; the parallel handler classes + geometry/derived/projection/result-modifier serial methods are honest strict `xfail` (Phase H / parallel scope). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -265,6 +265,27 @@ Typed errors today; not in Phase 2 scope.
 Brief pointers — each has a fix in the code and the byte-layout docs
 were updated to match. Read the linked source for the full story.
 
+- **Bare component of a multi-parent VECTOR resolves by *subrec
+  membership*, not global uniqueness** — `sx` is a component of
+  `stress`, `stress_mid`, `stress_in`, `stress_out` (all VECTORs).
+  The old `find_vector_parent` bailed (`None`) on >1 parent, so
+  `query("sx","brick")` wrongly raised `NoMatchingSubrec` even though
+  upstream returns it (the brick subrec carries `stress`). Fix:
+  `find_vector_parents` returns every candidate; the planner picks the
+  first whose subrecs match the queried class — upstream resolves the
+  component via the subrec that carries its parent
+  (`miliinternal.py:1222-1231`). `query.rs`; bit-exact in
+  `parity_component_subscript.rs`. Found by `milox` Phase-G
+  `test_milidatabase` read-half parity.
+- **`parent[comp]` is a *named-component* query, not an integer
+  subscript** — `nodpos[ux]` / `stress[sy]`: when the `[...]` content
+  isn't all-integer it's a component-svar-name lookup of the VECTOR /
+  VEC_ARRAY parent (`miliinternal.py:976-996`). New
+  `QueryName::CompSubscript`; the planner rewrites it to the bare
+  component gather, the result is keyed by the raw input and titled
+  with the **parent's** title (`svar_query_meta`). `query.rs` /
+  `family.rs`; bit-exact in `parity_component_subscript.rs`. Found by
+  `milox` Phase-G `test_milidatabase` read-half parity.
 - **`element_sets()` key is `es_<n>`, not `<n>`** — upstream keys by
   `sname[sname.find('es_'):]` (`miliinternal.py:113-115`), so strip
   only `IntLabel_`. `integration_points()` then keys by `eset[-1:]`

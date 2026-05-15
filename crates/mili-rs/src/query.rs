@@ -278,6 +278,44 @@ pub(crate) fn plan_state_svar_ip(
 ) -> Result<ReadPlan> {
     let parsed = parse_query_name(svar_input)?;
     let is_subscript = matches!(parsed, QueryName::Subscript { .. });
+    // A named-component subscript `parent[comp]` gathers exactly like a
+    // bare component query of `comp` (`miliinternal.py:990-996,1228-1231`):
+    // resolve against the component, validate it belongs to the named
+    // parent, and let the bare-component / vec-array-substitution paths
+    // below do the work. Only the result key (raw input) and title
+    // (parent's, in `svar_query_meta`) differ.
+    let parsed = match parsed {
+        QueryName::CompSubscript { base, comps } => {
+            let parent = svars
+                .get(base)
+                .ok_or_else(|| MiliError::UnknownSvar(base.to_owned()))?;
+            let (SvarAgg::Vector {
+                comps: parent_comps,
+            }
+            | SvarAgg::VecArray {
+                comps: parent_comps,
+                ..
+            }) = &parent.agg
+            else {
+                return Err(MiliError::SubscriptNotApplicable {
+                    svar: base.to_owned(),
+                    agg: agg_label(&parent.agg),
+                });
+            };
+            if comps.len() != 1 {
+                return Err(MiliError::Unsupported(
+                    "multi-component named subscript (only single-component \
+                     parent[comp] supported)",
+                ));
+            }
+            let comp = comps[0];
+            if !parent_comps.iter().any(|c| c == comp) {
+                return Err(MiliError::UnknownSvar(format!("{base}[{comp}]")));
+            }
+            QueryName::Plain(comp)
+        }
+        other => other,
+    };
     let mut resolved = resolve_target(svars, parsed, filter.ips)?;
 
     let mut matches = collect_matching_subrecs(
@@ -294,7 +332,13 @@ pub(crate) fn plan_state_svar_ip(
     // (`reference/mili-python/src/mili/miliinternal.py:990-996`) and
     // retry against that parent.
     if matches.is_empty() && filter.ips.is_none() && !is_subscript {
-        if let Some(parent) = find_vector_parent(svars, &resolved.base_name) {
+        // A component can belong to several VECTOR parents (e.g.
+        // `sx` ∈ `stress`, `stress_mid`, `stress_in`, `stress_out`).
+        // Upstream disambiguates by subrecord membership for the
+        // queried class (`miliinternal.py:1222-1231`): the right
+        // parent is the one actually carried in a subrec for that
+        // class. Take the first such parent in svar-table order.
+        for parent in find_vector_parents(svars, &resolved.base_name) {
             let parent_matches = collect_matching_subrecs(
                 srec,
                 svars,
@@ -312,6 +356,7 @@ pub(crate) fn plan_state_svar_ip(
                     },
                 };
                 matches = parent_matches;
+                break;
             }
         }
     }
@@ -639,6 +684,14 @@ pub(crate) enum QueryName<'a> {
     /// matching mili-python's error contract
     /// (`reference/mili-python/src/mili/miliinternal.py:1276-1286`).
     Subscript { base: &'a str, indices: Vec<i64> },
+    /// `"nodpos[ux]"`, `"stress[sy]"` — a *named* component of a
+    /// VECTOR / VEC_ARRAY parent. Upstream
+    /// (`miliinternal.py:976-996`) splits `parent[comp,...]` and, when
+    /// the bracket content is not integer indices, treats the tokens
+    /// as component svar names of `base`. The component data is gathered
+    /// exactly as the bare-component path; only the result *key* (the
+    /// raw input) and *title* (the parent's) differ.
+    CompSubscript { base: &'a str, comps: Vec<&'a str> },
 }
 
 /// Parse a query-name string. The grammar is intentionally minimal:
@@ -668,7 +721,7 @@ pub(crate) fn parse_query_name(input: &str) -> Result<QueryName<'_>> {
             reason: "empty subscript",
         });
     }
-    let mut indices = Vec::new();
+    let mut toks = Vec::new();
     for tok in inner.split(',') {
         let tok = tok.trim();
         if tok.is_empty() {
@@ -677,13 +730,17 @@ pub(crate) fn parse_query_name(input: &str) -> Result<QueryName<'_>> {
                 reason: "empty subscript index",
             });
         }
-        let n: i64 = tok.parse().map_err(|_| MiliError::InvalidSubscript {
-            input: input.to_owned(),
-            reason: "subscript index is not an integer",
-        })?;
-        indices.push(n);
+        toks.push(tok);
     }
-    Ok(QueryName::Subscript { base, indices })
+    // Integer tokens -> ARRAY-svar subscript; otherwise the tokens are
+    // component svar names of a VECTOR / VEC_ARRAY parent
+    // (`miliinternal.py:976-996`). All-or-nothing: a single
+    // non-integer token makes the whole subscript a component lookup.
+    let indices: Option<Vec<i64>> = toks.iter().map(|t| t.parse::<i64>().ok()).collect();
+    match indices {
+        Some(indices) => Ok(QueryName::Subscript { base, indices }),
+        None => Ok(QueryName::CompSubscript { base, comps: toks }),
+    }
 }
 
 /// Resolution of a parsed [`QueryName`] against the svar dictionary.
@@ -702,6 +759,11 @@ fn resolve_target(
     ips: Option<&[usize]>,
 ) -> Result<Resolved> {
     match name {
+        // CompSubscript is rewritten to Plain(comp) by the caller
+        // (`plan_state_svar_ip`) before reaching here.
+        QueryName::CompSubscript { .. } => {
+            unreachable!("CompSubscript must be rewritten to Plain before resolve_target")
+        }
         QueryName::Plain(n) => {
             let s = svars
                 .get(n)
@@ -814,13 +876,16 @@ struct VectorParent {
     comp_atom_indices: Vec<usize>,
 }
 
-/// If `name` is a component of exactly one VECTOR parent svar, return
-/// it. VEC_ARRAY parents are skipped — their component data is striped
-/// across IP slots and needs explicit IP composition; deferring until a
-/// fixture exercises it. If multiple VECTOR parents claim the same
-/// component name, also skip (ambiguous).
-fn find_vector_parent(svars: &SvarTable, name: &str) -> Option<VectorParent> {
-    let mut found: Option<VectorParent> = None;
+/// Every VECTOR parent svar that carries `name` as a component, in
+/// svar-table order, each with the component's atom-index range inside
+/// the parent's per-object slot. VEC_ARRAY parents are skipped — their
+/// component data is striped across IP slots and is handled by the
+/// separate vec-array substitution path. The caller disambiguates a
+/// multi-parent component by subrecord membership for the queried
+/// class (upstream resolves the component via the subrec that carries
+/// its parent — `miliinternal.py:1222-1231`).
+fn find_vector_parents(svars: &SvarTable, name: &str) -> Vec<VectorParent> {
+    let mut found = Vec::new();
     for parent in svars.iter() {
         let SvarAgg::Vector { comps } = &parent.agg else {
             continue;
@@ -834,10 +899,7 @@ fn find_vector_parent(svars: &SvarTable, name: &str) -> Option<VectorParent> {
         }
         let count = svars.get(name).map_or(1, |sv| sv.atoms);
         let indices: Vec<usize> = (offset..offset + count).collect();
-        if found.is_some() {
-            return None;
-        }
-        found = Some(VectorParent {
+        found.push(VectorParent {
             name: parent.name.clone(),
             comp_atom_indices: indices,
         });
@@ -1839,10 +1901,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_name_rejects_non_integer_index() {
+    fn parse_query_name_non_integer_index_is_component_subscript() {
+        // Non-integer bracket content is a named-component lookup of a
+        // VECTOR / VEC_ARRAY parent (`nodpos[ux]`, `stress[sy]`), not
+        // an error (`miliinternal.py:976-996`).
+        assert_eq!(
+            parse_query_name("nodpos[ux]").unwrap(),
+            QueryName::CompSubscript {
+                base: "nodpos",
+                comps: vec!["ux"],
+            }
+        );
+        assert_eq!(
+            parse_query_name("stress[ sy ]").unwrap(),
+            QueryName::CompSubscript {
+                base: "stress",
+                comps: vec!["sy"],
+            }
+        );
+        // All-integer stays an ARRAY subscript.
         assert!(matches!(
-            parse_query_name("hx[abc]").unwrap_err(),
-            MiliError::InvalidSubscript { .. }
+            parse_query_name("hx[3]").unwrap(),
+            QueryName::Subscript { .. }
         ));
     }
 
