@@ -190,7 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 23    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); `scripts/setup-parity.sh` then `cargo test --features parity` |
-| `milox` M1–M4 parity           | 257 + 4 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 `nodes()`/`connectivity()` (51) + M3 primal `query()` (17) + **M4 Slice A**: filter-combination table (`material`/`labels∩material`/`states`±/dedupe/`subrec`/multi-svar/array-subscript) + `test_bugfixes` Slice-A values, all bit-exact. 4 strict-xfail = Slice-B `test_bugfixes` oracles (M4-followup). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
+| `milox` M1–M4 parity           | 269 | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A + **Slice B** (bare-component-of-VEC_ARRAY / ip-as-label / `InconsistentIpCounts`, all bit-exact) + **M4-followup Phase F**: `mili`-compatible package skeleton (`milox.reader`/`milidatabase`/`miliinternal`/`parallel`/`afileIO`/`datatypes`/`mdg_defines`) + upstream import-redirect harness (`test_upstream_readpath.py`) running upstream `test_reader.py` green (7). No xfail. Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -203,7 +203,7 @@ All seven from `test_bugfixes.py` are accounted for:
 | 1 | Non-sequential mesh-object blocks coalesce    | ✅ Step 5 |
 | 2 | Double-precision nodal positions              | ✅ Step 10 |
 | 3 | Vec-array with mixed component widths         | ✅ Step 10 (d3samp4 `es_1a`) |
-| 4 | Inconsistent IP counts across subrecords      | ✅ Step 16 (typed `MiliError::InconsistentIpCounts` contract; activates once Phase-2 element-set substitution lands) |
+| 4 | Inconsistent IP counts across subrecords      | ✅ Step 16 contract; **active** since the mili-py M4-followup Slice B element-set substitution landed (serial/basic1 `sx`/`brick` mat 5 = 8 IPs vs mat 7 = 9 IPs raises `InconsistentIpCounts`) |
 | 5 | Array-svar subscript notation                 | ✅ Step 11 (d3samp6.thA `hx[3]` bit-exact) |
 | 6 | `dir_version_2` fixture                       | ✅ Step 2 |
 | 7 | State end marker `~` round-trip               | ✅ read; write deferred to Phase 3 |
@@ -222,21 +222,28 @@ closes the multi-A-file gap before Phase 2; the others remain.
   intentionally skipped). **M4 update:** the *component* path
   (`sx`/`sy`/`eps` on the class) **is** answerable by upstream — the
   oracle is `test_bugfixes.py` (exact values), so the component-level
-  resolution is tractable and is the **mili-py M4-followup** (not
-  blocked); only the bare *aggregate* form stays oracle-blocked.
-- **Bare-component lookup with cross-material element-sets.**
-  `db.query("sx", "brick")` on basic1 returns `LabelNotFound` today
-  because `es_5a`/`es_7a` aren't substituted as VEC_ARRAY parents of
-  `sx`. **M4 status:** split to **mili-py M4-followup** (Slice B,
-  `planning/mili-py/m4.md`). It needs four coupled core subsystems
+  resolution is tractable and is now **CLOSED** by the mili-py
+  M4-followup Slice B (below); only the bare *aggregate* form stays
+  oracle-blocked (the existing coherent-data behaviour is kept, not
+  chased).
+- **Bare-component lookup with cross-material element-sets — CLOSED
+  (mili-py M4-followup Slice B).** `db.query("sx","brick")` on
+  serial/basic1 and `eps`/`sy` component-of-VEC_ARRAY on d3samp4 now
+  resolve via the new core svar→element-set→IP-label linkage
+  (`query::IntPoints`, `Database::build_int_points` mirroring upstream
+  `__int_points`), VEC_ARRAY-parent substitution in
+  `plan_state_svar_ip` / `try_vec_array_substitution` (per-subrec
+  component-outer/IP-inner pickers), `ips=` *label*→positional-index
+  mapping, the `f"{comp} ipt. {label}"` component naming, and the
+  cross-material per-subrec IP-count reconciliation firing the Step-16
+  `InconsistentIpCounts`. Bit-exact vs upstream
+  (`test_query_parity.py::test_bugfixes_slice_b_oracle` (4),
+  `_component_names`, `_cross_material_inconsistent_ips_contract`).
+  Historical note: this needed four coupled core subsystems
   (VEC_ARRAY-parent resolution + a new svar→element-set→IP-label
   linkage with no current `mili-rs` analogue + ip-label→index mapping
   + cross-material per-subrec IP-count reconciliation), not the
-  single `find_vector_parent` extension first assumed. The
-  `InconsistentIpCounts` Step-16 contract is the must-raise endpoint
-  (asserted by milox `test_bugfixes_cross_material_inconsistent_ips_contract`);
-  the exact upstream oracle values are pinned as strict-xfail
-  (`test_bugfixes_slice_b_oracle`).
+  single `find_vector_parent` extension first assumed.
 - **Partial-dim array subscript** (e.g. `g[1]` on a `dims=[3,4]`
   svar). Surfaces as `MiliError::Unsupported`. No corpus fixture has
   multi-D array svars. Implement when a real call hits it.
@@ -309,12 +316,26 @@ were updated to match. Read the linked source for the full story.
   `__int_points[svar][es][:-1]` via `.index(ip)` then names components
   `f"{comp} ipt. {label}"` (`miliinternal.py:1263-1270,1367`). The
   `mili-rs` core `query::Filter.ips` is 0-based *positional* into the
-  vec_array inner order. They coincide only when IP labels are the
-  contiguous `1..K` the serial corpus happens to use. Reconciling
-  this (svar→element-set→IP-label linkage; there is no current
-  `mili-rs` analogue of `__int_points`) is the load-bearing half of
-  the mili-py **Slice B / M4-followup** — see
-  `planning/mili-py/m4.md`. Found by `milox` M4 investigation.
+  vec_array inner order (`Filter.ips`, still used by the direct
+  aggregate-vec_array path). **Slice B (M4-followup) landed the
+  reconciliation:** `query::IntPoints` + `Database::build_int_points`
+  are the `mili-rs` analogue of `__int_points`; on the
+  bare-component-of-VEC_ARRAY substitution path `ips=` are interpreted
+  as element-set IP *labels* and mapped to positional indices per
+  subrec (`try_vec_array_substitution`). The direct
+  `query("es_1a", "shell")` aggregate path keeps the positional
+  `Filter.ips` (oracle-blocked, unchanged). Found by `milox` M4
+  investigation; closed by the M4-followup.
+- **`parallel/basic1` carries no element-set TI params (all 8
+  fragments)** — unlike `serial/basic1` (`es_5`/`es_7`). Upstream
+  there treats `sx`/`brick` as a plain scalar, *ignores* `ips=`, and
+  does **not** raise on the cross-material query; the Slice-B oracle
+  values (`3.36948112e-02`) and the must-raise contract come from
+  `serial/basic1` (upstream's own `InconsistantIntPointsForElementClassResult`
+  uses the serial base). The pre-encoded M4 strict-xfail pointed at
+  the parallel base; repointed to serial during the M4-followup.
+  Found by the Slice B corpus investigation
+  (`test_query_parity.py::_BUGFIX_SLICE_B`).
 - **Unfiltered query entity axis is subrecord MO ids, not labels** —
   `gather_all` emits 1-based mesh-object ordinals; the real labels
   come from the class `Labels` TI param. `query_with_labels` does the
