@@ -53,11 +53,7 @@ __all__ = [
 # Phase G landed every primal-only reshape; the remainder is Phase H
 # (geometry / derived / adjacency — value-producing, fully parity-gated).
 _UNPORTED = {
-    "nodes_of_elems": "H",
-    "nodes_of_material": "H",
-    "faces": "H",
     "geometry": "H",
-    "connectivity_ids": "H",
     "supported_derived_variables": "H",
     "derived_variables_of_class": "H",
     "classes_of_derived_variable": "H",
@@ -345,6 +341,87 @@ class _MiliInternal:
         if self._db.superclass_from_class_name(class_name) == -1:
             self._err(f"The class '{class_name}' does not exist.")
         return self._db.connectivity(class_name)
+
+    def connectivity_ids(self, class_name: Optional[str] = None) -> Any:
+        # Upstream _MiliInternal.connectivity_ids
+        # (miliinternal.py:631-647): unknown class -> ERROR return code
+        # (still returns an empty array); None -> the per-class dict.
+        if class_name is None:
+            return self._db.connectivity_ids()
+        if self._db.superclass_from_class_name(class_name) == -1:
+            self._err(f"The class '{class_name}' does not exist.")
+        return self._db.connectivity_ids(class_name)
+
+    def nodes_of_elems(
+        self, class_sname: str, elem_labels: Any
+    ) -> Any:
+        # miliinternal.py:920-953. argument_to_ndarray(None) -> None.
+        if elem_labels is None:
+            self._err("The provided labels are None.")
+            return (
+                np.empty([1, 0], dtype=np.int32),
+                np.empty([1, 0], dtype=np.int32),
+            )
+        nodes, elems, code = self._db.nodes_of_elems(class_sname, elem_labels)
+        if code == 1:
+            self._err(f"The class '{class_sname}' does not exist.")
+        elif code == 2:
+            self._err(
+                f"None of the provided labels exist for class '{class_sname}'."
+            )
+        elif code == 3:
+            self._err(
+                f"The class '{class_sname}' does not have element connectivity."
+            )
+        if code != 0:
+            return (
+                np.empty([1, 0], dtype=np.int32),
+                np.empty([1, 0], dtype=np.int32),
+            )
+        return nodes, elems
+
+    def faces(self, class_name: str, label: int) -> Dict[int, "np.ndarray"]:
+        # miliinternal.py:649-685. HEX-only.
+        code, flat = self._db.faces(class_name, label)
+        if code == 1:
+            self._err(f"The element class ({class_name}) does not exist.")
+            return {}
+        if code == 2:
+            self._err("This function only supports HEX element classes.")
+            return {}
+        if code == 3:
+            self._err(
+                f"The label ({label}) does not exist for the class "
+                f"({class_name})"
+            )
+            return {}
+        arr = _np_i32(flat).reshape(6, 4)
+        return {i + 1: arr[i] for i in range(6)}
+
+    def nodes_of_material(self, mat: Any) -> "np.ndarray":
+        # miliinternal.py:955-971.
+        if not self._valid_material_type(mat):
+            self._err("material must be string or int")
+            return _np_i32([])
+        if isinstance(mat, np.integer):
+            mat = int(mat)
+        return _np_i32(self._db.nodes_of_material(mat))
+
+    def measure(
+        self,
+        a_entity_type: Any,
+        a_label: int,
+        b_entity_type: Any,
+        b_label: int,
+        states: Optional[Any] = None,
+    ) -> Any:
+        # MiliDatabase.measure (milidatabase.py:882-923) — upstream
+        # places it on the wrapper; milox forwards engine attrs, so it
+        # lives here over the self-contained Rust-core centroid geometry.
+        distance, a_states = self._db.measure(
+            a_entity_type, a_label, b_entity_type, b_label, states
+        )
+        return np.array(distance, dtype=np.float32), _np_i32(a_states)
 
     def query(
         self,

@@ -16,7 +16,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use mili_rs::{
-    Database, DatabaseSet, MaterialArg, MeshId, ParamPy, QueryArgs, QueryResult, StateValues,
+    Database, DatabaseSet, MaterialArg, MeshId, NodesOfElems, ParamPy, QueryArgs, QueryResult,
+    StateValues,
 };
 
 use crate::errors::{to_pyerr, MiliPythonError};
@@ -557,6 +558,157 @@ impl PyMiliDatabase {
             }
         }
         Ok(d.into_any())
+    }
+
+    /// Element connectivity as zero-based node **ids** — `np.int32`.
+    /// Same shape contract as [`Self::connectivity`]; node columns are
+    /// the fortran node id minus 1, last column the raw material
+    /// number. Matches upstream `connectivity_ids()`
+    /// (`miliinternal.py:631`).
+    #[pyo3(signature = (class_name=None))]
+    fn connectivity_ids<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mesh = self.mesh;
+        if let Some(name) = class_name {
+            let got = py
+                .allow_threads(|| self.db0().connectivity_ids(mesh, &name))
+                .map_err(|e| to_pyerr(&e))?;
+            return match got {
+                Some((data, ncols)) => Ok(array2(py, data, ncols)?.into_any()),
+                None => Ok(PyArray1::<i32>::zeros_bound(py, 0, false).into_any()),
+            };
+        }
+        let names = self.db0().class_names(mesh);
+        let d = PyDict::new_bound(py);
+        for name in names {
+            let got = py
+                .allow_threads(|| self.db0().connectivity_ids(mesh, &name))
+                .map_err(|e| to_pyerr(&e))?;
+            if let Some((data, ncols)) = got {
+                d.set_item(name, array2(py, data, ncols)?)?;
+            }
+        }
+        Ok(d.into_any())
+    }
+
+    /// `nodes_of_elems` (`miliinternal.py:920-953`). Returns
+    /// `(nodes_2d, elem_labels_2d, code)`; `code` 0 = ok, 1 = unknown
+    /// class, 2 = none of the labels exist, 3 = class has no element
+    /// connectivity. On any error the arrays are empty `(0,0)` (the
+    /// adapter sets the matching ERROR return code so the
+    /// `MiliDatabase` wrapper raises before the value is used).
+    fn nodes_of_elems<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: &str,
+        elem_labels: &Bound<'py, PyAny>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>, i32)> {
+        let labels = extract_int_list::<i32>(elem_labels)?;
+        let mesh = self.mesh;
+        let res = py
+            .allow_threads(|| self.db0().nodes_of_elems(mesh, class_name, &labels))
+            .map_err(|e| to_pyerr(&e))?;
+        let empty =
+            || -> PyResult<Bound<'py, PyAny>> { Ok(array2::<i32>(py, vec![], 0)?.into_any()) };
+        match res {
+            NodesOfElems::UnknownClass => Ok((empty()?, empty()?, 1)),
+            NodesOfElems::NoneExist => Ok((empty()?, empty()?, 2)),
+            NodesOfElems::NoConnectivity => Ok((empty()?, empty()?, 3)),
+            NodesOfElems::Ok {
+                nodes,
+                ncols,
+                elems,
+            } => Ok((
+                array2(py, nodes, ncols)?.into_any(),
+                array2(py, elems, 1)?.into_any(),
+                0,
+            )),
+        }
+    }
+
+    /// `faces` (`miliinternal.py:649-685`). Returns `(code, faces)`;
+    /// `code` 0 = ok, 1 = unknown class, 2 = non-HEX class, 3 = label
+    /// missing. `faces` is `Some([24])` (6 faces × 4 node labels,
+    /// row-major) only when `code == 0`.
+    fn faces(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+        label: i32,
+    ) -> PyResult<(i32, Option<Vec<i32>>)> {
+        let mesh = self.mesh;
+        let res = py
+            .allow_threads(|| self.db0().faces(mesh, class_name, label))
+            .map_err(|e| to_pyerr(&e))?;
+        Ok(match res {
+            mili_rs::Faces::UnknownClass => (1, None),
+            mili_rs::Faces::NotHex => (2, None),
+            mili_rs::Faces::LabelMissing => (3, None),
+            mili_rs::Faces::Ok(f) => (0, Some(f.concat())),
+        })
+    }
+
+    /// `nodes_of_material` (`miliinternal.py:955-971`) — sorted unique
+    /// node labels. The adapter pre-validates the material *type*.
+    fn nodes_of_material(&self, py: Python<'_>, material: &Bound<'_, PyAny>) -> PyResult<Vec<i32>> {
+        let arg = material_arg(material)?;
+        let mesh = self.mesh;
+        py.allow_threads(|| self.db0().nodes_of_material(mesh, &arg))
+            .map_err(|e| to_pyerr(&e))
+    }
+
+    /// `MiliDatabase.measure` (`milidatabase.py:882-923`): the
+    /// centroid-to-centroid distance per state. Returns
+    /// `(distances_f32, state_numbers_i32)` — the upstream
+    /// `(distance, A_states)` tuple.
+    #[pyo3(signature = (a_class, a_label, b_class, b_label, states=None))]
+    #[allow(clippy::type_complexity)]
+    fn measure<'py>(
+        &self,
+        py: Python<'py>,
+        a_class: &str,
+        a_label: i32,
+        b_class: &str,
+        b_label: i32,
+        states: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<(Bound<'py, PyArray1<f32>>, Bound<'py, PyArray1<i32>>)> {
+        let n_states = self.state_count();
+        let state_nums: Vec<i64> = match states {
+            None => (1..=n_states as i64).collect(),
+            Some(s) if s.is_none() => (1..=n_states as i64).collect(),
+            Some(s) => {
+                let mut v: Vec<i64> = extract_int_list::<i64>(s)?
+                    .into_iter()
+                    .map(|x| if x < 0 { n_states as i64 + x + 1 } else { x })
+                    .collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            }
+        };
+        let state_idx: Vec<usize> = state_nums
+            .iter()
+            .map(|&s| {
+                usize::try_from(s - 1).map_err(|_| {
+                    MiliPythonError::new_err(format!(
+                        "Attempting to query states that do not exist. \
+                         Minimum state = 1, Maximum state = {n_states}"
+                    ))
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        let mesh = self.mesh;
+        let dist = py
+            .allow_threads(|| {
+                self.db0()
+                    .measure(mesh, a_class, a_label, b_class, b_label, &state_idx)
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        let st: Vec<i32> = state_nums.iter().map(|&s| s as i32).collect();
+        Ok((dist.into_pyarray_bound(py), st.into_pyarray_bound(py)))
     }
 
     /// Primal `query()` — the upstream `QueryDict` shape (M3,
