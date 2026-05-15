@@ -42,7 +42,9 @@ jobs:
           # GitHub runners cannot reach.
           submodules: true
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - run: cargo test --workspace
+      # `mili-py` is excluded here so the fast test job never links
+      # pyo3; it has its own `test-milox` job below.
+      - run: cargo test --workspace --exclude mili-py
 
   test-parity:
     # Cross-impl parity vs. mili-python. Runs the `parity` feature
@@ -63,7 +65,34 @@ jobs:
       # local devs — keeps the parity environment identical everywhere.
       - name: Set up parity environment
         run: scripts/setup-parity.sh
-      - run: cargo test --workspace --features parity
+      - run: cargo test --workspace --exclude mili-py --features parity
+
+  test-milox:
+    # Dedicated job for the pyo3 binding crate (mirrors test-parity's
+    # Python/maturin setup). Builds `milox` via maturin and runs the
+    # pytest parity harness (import milox vs upstream mili) on the
+    # parity corpus + xmilics multi-fragment families. Skip-not-fail
+    # when the corpus / oracle is absent, same as the Rust parity jobs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      # Single source of truth: installs the upstream `mili` oracle and
+      # inits the reference/mili (xmilics) + reference/mili-python
+      # submodules used by the harness.
+      - name: Set up parity environment
+        run: scripts/setup-parity.sh
+      - name: Build + install milox
+        # pip drives the maturin build backend (pyproject.toml) with
+        # build isolation — no virtualenv needed on the runner.
+        run: pip install pytest ./crates/mili-py
+      - name: Parity harness
+        run: pytest -q crates/mili-py/tests
 
   fuzz:
     # Long-running cargo-fuzz cron. Each target runs for 30 minutes on

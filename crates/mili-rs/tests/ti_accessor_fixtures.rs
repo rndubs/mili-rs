@@ -106,10 +106,11 @@ fn basic1_element_sets_and_integration_points_are_consistent() {
     let sets = db.element_sets().expect("element_sets");
     let ips = db.integration_points().expect("integration_points");
     // basic1 may or may not declare element sets — both empty is OK.
-    // What must hold: every integer-named set corresponds to one entry
-    // in `ips`, with `ips.len == set_values.len - 1`.
+    // Keys are upstream-shaped (`es_<n>`); the material id is the last
+    // character (`eset[-1:]`). Every such set maps to one `ips` entry
+    // with `ips.len == set_values.len - 1`.
     for (name, values) in &sets {
-        let Ok(mat) = name.parse::<i32>() else {
+        let Ok(mat) = name[name.len() - 1..].parse::<i32>() else {
             continue;
         };
         let m = mili_rs::MaterialId(mat);

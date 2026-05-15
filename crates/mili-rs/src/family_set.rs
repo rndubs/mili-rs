@@ -47,14 +47,14 @@
 //!   actually needs; everything else (svar dict, class set) is lenient
 //!   and a fragment missing a class / svar just contributes zero rows.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
 use crate::error::{MiliError, Result};
 use crate::family::{Database, QueryArgs};
-use crate::mesh::{MeshId, ObjectClass};
+use crate::mesh::{MaterialId, MeshId, ObjectClass};
 use crate::query::StateValues;
 use crate::state::StateMeta;
 use crate::svar::NumType;
@@ -186,6 +186,59 @@ impl DatabaseSet {
     /// should go through the per-fragment [`Database`].
     pub fn state_maps(&self) -> &[StateMeta] {
         self.fragments[0].states()
+    }
+
+    /// Mesh dimensionality from rank 0. Upstream reduces this with
+    /// `zeroth_entry` (`milidatabase.py:209-217`) — fragment-invariant.
+    pub fn mesh_dimensions(&self) -> Result<i32> {
+        self.fragments[0].mesh_dimensions()
+    }
+
+    /// Material name → numbers from rank 0. Upstream reduces `materials`
+    /// with `zeroth_entry` (`milidatabase.py:377-385`).
+    pub fn materials(&self) -> Result<HashMap<String, Vec<i32>>> {
+        self.fragments[0].materials()
+    }
+
+    /// Distinct material numbers concatenated across fragments in rank
+    /// order, first-occurrence-unique. Mirrors upstream
+    /// `list_concatenate_unique` (`milidatabase.py:388-395`;
+    /// `pd.unique` preserves first-appearance order).
+    pub fn material_numbers(&self) -> Result<Vec<i32>> {
+        let mut seen: HashSet<i32> = HashSet::new();
+        let mut out: Vec<i32> = Vec::new();
+        for frag in &self.fragments {
+            for n in frag.material_numbers()? {
+                if seen.insert(n) {
+                    out.push(n);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Element sets merged across fragments. Mirrors upstream
+    /// `dictionary_merge_no_concat` (`milidatabase.py:259-267`):
+    /// `dict.update` in rank order, so a later fragment's value wins on
+    /// key collision.
+    pub fn element_sets(&self) -> Result<HashMap<String, Vec<i32>>> {
+        let mut out: HashMap<String, Vec<i32>> = HashMap::new();
+        for frag in &self.fragments {
+            out.extend(frag.element_sets()?);
+        }
+        Ok(out)
+    }
+
+    /// Per-material integration points merged across fragments. Mirrors
+    /// upstream `dictionary_merge_no_concat`
+    /// (`milidatabase.py:270-278`): last fragment wins on key
+    /// collision.
+    pub fn integration_points(&self) -> Result<HashMap<MaterialId, Vec<i32>>> {
+        let mut out: HashMap<MaterialId, Vec<i32>> = HashMap::new();
+        for frag in &self.fragments {
+            out.extend(frag.integration_points()?);
+        }
+        Ok(out)
     }
 
     /// Unique class names across all fragments, in first-occurrence
