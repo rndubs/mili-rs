@@ -336,6 +336,52 @@ class _MiliInternal:
             for sm in self._db.state_maps()
         ]
 
+    def connectivity(self, class_name: Optional[str] = None) -> Any:
+        # Upstream _MiliInternal.connectivity: with a class name, an
+        # unknown class sets the ERROR return code (and still returns
+        # an empty array); None returns the per-class dict.
+        if class_name is None:
+            return self._db.connectivity()
+        if self._db.superclass_from_class_name(class_name) == -1:
+            self._err(f"The class '{class_name}' does not exist.")
+        return self._db.connectivity(class_name)
+
+    def query(
+        self,
+        svar_names: Any,
+        class_sname: Any,
+        material: Any = None,
+        labels: Any = None,
+        states: Any = None,
+        ips: Any = None,
+        write_data: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        # Signature mirrors upstream _MiliInternal.query so Python
+        # argument binding raises TypeError for a missing class /
+        # unexpected keyword exactly as upstream does. Upstream then
+        # validates argument *types* via the ERROR return code (raised
+        # by MiliDatabase.__postprocess); the Rust core raises
+        # MiliPythonError for the same conditions, so mirror that for
+        # the two cases PyO3 would otherwise surface as a bare
+        # TypeError (a non-str class / a non-iterable svar).
+        if not isinstance(class_sname, str):
+            raise MiliPythonError(
+                f"The class '{class_sname}' does not exist."
+            )
+        if not isinstance(svar_names, str):
+            try:
+                iter(svar_names)
+            except TypeError:
+                raise MiliPythonError(
+                    "State variable names must be a string or iterable "
+                    "of strings"
+                ) from None
+        return self._db.query(
+            svar_names, class_sname, material, labels, states, ips,
+            write_data, **kwargs,
+        )
+
     # ---- forward already-ported accessors / raise for Phase H ----
     def __getattr__(self, name: str) -> Any:
         db = self.__dict__["_db"]
