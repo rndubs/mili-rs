@@ -78,6 +78,12 @@ pub struct Svar {
     pub name: String,
     pub title: String,
     pub num_type: NumType,
+    /// Raw on-disk `MiliType` code (the second int of the svar record:
+    /// 2=M_FLOAT, 3=M_FLOAT4, 4=M_FLOAT8, 5=M_INT, 6=M_INT4, 7=M_INT8).
+    /// `num_type` collapses the platform aliases; this preserves the
+    /// exact code upstream's `StateVariable.data_type` carries for
+    /// `__eq__` parity (`reference/mili-python/src/mili/afileIO.py:335`).
+    pub type_code: i32,
     pub agg: SvarAgg,
     /// Atoms-per-object for this svar, resolved at parse time:
     /// `1` for scalar, `sum(comp.atoms)` for vector, `prod(dims)` for
@@ -307,6 +313,7 @@ fn parse_one(
         name: name.clone(),
         title,
         num_type,
+        type_code,
         agg,
         atoms,
     };

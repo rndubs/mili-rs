@@ -241,21 +241,24 @@ impl MeshTable {
         // moves it to the real mesh once a geometry entry binds it.
         let sentinel = MeshId(-1);
         let mesh = self.mesh_entry(sentinel);
-        if let Some(existing) = mesh.classes.get(&short) {
+        if let Some(existing) = mesh.classes.get_mut(&short) {
             // Idempotent re-declaration is common in the corpus (the
             // writer can emit CLASS_DEF more than once for the same
             // class). The superclass must match — disagreement there
-            // is a real correctness conflict — but the long_name is
-            // a cosmetic human-readable label and the corpus
-            // (`labeling` fixture: `particle` is declared with
-            // `long_name = "Nodal"` then later `"Particles"`) does
-            // emit inconsistent values that mili-python silently
-            // accepts. Don't error on long_name disagreement.
+            // is a real correctness conflict — but the long_name is a
+            // cosmetic label the corpus emits inconsistently
+            // (`labeling`: `particle` is declared `long_name="Nodal"`
+            // then `"Particles"`). Upstream stores CLASS_DEF in a dict
+            // keyed by short name (`miliinternal.py:208-210`), so a
+            // later entry **overwrites** the earlier — last-wins. Match
+            // that (parity bug found by the Phase G mesh_object_classes
+            // sweep; CLAUDE.md "corpus wins").
             if existing.superclass != class.superclass {
                 return Err(MiliError::MalformedDirectory(
                     "conflicting CLASS_DEF for the same class name",
                 ));
             }
+            existing.long_name = class.long_name;
             return Ok(());
         }
         mesh.class_order.push(short.clone());
@@ -491,7 +494,7 @@ fn read_mesh_dimensions(dir: &Directory, bytes: &[u8], header: Header) -> Result
     Ok(3)
 }
 
-fn mesh_and_classname(entry: &DirEntry, names: &NamePool) -> Result<(MeshId, String)> {
+pub(crate) fn mesh_and_classname(entry: &DirEntry, names: &NamePool) -> Result<(MeshId, String)> {
     if entry.name_count < 1 {
         return Err(MiliError::MalformedDirectory(
             "geometry entry missing class name",

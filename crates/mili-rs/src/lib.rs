@@ -30,6 +30,7 @@ pub mod header;
 mod mesh;
 mod param;
 mod query;
+mod reshape;
 mod srec;
 mod state;
 mod svar;
@@ -48,6 +49,7 @@ pub use mesh::{Connectivity, MaterialId, Mesh, MeshId, Nodes, ObjectClass, Super
 pub use param::ParamTable;
 pub use param::{AggType, ArrayParam, DataType, ParamValue, ScalarValue};
 pub use query::{QueryResult, StateValues};
+pub use reshape::{MaterialArg, Metadata, MoClassInfo, ParamPy, SubrecInfo, SvarInfo};
 pub use srec::Organization;
 #[doc(hidden)]
 pub use srec::{derive_lumps, Lumps, Srec, SrecTable, Subrecord};

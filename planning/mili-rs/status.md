@@ -189,8 +189,8 @@ states. Green.
 | Suite                          | Tests | Notes |
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
-| mili-python parity (`pyo3`)    | 23    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); `scripts/setup-parity.sh` then `cargo test --features parity` |
-| `milox` M1–M4 parity           | 269 | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A + **Slice B** (bare-component-of-VEC_ARRAY / ip-as-label / `InconsistentIpCounts`, all bit-exact) + **M4-followup Phase F**: `mili`-compatible package skeleton (`milox.reader`/`milidatabase`/`miliinternal`/`parallel`/`afileIO`/`datatypes`/`mdg_defines`) + upstream import-redirect harness (`test_upstream_readpath.py`) running upstream `test_reader.py` green (7). No xfail. Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
+| mili-python parity (`pyo3`)    | 24    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); **+ `parity_reshape` — every Phase-G `_MiliInternal` reshape bit-exact vs. the upstream oracle across the full serial corpus**; `scripts/setup-parity.sh` then `cargo test --workspace --exclude mili-py --features parity` |
+| `milox` parity + redirect      | 303 + 7 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`). Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (34 pass, 7 honest `xfail` = Phase H)** green. Phase G remaining: `test_milidatabase.py` read half (needs the upstream-signature `MiliDatabase` wrapper + return-code `__postprocess`). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -300,8 +300,19 @@ were updated to match. Read the linked source for the full story.
   `milox` M2 parity. (`m2.md` decision 10.)
 - **`CLASS_DEF` superclass is in `MODIFIER2`, not `MODIFIER1`** —
   `entry-payloads.md § CLASS_DEF`, `mesh.rs::add_class_def`.
-- **`CLASS_DEF` `long_name` re-declaration may disagree** (cosmetic;
-  superclass is the load-bearing field) — `mesh.rs::add_class_def`.
+- **`CLASS_DEF` `long_name` re-declaration is _last-wins_**, not
+  first-wins — upstream stores CLASS_DEF in a dict keyed by short name
+  (`miliinternal.py:208-210`) so a later entry overwrites the earlier
+  (`labeling`: `particle` is `"Nodal"` then `"Particles"`). Was a real
+  parity bug (mili-rs kept the first); fixed in
+  `mesh.rs::add_class_def`. Found by the Phase-G `mesh_object_classes`
+  corpus sweep (`parity_reshape.rs`); CLAUDE.md "corpus wins".
+- **`MeshObjectClass.idents_exist` is strictly TI-label-or-
+  `CLASS_IDENTS`**, *not* the `NODES`/`ELEM_CONNS` id-range fallback
+  `Database::labels` folds in (upstream `miliinternal.py:276-282`:
+  `False` ⇔ class reaches finalisation absent a real ident source —
+  e.g. sstate `cseg`). Dedicated `Database::idents_exist`; found by
+  the Phase-G sweep.
 - **State files carry an 8-byte per-state header** (i32 srec_id + f32
   time) — `format.md § File set`, `query.rs::state_data_start` skip.
 - **VEC_ARRAY inner order is components-fastest, IP-slowest** —

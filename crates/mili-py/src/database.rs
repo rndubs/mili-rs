@@ -15,7 +15,9 @@ use numpy::{IntoPyArray, PyArray1, PyArray2};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use mili_rs::{Database, DatabaseSet, MeshId, QueryArgs, QueryResult, StateValues};
+use mili_rs::{
+    Database, DatabaseSet, MaterialArg, MeshId, ParamPy, QueryArgs, QueryResult, StateValues,
+};
 
 use crate::errors::{to_pyerr, MiliPythonError};
 
@@ -89,6 +91,295 @@ impl PyMiliDatabase {
             Backend::Single(db) => db.state_count(),
             Backend::Set(s) => s.state_count(),
         }
+    }
+
+    // ---- M4-followup Phase G: primal-only `_MiliInternal` reshapes ----
+    // Thin pass-throughs over the Rust core (`mili_rs::reshape`). The
+    // reshapes are mesh-global metadata (svar/srec/class tables, params)
+    // and identical across a family's fragments, so the set backend
+    // resolves through fragment 0 — the same convention the existing
+    // metadata accessors use. The redirect-harness target is the serial
+    // sstate corpus; multi-fragment label/material *merge* of these is
+    // Phase H. See planning/mili-py/m4.md decision 19.
+
+    /// Labels of a single class — upstream `labels(class_name)`
+    /// (`miliinternal.py:572-585`): `np.empty` when the class declares
+    /// none. (The no-arg `labels()` dict accessor is separate.)
+    fn labels_of_class(&self, py: Python<'_>, class_name: &str) -> PyResult<Vec<i32>> {
+        let mesh = self.mesh;
+        Ok(py
+            .allow_threads(|| match &self.backend {
+                Backend::Single(db) => db.labels(mesh, class_name),
+                Backend::Set(s) => s.labels(mesh, class_name),
+            })
+            .map_err(|e| to_pyerr(&e))?
+            .unwrap_or_default())
+    }
+
+    fn srec_fmt_qty(&self) -> i32 {
+        self.db0().srec_fmt_qty()
+    }
+
+    fn superclass_from_class_name(&self, class_name: &str) -> i32 {
+        self.db0()
+            .superclass_code(self.mesh, class_name)
+            .unwrap_or(-1)
+    }
+
+    fn mesh_object_classes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let mesh = self.mesh;
+        let info = py
+            .allow_threads(|| self.db0().mesh_object_classes(mesh))
+            .map_err(|e| to_pyerr(&e))?;
+        let rows: Vec<_> = info
+            .into_iter()
+            .map(|c| {
+                (
+                    c.short_name,
+                    c.mesh_id,
+                    c.long_name,
+                    c.sclass,
+                    c.elem_qty,
+                    c.idents_exist,
+                )
+            })
+            .collect();
+        Ok(PyList::new_bound(py, rows))
+    }
+
+    fn subrecords<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        let mesh = self.mesh;
+        let info = py.allow_threads(|| self.db0().subrecords(mesh));
+        let rows: Vec<_> = info
+            .into_iter()
+            .map(|s| {
+                (
+                    s.name,
+                    s.class_name,
+                    s.superclass,
+                    s.organization,
+                    s.qty_svars,
+                    s.svar_names,
+                    s.ordinal_blocks,
+                )
+            })
+            .collect();
+        PyList::new_bound(py, rows)
+    }
+
+    fn state_variables_info<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+        let info = py.allow_threads(|| self.db0().state_variables());
+        let rows: Vec<_> = info
+            .into_iter()
+            .map(|v| {
+                (
+                    v.name,
+                    v.title,
+                    v.data_type,
+                    v.agg_type,
+                    v.list_size,
+                    v.order,
+                    v.dims,
+                    v.comp_names,
+                    v.containing_svar_names,
+                )
+            })
+            .collect();
+        PyList::new_bound(py, rows)
+    }
+
+    fn queriable_svars(&self, vector_only: bool, show_ips: bool) -> Vec<String> {
+        self.db0().queriable_svars(vector_only, show_ips)
+    }
+
+    /// `(classes, found)` — `found=False` means the svar is unknown
+    /// (upstream sets the error code and returns `[]`).
+    fn classes_of_state_variable(&self, svar: &str) -> (Vec<String>, bool) {
+        match self.db0().classes_of_state_variable(svar) {
+            Some(c) => (c, true),
+            None => (vec![], false),
+        }
+    }
+
+    /// `(svars, found)` — `found=False` means the class is unknown.
+    fn state_variables_of_class(&self, class_name: &str) -> (Vec<String>, bool) {
+        match self.db0().state_variables_of_class(self.mesh, class_name) {
+            Some(c) => (c, true),
+            None => (vec![], false),
+        }
+    }
+
+    /// `(svars, svar_ok, class_ok)`.
+    fn containing_state_variables_of_class(
+        &self,
+        svar: &str,
+        class_name: &str,
+    ) -> (Vec<String>, bool, bool) {
+        let svar_ok = self.db0_has_svar(svar);
+        let class_ok = self.db0_has_class(class_name);
+        if !svar_ok || !class_ok {
+            return (vec![], svar_ok, class_ok);
+        }
+        let v = self
+            .db0()
+            .containing_state_variables_of_class(self.mesh, svar, class_name)
+            .unwrap_or_default();
+        (v, true, true)
+    }
+
+    /// `(comps, code)` — `code` 0=ok, 1=unknown svar, 2=not a vector.
+    fn components_of_vector_svar(&self, svar: &str) -> (Vec<String>, i32) {
+        match self.db0().components_of_vector_svar(svar) {
+            Ok(c) => (c, 0),
+            Err(false) => (vec![], 1),
+            Err(true) => (vec![], 2),
+        }
+    }
+
+    fn state_variable_titles<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let d = PyDict::new_bound(py);
+        for (k, v) in self.db0().state_variable_titles() {
+            d.set_item(k, v)?;
+        }
+        Ok(d)
+    }
+
+    /// `(ips, svar_ok, class_ok)`.
+    fn int_points_of_state_variable(
+        &self,
+        py: Python<'_>,
+        svar_name: &str,
+        class_name: &str,
+    ) -> (Vec<i32>, bool, bool) {
+        let svar_ok = self.db0_has_svar(svar_name);
+        let class_ok = self.db0_has_class(class_name);
+        if !svar_ok || !class_ok {
+            return (vec![], svar_ok, class_ok);
+        }
+        let mesh = self.mesh;
+        let v = py
+            .allow_threads(|| {
+                self.db0()
+                    .int_points_of_state_variable(mesh, svar_name, class_name)
+            })
+            .unwrap_or_default();
+        (v, true, true)
+    }
+
+    /// `(materials, class_ok)`.
+    fn materials_of_class_name(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+    ) -> PyResult<(Vec<i32>, bool)> {
+        let mesh = self.mesh;
+        let r = py
+            .allow_threads(|| self.db0().materials_of_class_name(mesh, class_name))
+            .map_err(|e| to_pyerr(&e))?;
+        Ok(match r {
+            Some(v) => (v, true),
+            None => (vec![], false),
+        })
+    }
+
+    /// `(parts, class_ok)`.
+    fn parts_of_class_name(&self, py: Python<'_>, class_name: &str) -> PyResult<(Vec<i32>, bool)> {
+        let mesh = self.mesh;
+        let r = py
+            .allow_threads(|| self.db0().parts_of_class_name(mesh, class_name))
+            .map_err(|e| to_pyerr(&e))?;
+        Ok(match r {
+            Some(v) => (v, true),
+            None => (vec![], false),
+        })
+    }
+
+    fn material_classes(
+        &self,
+        py: Python<'_>,
+        material: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<String>> {
+        let arg = material_arg(material)?;
+        let mesh = self.mesh;
+        py.allow_threads(|| self.db0().material_classes(mesh, &arg))
+            .map_err(|e| to_pyerr(&e))
+    }
+
+    /// `(labels, class_ok)`.
+    fn class_labels_of_material(
+        &self,
+        py: Python<'_>,
+        material: &Bound<'_, PyAny>,
+        class_name: &str,
+    ) -> PyResult<(Vec<i32>, bool)> {
+        let arg = material_arg(material)?;
+        let mesh = self.mesh;
+        let r = py
+            .allow_threads(|| self.db0().class_labels_of_material(mesh, &arg, class_name))
+            .map_err(|e| to_pyerr(&e))?;
+        Ok(match r {
+            Some(v) => (v, true),
+            None => (vec![], false),
+        })
+    }
+
+    fn all_labels_of_material<'py>(
+        &self,
+        py: Python<'py>,
+        material: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let arg = material_arg(material)?;
+        let mesh = self.mesh;
+        let pairs = py
+            .allow_threads(|| self.db0().all_labels_of_material(mesh, &arg))
+            .map_err(|e| to_pyerr(&e))?;
+        let d = PyDict::new_bound(py);
+        for (cls, lbls) in pairs {
+            d.set_item(cls, lbls)?;
+        }
+        Ok(d)
+    }
+
+    fn parameters<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let pd = py
+            .allow_threads(|| self.db0().parameters())
+            .map_err(|e| to_pyerr(&e))?;
+        let d = PyDict::new_bound(py);
+        for (k, v) in pd {
+            d.set_item(k, param_to_py(py, v))?;
+        }
+        Ok(d)
+    }
+
+    /// `Some(value)` or `None` (the caller applies its default).
+    fn parameter<'py>(&self, py: Python<'py>, name: &str) -> PyResult<Option<Bound<'py, PyAny>>> {
+        let v = py
+            .allow_threads(|| self.db0().parameter(name))
+            .map_err(|e| to_pyerr(&e))?;
+        Ok(v.map(|p| param_to_py(py, p)))
+    }
+
+    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let m = py
+            .allow_threads(|| self.db0().metadata())
+            .map_err(|e| to_pyerr(&e))?;
+        let d = PyDict::new_bound(py);
+        d.set_item("code_name", m.code_name)?;
+        d.set_item("username", m.username)?;
+        d.set_item("job_id", m.job_id)?;
+        d.set_item("nprocs", m.nprocs)?;
+        d.set_item("date", m.date)?;
+        d.set_item("host_name", m.host_name)?;
+        d.set_item("library_version", m.library_version)?;
+        Ok(d)
+    }
+
+    /// No-op success: the Rust core holds an immutable mmap of the
+    /// already-parsed A-file, so there is no state-map cache to refresh
+    /// (upstream `reload_state_maps`, `miliinternal.py:306-316`,
+    /// re-parses; here it is current by construction).
+    fn reload_state_maps(&self) -> bool {
+        true
     }
 
     fn mesh_dimensions(&self) -> PyResult<i32> {
@@ -539,6 +830,29 @@ fn array2<T: numpy::Element>(
 }
 
 impl PyMiliDatabase {
+    /// Representative fragment for mesh-global metadata reshapes
+    /// (Phase G). `Single` is itself; `Set` resolves through fragment
+    /// 0 (fragment-invariant metadata — same convention as the other
+    /// metadata accessors).
+    fn db0(&self) -> &Database {
+        match &self.backend {
+            Backend::Single(db) => db,
+            Backend::Set(s) => s.fragment(0).expect("DatabaseSet has >= 1 fragment"),
+        }
+    }
+
+    fn db0_has_svar(&self, svar: &str) -> bool {
+        self.db0().svars().get(svar).is_some()
+    }
+
+    fn db0_has_class(&self, class_name: &str) -> bool {
+        self.db0()
+            .meshes()
+            .mesh(self.mesh)
+            .and_then(|m| m.class(class_name))
+            .is_some()
+    }
+
     /// Resolve a `material=` argument (name or number, incl. a digit
     /// string) into the material-number list the core query path
     /// expects. Mirrors `miliinternal.py:875-891`.
@@ -591,6 +905,31 @@ where
     Err(MiliPythonError::new_err(
         "expected an integer or a list of integers",
     ))
+}
+
+/// A `material=` argument → [`MaterialArg`]. An int (or numpy
+/// integer) becomes `Num`; anything else is taken as a string (the
+/// core promotes digit-strings). Mirrors upstream's
+/// `__valid_material_type` accepting `str | int | np.integer`.
+fn material_arg(obj: &Bound<'_, PyAny>) -> PyResult<MaterialArg> {
+    if let Ok(n) = obj.extract::<i32>() {
+        return Ok(MaterialArg::Num(n));
+    }
+    let s: String = obj
+        .extract()
+        .map_err(|_| MiliPythonError::new_err("material must be string or int"))?;
+    Ok(MaterialArg::Name(s))
+}
+
+/// [`ParamPy`] → a native Python scalar / str / list.
+fn param_to_py<'py>(py: Python<'py>, v: ParamPy) -> Bound<'py, PyAny> {
+    match v {
+        ParamPy::Int(n) => n.into_py(py).into_bound(py),
+        ParamPy::Float(n) => n.into_py(py).into_bound(py),
+        ParamPy::Str(s) => s.into_py(py).into_bound(py),
+        ParamPy::IntArr(a) => a.into_py(py).into_bound(py),
+        ParamPy::FloatArr(a) => a.into_py(py).into_bound(py),
+    }
 }
 
 fn map_to_pydict(py: Python<'_>, m: HashMap<String, Vec<i32>>) -> PyResult<Bound<'_, PyDict>> {

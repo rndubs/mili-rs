@@ -38,6 +38,21 @@ _REDIRECT = {
     "mili.afileIO": milox.afileIO,
     "mili.datatypes": milox.datatypes,
     "mili.mdg_defines": milox.mdg_defines,
+    "mili.geometric_mesh_info": milox.geometric_mesh_info,
+}
+
+# Tests in redirected modules that exercise still-unported surface.
+# Honestly xfailed with the phase that lands them — never silently
+# passed, never deleted (planning/mili-py/m4.md decision 19). Strict:
+# if one starts passing, the harness fails so it gets promoted.
+_XFAIL = {
+    "test_miliinternal::test_geometry_property": "Phase H: GeometricMeshInfo",
+    "test_miliinternal::test_supported_variables": "Phase H: derived engine",
+    "test_miliinternal::test_derived_variables_of_class": "Phase H: derived engine",
+    "test_miliinternal::test_classes_of_derived_variable": "Phase H: derived engine",
+    "test_miliinternal::test_faces": "Phase H: geometry (faces)",
+    "test_miliinternal::test_nodes_label": "Phase H: nodes_of_elems",
+    "test_miliinternal::test_nodes_material": "Phase H: nodes_of_material",
 }
 
 
@@ -73,7 +88,7 @@ def _collect(module):
     return cases
 
 
-_REDIRECTED = ["test_reader"]
+_REDIRECTED = ["test_reader", "test_miliinternal"]
 
 
 def _ids():
@@ -111,6 +126,16 @@ def test_upstream_redirected(case_id):
             sys.modules.pop(k, None)
     if result.skipped:
         pytest.skip(result.skipped[0][1])
-    if result.failures or result.errors:
+    failed = bool(result.failures or result.errors)
+    xfail_reason = _XFAIL.get(case_id)
+    if xfail_reason is not None:
+        if failed:
+            pytest.xfail(xfail_reason)
+        pytest.fail(
+            f"{case_id} now passes — promote it out of _XFAIL "
+            f"(was: {xfail_reason})",
+            pytrace=False,
+        )
+    if failed:
         msgs = [tb for _, tb in (result.failures + result.errors)]
         pytest.fail("\n".join(msgs), pytrace=False)
