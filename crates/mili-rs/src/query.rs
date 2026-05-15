@@ -523,9 +523,9 @@ fn gather_all(
     for m in matches {
         let block_labels = expand_id_blocks(&m.sub.id_blocks);
         debug_assert_eq!(block_labels.len(), m.n);
-        for j in 0..m.n {
+        for (j, &label) in block_labels.iter().enumerate().take(m.n) {
             push_object_rows(&mut slabs, m, width, picker, j);
-            labels.push(block_labels[j]);
+            labels.push(label);
         }
     }
     (slabs, labels)

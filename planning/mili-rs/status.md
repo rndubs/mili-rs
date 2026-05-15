@@ -146,8 +146,8 @@ actually enforce. Resolved during implementation:
 
 | Suite                          | Tests | Notes |
 |--------------------------------|------:|:------|
-| `cargo test --workspace`       | 205   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 7 `family_set` unit tests, + 1 corpus-wide smoke walker) |
-| mili-python parity (`pyo3`)    | 22    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level parity; `cargo test --features parity` |
+| `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
+| mili-python parity (`pyo3`)    | 22    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level parity; `scripts/setup-parity.sh` then `cargo test --features parity` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 

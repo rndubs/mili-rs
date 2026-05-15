@@ -39,7 +39,6 @@
 //!   actually needs; everything else (svar dict, class set) is lenient
 //!   and a fragment missing a class / svar just contributes zero rows.
 
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -82,15 +81,15 @@ impl DatabaseSet {
     /// - Any per-fragment [`Database::open`] error propagates as-is.
     pub fn open(base: impl AsRef<Path>) -> Result<Self> {
         let (dir, base_name) = resolve_base(base.as_ref())?;
-        let mut entries: Vec<(Option<u32>, PathBuf)> = Vec::new();
+        let mut entries: Vec<(FragmentKey, PathBuf)> = Vec::new();
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let name = entry.file_name();
             let Some(name_str) = name.to_str() else {
                 continue;
             };
-            if let Some(rank) = match_fragment(name_str, &base_name) {
-                entries.push((rank, entry.path()));
+            if let Some(key) = match_fragment(name_str, &base_name) {
+                entries.push((key, entry.path()));
             }
         }
         if entries.is_empty() {
@@ -99,12 +98,10 @@ impl DatabaseSet {
                 base: base_name,
             });
         }
-        entries.sort_by(|a, b| match (a.0, b.0) {
-            (Some(x), Some(y)) => x.cmp(&y),
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
-            (None, None) => a.1.cmp(&b.1),
-        });
+        // `FragmentKey`'s derived `Ord` puts the bare `<base>A` (no
+        // rank digits) before any ranked fragment; equal keys fall
+        // back to path order for determinism.
+        entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
 
         let fragments: Result<Vec<Database>> = entries
             .into_par_iter()
@@ -437,7 +434,7 @@ fn atoms_per_label_of(values: &StateValues, labels: &[i32], state_count: usize) 
     if divisor == 0 {
         return Ok(0);
     }
-    if total % divisor != 0 {
+    if !total.is_multiple_of(divisor) {
         return Err(MiliError::MalformedDirectory(
             "DatabaseSet::query: value count not a multiple of state * label",
         ));
@@ -459,13 +456,10 @@ fn concat_state_values(
             let dst_stride = merged_labels_total * row;
             let mut frag_offset_labels: usize = 0;
             for (vals, labels) in parts {
-                let src = match vals {
-                    StateValues::$variant(v) => v,
-                    _ => {
-                        return Err(MiliError::MalformedDirectory(
-                            "DatabaseSet::query: mixed numeric types after type check",
-                        ))
-                    }
+                let StateValues::$variant(src) = vals else {
+                    return Err(MiliError::MalformedDirectory(
+                        "DatabaseSet::query: mixed numeric types after type check",
+                    ));
                 };
                 let frag_labels = labels.len();
                 let src_stride = frag_labels * row;
@@ -557,19 +551,29 @@ fn resolve_base(path: &Path) -> Result<(PathBuf, String)> {
     Ok((dir, file_name.to_owned()))
 }
 
-/// Return `Some(rank)` if `name` matches `^<base>(\d*)A$`, where the
-/// numeric suffix decodes to `rank` (or `None` for a bare `<base>A`
-/// with no digits). Returns `None` if the name does not match.
-fn match_fragment(name: &str, base: &str) -> Option<Option<u32>> {
+/// Ordering key for a discovered fragment. `Bare` (a single `<base>A`
+/// with no rank digits — the serial-family case) sorts before any
+/// `Rank(n)`; ranks sort numerically. Derives `Ord` so
+/// [`DatabaseSet::open`] can sort fragments deterministically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FragmentKey {
+    Bare,
+    Rank(u32),
+}
+
+/// Return `Some(key)` if `name` matches `^<base>(\d*)A$`: `Bare` for a
+/// bare `<base>A` with no digits, `Rank(n)` for `<base><digits>A`.
+/// Returns `None` if the name does not match.
+fn match_fragment(name: &str, base: &str) -> Option<FragmentKey> {
     let after_base = name.strip_prefix(base)?;
     let digits = after_base.strip_suffix('A')?;
     if digits.is_empty() {
-        return Some(None);
+        return Some(FragmentKey::Bare);
     }
     if !digits.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    digits.parse::<u32>().ok().map(Some)
+    digits.parse::<u32>().ok().map(FragmentKey::Rank)
 }
 
 #[cfg(test)]
@@ -578,14 +582,24 @@ mod tests {
 
     #[test]
     fn match_fragment_accepts_bare_a() {
-        assert_eq!(match_fragment("runA", "run"), Some(None));
+        assert_eq!(match_fragment("runA", "run"), Some(FragmentKey::Bare));
     }
 
     #[test]
     fn match_fragment_decodes_rank() {
-        assert_eq!(match_fragment("run000A", "run"), Some(Some(0)));
-        assert_eq!(match_fragment("run007A", "run"), Some(Some(7)));
-        assert_eq!(match_fragment("run123A", "run"), Some(Some(123)));
+        assert_eq!(match_fragment("run000A", "run"), Some(FragmentKey::Rank(0)));
+        assert_eq!(match_fragment("run007A", "run"), Some(FragmentKey::Rank(7)));
+        assert_eq!(
+            match_fragment("run123A", "run"),
+            Some(FragmentKey::Rank(123))
+        );
+    }
+
+    #[test]
+    fn fragment_key_orders_bare_before_ranks() {
+        assert!(FragmentKey::Bare < FragmentKey::Rank(0));
+        assert!(FragmentKey::Rank(0) < FragmentKey::Rank(1));
+        assert!(FragmentKey::Rank(2) < FragmentKey::Rank(10));
     }
 
     #[test]
@@ -615,13 +629,16 @@ mod tests {
     fn match_fragment_accepts_dotted_base() {
         assert_eq!(
             match_fragment("basic1.plt000A", "basic1.plt"),
-            Some(Some(0))
+            Some(FragmentKey::Rank(0))
         );
         assert_eq!(
             match_fragment("basic1.plt007A", "basic1.plt"),
-            Some(Some(7))
+            Some(FragmentKey::Rank(7))
         );
-        assert_eq!(match_fragment("d3samp6.thA", "d3samp6.th"), Some(None));
+        assert_eq!(
+            match_fragment("d3samp6.thA", "d3samp6.th"),
+            Some(FragmentKey::Bare)
+        );
     }
 
     #[test]

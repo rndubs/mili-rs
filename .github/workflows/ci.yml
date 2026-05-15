@@ -46,9 +46,10 @@ jobs:
 
   test-parity:
     # Cross-impl parity vs. mili-python. Runs the `parity` feature
-    # tests in `crates/mili-rs/tests/parity_*.rs` (skip-not-fail when
-    # the corpus or python package is absent at runtime, but here we
-    # always install both).
+    # tests in `crates/mili-rs/tests/parity_*.rs` plus the xmilics /
+    # full-corpus suites (skip-not-fail when the corpus or python
+    # package is absent at runtime, but here we always install both
+    # via the shared setup script).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,10 +59,10 @@ jobs:
         with:
           python-version: "3.11"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Install mili-python (editable)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e reference/mili-python
+      # Single source of truth shared with the session-start hook and
+      # local devs — keeps the parity environment identical everywhere.
+      - name: Set up parity environment
+        run: scripts/setup-parity.sh
       - run: cargo test --workspace --features parity
 
   fuzz:

@@ -61,7 +61,10 @@ fn parity_one_fragment(fixture: &str, frag: u32, fragment_count: u32) {
     let frag_a_path = xmilics_path(fixture, &frag_a);
     let frag_base_path = xmilics_path(fixture, &frag_base);
     if !frag_a_path.exists() {
-        eprintln!("skip: {fixture} fragment {frag} absent ({frag_a_path:?})");
+        eprintln!(
+            "skip: {fixture} fragment {frag} absent ({})",
+            frag_a_path.display()
+        );
         return;
     }
     // Sanity: fixture has the advertised fragment count.
@@ -69,7 +72,8 @@ fn parity_one_fragment(fixture: &str, frag: u32, fragment_count: u32) {
         let p = xmilics_path(fixture, &format!("{fixture}.plt{r:03}A"));
         assert!(
             p.exists(),
-            "{fixture}: expected fragment {r} to exist at {p:?}"
+            "{fixture}: expected fragment {r} to exist at {}",
+            p.display()
         );
     }
 
@@ -208,15 +212,14 @@ fn parity_d3samp6_set_state_count_and_times() {
 
     Python::with_gil(|py| {
         let pdb = open_database(py, &base).expect("py open d3samp6 multi-frag");
-        // LoopWrapper's `times()` returns a per-fragment list of
-        // arrays (one per rank); each fragment has the same time
-        // axis, so we just compare against rank 0.
-        let py_times_any = pdb.call_method0("times").expect("py times");
-        let py_times_zeroth = match py_times_any.get_item(0) {
-            Ok(t) => t,
-            Err(_) => py_times_any.clone(),
-        };
-        let py_times: Vec<f32> = py_times_zeroth
+        // With `merge_results=True` (the parity_support default), both
+        // LoopWrapper and ServerWrapper reduce `times()` across
+        // fragments into a single flat ndarray (the fragments share
+        // the time axis, so the reduction is `zeroth_entry`). So we
+        // compare the merged axis directly — no per-fragment list.
+        let py_times: Vec<f32> = pdb
+            .call_method0("times")
+            .expect("py times")
             .call_method0("tolist")
             .expect("tolist")
             .extract()

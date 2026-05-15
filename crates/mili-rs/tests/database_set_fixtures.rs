@@ -5,6 +5,7 @@
 //! submodule; if it isn't checked out the tests early-return. See
 //! `CLAUDE.md` for the convention.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use mili_rs::{Database, DatabaseSet, MeshId, MiliError, QueryArgs, StateValues};
@@ -44,7 +45,7 @@ fn open_basic1_eight_fragments() {
     // Each fragment opens with the same state count and time axis.
     let times = set.times();
     assert_eq!(times.len(), set.state_count());
-    assert!(times.len() > 0);
+    assert!(!times.is_empty());
     for rank in 0..8 {
         let frag = set.fragment(rank).expect("rank in range");
         assert_eq!(frag.state_count(), set.state_count());
@@ -65,7 +66,7 @@ fn basic1_node_labels_concatenate_unique() {
 
     // No duplicates after merge — `list_concatenate_unique` semantics.
     let mut sorted = merged.clone();
-    sorted.sort();
+    sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(
         sorted.len(),
@@ -76,7 +77,6 @@ fn basic1_node_labels_concatenate_unique() {
     // Merge ⊇ every fragment's local labels (mili-python's
     // `list_concatenate_unique` preserves first occurrence and never
     // drops a label).
-    use std::collections::HashSet;
     let merged_set: HashSet<i32> = merged.iter().copied().collect();
     for rank in 0..set.fragment_count() {
         let frag = set.fragment(rank).unwrap();
@@ -111,8 +111,7 @@ fn basic1_brick_labels_concatenate_unique() {
                 .unwrap()
                 .labels(MeshId(0), "brick")
                 .unwrap()
-                .map(|v| v.len())
-                .unwrap_or(0)
+                .map_or(0, |v| v.len())
         })
         .sum();
     assert!(merged.len() <= summed);
@@ -142,12 +141,11 @@ fn basic1_query_matches_concat_of_fragments() {
 
     // Skip silently if even rank 0 doesn't carry this svar — the basic1
     // fixture should, but be robust to test-data drift.
-    match set.fragment(0).unwrap().query_with_labels(&args) {
-        Err(MiliError::NoMatchingSubrec { .. } | MiliError::UnknownClass(_)) => {
-            eprintln!("skip: rank 0 doesn't expose {svar}/{class}");
-            return;
-        }
-        _ => {}
+    if let Err(MiliError::NoMatchingSubrec { .. } | MiliError::UnknownClass(_)) =
+        set.fragment(0).unwrap().query_with_labels(&args)
+    {
+        eprintln!("skip: rank 0 doesn't expose {svar}/{class}");
+        return;
     }
 
     let merged = set.query(&args).expect("DatabaseSet::query");
@@ -162,7 +160,7 @@ fn basic1_query_matches_concat_of_fragments() {
     // `DatabaseSet::labels` filtered to subrec coverage. For `node`/
     // `nodpos` every node is covered, so labels match exactly.
     let mut merged_sorted = merged.labels.clone();
-    merged_sorted.sort();
+    merged_sorted.sort_unstable();
     merged_sorted.dedup();
     assert_eq!(merged_sorted.len(), merged.labels.len());
 
@@ -185,7 +183,6 @@ fn basic1_query_matches_concat_of_fragments() {
 
     // After dedup-by-first the values are a subset of expected_concat
     // for the unique-label positions. Build the same subset and compare.
-    use std::collections::HashSet;
     let mut seen: HashSet<i32> = HashSet::new();
     let mut dedup_values: Vec<f32> = Vec::new();
     for (i, &l) in expected_labels.iter().enumerate() {
@@ -205,9 +202,8 @@ fn no_fragments_returns_typed_error() {
     let tmp = std::env::temp_dir().join("mili_rs_no_fragments");
     let _ = std::fs::create_dir_all(&tmp);
     let base = tmp.join("does_not_exist.plt");
-    let err = match DatabaseSet::open(&base) {
-        Ok(_) => panic!("expected NoFragments"),
-        Err(e) => e,
+    let Err(err) = DatabaseSet::open(&base) else {
+        panic!("expected NoFragments");
     };
     match err {
         MiliError::NoFragments { dir, base: b } => {

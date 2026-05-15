@@ -19,10 +19,7 @@ use std::path::{Path, PathBuf};
 use mili_rs::{DatabaseSet, MeshId, MiliError, QueryArgs};
 
 fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
 /// `(label, family-base path)` rows. The label is just for diagnostics.
@@ -143,7 +140,7 @@ fn smoke_one(label: &str, base: &Path) -> Option<String> {
         return Some(format!("skip {label}: corpus dir absent"));
     }
     let set = DatabaseSet::open(base)
-        .unwrap_or_else(|e| panic!("{label}: DatabaseSet::open({base:?}) -> {e}"));
+        .unwrap_or_else(|e| panic!("{label}: DatabaseSet::open({}) -> {e}", base.display()));
 
     let state_count = set.state_count();
     let times = set.times();
