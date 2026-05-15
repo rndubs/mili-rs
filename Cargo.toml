@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
-members = ["crates/mili-rs"]
+# `mili-py` is a workspace member for unified cargo/clippy ergonomics
+# but is excluded from the default `test` / `test-parity` jobs via
+# `--exclude mili-py` so those fast jobs never link pyo3. A dedicated
+# `test-milox` CI job builds it with maturin and runs pytest.
+members = ["crates/mili-rs", "crates/mili-py"]
 
 [workspace.package]
 edition = "2021"

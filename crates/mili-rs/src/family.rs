@@ -252,7 +252,24 @@ impl Database {
             any = true;
             append_i32_array(&self.a_mmap, entry, self.header, &mut out)?;
         }
-        Ok(if any { Some(out) } else { None })
+        if any {
+            return Ok(Some(out));
+        }
+        // No TI "Element/Node Labels" param: fall back to the class's
+        // `CLASS_IDENTS` ranges expanded to `[start..=stop]`, mirroring
+        // upstream `miliinternal.py:198-202` (which seeds `__labels`
+        // for every `CLASS_IDENTS` class). Element classes hit the TI
+        // path above; this covers ident-only classes (mat / glob /
+        // lcurve / mesh).
+        if let Some(class) = self.meshes.mesh(mesh_id).and_then(|m| m.class(classname)) {
+            if !class.id_blocks.is_empty() {
+                for &(start, stop) in &class.id_blocks {
+                    out.extend(start..=stop);
+                }
+                return Ok(Some(out));
+            }
+        }
+        Ok(None)
     }
 
     /// Materials discovered via `MAT_NAME_<n>` TI_PARAM entries.
@@ -300,9 +317,16 @@ impl Database {
                 continue;
             }
             let name = self.directory.names.get(entry.name_start as usize);
-            let Some(setname) = name.strip_prefix("IntLabel_es_") else {
+            // Upstream keys by `sname[sname.find('es_'):]`
+            // (`miliinternal.py:113-115`) — i.e. the name from `es_`
+            // onward, e.g. `IntLabel_es_5` → `es_5`. Strip only the
+            // `IntLabel_` prefix.
+            let Some(setname) = name.strip_prefix("IntLabel_") else {
                 continue;
             };
+            if !setname.starts_with("es_") {
+                continue;
+            }
             let mut values = Vec::new();
             append_i32_array(&self.a_mmap, entry, self.header, &mut values)?;
             out.insert(setname.to_owned(), values);
@@ -625,17 +649,17 @@ impl Database {
     /// Integration-point ids per material, derived from
     /// [`Self::element_sets`].
     ///
-    /// An element-set name that parses as an `i32` is treated as a
-    /// material number; the IP ids are the payload minus the trailing
-    /// count entry. Sets whose names do not parse as integers are
-    /// skipped.
+    /// The material id is the **last character** of the element-set
+    /// name (`mat = eset[-1:]` upstream), and the IP ids are the
+    /// payload minus the trailing count entry. Sets whose last
+    /// character is not a digit are skipped.
     ///
     /// `reference/mili-python/src/mili/miliinternal.py:463-474`.
     pub fn integration_points(&self) -> Result<HashMap<MaterialId, Vec<i32>>> {
         let sets = self.element_sets()?;
         let mut out: HashMap<MaterialId, Vec<i32>> = HashMap::new();
         for (setname, values) in sets {
-            let Ok(mat) = setname.parse::<i32>() else {
+            let Ok(mat) = setname[setname.len() - 1..].parse::<i32>() else {
                 continue;
             };
             let ips = match values.split_last() {
@@ -643,6 +667,58 @@ impl Database {
                 None => Vec::new(),
             };
             out.insert(MaterialId(mat), ips);
+        }
+        Ok(out)
+    }
+
+    /// Element class short names for `mesh_id`, in declaration order.
+    ///
+    /// Mirrors upstream `class_names()` (`list(__MO_class_data.keys())`,
+    /// `miliinternal.py:409-415`) — the order classes are declared by
+    /// `CLASS_DEF`, preserved by `Mesh::class_order`. Empty if the mesh
+    /// has no classes (or is absent). Signature is symmetric with
+    /// [`DatabaseSet::class_names`](crate::DatabaseSet::class_names).
+    pub fn class_names(&self, mesh_id: MeshId) -> Vec<String> {
+        self.meshes
+            .mesh(mesh_id)
+            .map(|m| m.class_names().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// Distinct material numbers that own elements, in first-occurrence
+    /// order across the connectivity stream.
+    ///
+    /// Mirrors upstream `material_numbers()`
+    /// (`np.array(list(__elems_of_mat.keys()))`,
+    /// `miliinternal.py:595-601`): iterate `ELEM_CONNS` entries in
+    /// directory order, take the per-entry material column
+    /// (`conn[:, -2]`) sorted-unique (`np.unique` is ascending), and
+    /// dedupe across entries keeping the first occurrence (upstream's
+    /// `defaultdict` key order).
+    pub fn material_numbers(&self) -> Result<Vec<i32>> {
+        let mut seen: std::collections::HashSet<i32> = std::collections::HashSet::new();
+        let mut out: Vec<i32> = Vec::new();
+        for entry in &self.directory.entries {
+            if entry.entry_type != DirEntryType::ElemConns {
+                continue;
+            }
+            let conn = mesh::decode_elem_conns(&self.a_mmap, entry, self.header)?;
+            if conn.conn_words < 2 {
+                continue;
+            }
+            let words = conn.to_i32_vec()?;
+            let mat_col = conn.conn_words - 2;
+            let mut mats: Vec<i32> = words
+                .chunks_exact(conn.conn_words)
+                .map(|row| row[mat_col])
+                .collect();
+            mats.sort_unstable();
+            mats.dedup();
+            for mat in mats {
+                if seen.insert(mat) {
+                    out.push(mat);
+                }
+            }
         }
         Ok(out)
     }

@@ -1,0 +1,31 @@
+[package]
+name = "mili-py"
+version = "0.0.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Built as a Python extension module (`milox._native`). Excluded from
+# the default `cargo test --workspace` set via the workspace `exclude`
+# key so the fast `test` / `test-parity` / `lint` jobs never link pyo3;
+# a dedicated `test-milox` CI job runs `maturin develop` + pytest.
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+# pyo3 0.22's `create_exception!` expansion references the
+# `gil-refs` feature cfg, which Rust 1.80+'s check-cfg flags as
+# unexpected. It is benign macro-internal noise; allow it so the
+# `-D warnings` lint job stays green without pinning a pyo3 patch.
+[lints.rust]
+unexpected_cfgs = { level = "allow" }
+
+[dependencies]
+mili-rs = { path = "../mili-rs" }
+# `extension-module` => do not link libpython (the import-time
+# interpreter provides the symbols), so `cargo check`/`clippy` need no
+# Python dev headers. `abi3-py311` matches the parity env's Python 3.11.
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py311"] }
+numpy = "0.22"

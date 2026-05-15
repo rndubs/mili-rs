@@ -190,6 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 23    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); `scripts/setup-parity.sh` then `cargo test --features parity` |
+| `milox` M1 metadata parity     | 171   | `import milox` vs upstream `mili` on the serial corpus + xmilics multi-fragment families; all 10 M1 accessors bit-exact + decision-4 rank-0 `state_maps()` assertion. Dedicated `test-milox` CI job (`pip install ./crates/mili-py`); `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -250,6 +251,23 @@ Typed errors today; not in Phase 2 scope.
 Brief pointers — each has a fix in the code and the byte-layout docs
 were updated to match. Read the linked source for the full story.
 
+- **`element_sets()` key is `es_<n>`, not `<n>`** — upstream keys by
+  `sname[sname.find('es_'):]` (`miliinternal.py:113-115`), so strip
+  only `IntLabel_`. `integration_points()` then keys by `eset[-1:]`
+  (last char) — `family.rs::{element_sets,integration_points}`. Found
+  by `milox` M1 parity.
+- **`labels()` for ident-only classes (`mat`/`glob`/`lcurve`) comes
+  from `CLASS_IDENTS`, not a TI param** — upstream seeds `__labels`
+  from every `CLASS_IDENTS` class as `arange(start, stop+1)`
+  (`miliinternal.py:198-202`). `family.rs::labels` falls back to
+  `ObjectClass::id_blocks` when no TI "Element/Node Labels" param
+  matches. Found by `milox` M1 parity.
+- **`DatabaseSet` metadata reductions are per-accessor, not all
+  rank-0** — only `mesh_dimensions`/`materials`/`times`/`state_count`/
+  `state_maps` are `zeroth_entry`; `material_numbers` is
+  `list_concatenate_unique` and `element_sets`/`integration_points`
+  are `dictionary_merge_no_concat` (`milidatabase.py`). See
+  `family_set.rs` and `m1.md` resolved decision 8.
 - **`CLASS_DEF` superclass is in `MODIFIER2`, not `MODIFIER1`** —
   `entry-payloads.md § CLASS_DEF`, `mesh.rs::add_class_def`.
 - **`CLASS_DEF` `long_name` re-declaration may disagree** (cosmetic;
