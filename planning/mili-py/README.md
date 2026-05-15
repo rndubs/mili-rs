@@ -173,7 +173,23 @@ post-processing utilities) where they already live.
 
 ## Zero-copy plan
 
-For each result buffer:
+> **Superseded by [`../mili-rs/plan.md`](../mili-rs/plan.md) § "FFI
+> integration plan (Phase 1.5 — Step 19)".** That section is the
+> authoritative contract (pinned after this README was drafted). The
+> capsule/`borrow_from_array` design below is the *deferred M5 path*,
+> not the default. Summary of the resolved decision:
+>
+> - **Default return:** `IntoPyArray::into_pyarray_bound(py)` on an
+>   owned `Vec<T>` / `ndarray::Array<T,_>` — numpy adopts the heap
+>   buffer, no byte copy. This is what every `query()` / `nodes()` /
+>   `connectivity()` return uses unless profiling says otherwise.
+> - **`ToPyArray`** only when ownership cannot transfer (borrowed
+>   `&[T]`); avoid on the hot path.
+> - **`Arc<Mmap>` + `PyCapsule` zero-decode view:** deferred to M5,
+>   profiling-driven. Only wins when aligned + native-endian +
+>   single contiguous slab (rare in practice).
+
+Original (now M5-only) sketch, for each result buffer:
 
 1. `mili-rs` returns a `MiliBuffer<T>`.
 2. `arrays.rs` decides: aligned + native-endian → wrap in numpy via
