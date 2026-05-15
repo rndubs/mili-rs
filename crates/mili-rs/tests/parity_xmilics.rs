@@ -106,6 +106,7 @@ fn parity_one_fragment(fixture: &str, frag: u32, fragment_count: u32) {
         states: &rust_states,
         materials: None,
         ips: None,
+        subrec: None,
     };
     let rust_result = match db.query(&args) {
         Ok(r) => r,
@@ -283,6 +284,7 @@ fn parity_d3samp6_set_query_nodpos() {
         states: &states,
         materials: None,
         ips: None,
+        subrec: None,
     };
     let merged = set.query(&args).expect("DatabaseSet::query nodpos/node");
     let StateValues::F32(rust_vals) = &merged.values else {

@@ -439,6 +439,7 @@ impl Database {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
     }
 
@@ -498,6 +499,7 @@ impl Database {
         let filter = Filter {
             labels: resolved_labels.as_deref(),
             ips: args.ips,
+            subrec: args.subrec,
         };
 
         // Build a plan against the first state, then rebase per state.
@@ -605,11 +607,14 @@ impl Database {
     }
 
     /// Component-name list + title for the queried svar, mirroring
-    /// upstream's `svars_to_query` expansion: scalar → `[name]`;
-    /// array → `name[1..=dims0]`; vector / vec-array → its component
-    /// svars expanded recursively. Bare-name resolution only — the
-    /// subscript (`hx[3]`) and ip-filtered component-name forms are
-    /// M4.
+    /// upstream's `svars_to_query` component expansion
+    /// (`reference/mili-python/src/mili/miliinternal.py:1362-1378`):
+    /// scalar → `[name]`; array → `name[1..=dims0]`; **array with an
+    /// explicit subscript `name[i,j]` → the single combined
+    /// `name[i,j]`** (upstream line 1371); vector / vec-array → its
+    /// component svars expanded recursively. The ip-filtered
+    /// `f"{comp} ipt. {label}"` form is handled by the caller-supplied
+    /// `ips` path below.
     pub(crate) fn svar_query_meta(&self, svar_name: &str) -> Result<(Vec<String>, String)> {
         let base = svar_name.split('[').next().unwrap_or(svar_name);
         let svar = self
@@ -617,6 +622,20 @@ impl Database {
             .get(base)
             .ok_or_else(|| MiliError::UnknownSvar(base.to_owned()))?;
         let mut comps = Vec::new();
+        // Subscript form (`hx[3]`, `g[1,2]`): one combined component
+        // name carrying the original 1-based indices, not the full
+        // `hx[1..=dims0]` expansion. Mirrors upstream line 1371.
+        if let crate::query::QueryName::Subscript { base: b, indices } =
+            crate::query::parse_query_name(svar_name)?
+        {
+            let joined = indices
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            comps.push(format!("{b}[{joined}]"));
+            return Ok((comps, svar.title.clone()));
+        }
         self.expand_components(base, &svar.agg, &mut comps);
         Ok((comps, svar.title.clone()))
     }
@@ -917,6 +936,9 @@ pub struct QueryArgs<'a> {
     pub states: &'a [usize],
     pub materials: Option<&'a [i32]>,
     pub ips: Option<&'a [usize]>,
+    /// Restrict to one named subrecord (the `subrec=` query kwarg).
+    /// `None` means every matching subrecord.
+    pub subrec: Option<&'a str>,
 }
 
 /// Per-state read context built before the parallel gather pass.

@@ -98,6 +98,7 @@ fn bench_query_single(c: &mut Criterion) {
             states: &states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .expect("query")
     {
@@ -113,6 +114,7 @@ fn bench_query_single(c: &mut Criterion) {
                     states: &states,
                     materials: None,
                     ips: None,
+                    subrec: None,
                 }))
                 .expect("query");
             black_box(r);
@@ -151,6 +153,7 @@ fn bench_query_many(c: &mut Criterion) {
                         states: &states,
                         materials: None,
                         ips: None,
+                        subrec: None,
                     }))
                     .expect("query");
                 black_box(r);
@@ -219,6 +222,7 @@ fn bench_python_baseline(c: &mut Criterion) {
             states: &rust_states,
             materials: None,
             ips: None,
+            subrec: None,
         })
         .expect("rust nodpos")
     {
