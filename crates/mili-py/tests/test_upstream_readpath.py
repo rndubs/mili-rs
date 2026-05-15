@@ -53,9 +53,6 @@ _XFAIL = {
     "test_miliinternal::TestMiliInternal::test_supported_variables": "Phase H: derived engine",
     "test_miliinternal::TestMiliInternal::test_derived_variables_of_class": "Phase H: derived engine",
     "test_miliinternal::TestMiliInternal::test_classes_of_derived_variable": "Phase H: derived engine",
-    "test_miliinternal::TestMiliInternal::test_faces": "Phase H: geometry (faces)",
-    "test_miliinternal::TestMiliInternal::test_nodes_label": "Phase H: nodes_of_elems",
-    "test_miliinternal::TestMiliInternal::test_nodes_material": "Phase H: nodes_of_material",
 }
 
 # test_milidatabase: milox collapses upstream's per-proc fan-out in the
@@ -73,11 +70,7 @@ _MDB_PARALLEL_CLASSES = (
 # (geometry / derived / projection / query result-modifiers — none of
 # which the Phase-G primal surface provides). Honest Phase-H xfail.
 _MDB_PHASE_H_METHODS = {
-    "test_faces": "Phase H: geometry (faces)",
     "test_derived_variables_of_class": "Phase H: derived engine",
-    "test_nodes_material": "Phase H: nodes_of_material",
-    "test_nodes_of_elems": "Phase H: nodes_of_elems",
-    "test_measure": "Phase H: geometry (measure)",
     "test_query_project_to_nodes": "Phase H: projection engine",
     "test_cummin": "Phase H: query result modifiers (reductions)",
     "test_cummax": "Phase H: query result modifiers (reductions)",

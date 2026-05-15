@@ -300,6 +300,50 @@ impl Database {
         Ok(Some((out, ncols)))
     }
 
+    /// Owned element connectivity as zero-based node **ids**, matching
+    /// upstream `connectivity_ids()` (`miliinternal.py:213-218`,
+    /// `miliinternal.py:631`): `__conns_ids = elem_conn[:,:-1]` (drop
+    /// the trailing `part` column, keep the `material` column) then the
+    /// node columns are decremented by 1 (`-= 1`) to convert the
+    /// fortran 1-based node ids to 0-based indices; the `material`
+    /// column is left verbatim.
+    ///
+    /// Returns `(flat_row_major, ncols)` with `ncols = conn_words - 1`
+    /// and the last column the raw material number; `None` if the class
+    /// declares no `ELEM_CONNS` entry. All `ELEM_CONNS` entries for the
+    /// class are concatenated in directory order (same row order as
+    /// [`Self::connectivity_labels`] / [`Self::labels`]).
+    pub fn connectivity_ids(
+        &self,
+        mesh_id: MeshId,
+        classname: &str,
+    ) -> Result<Option<(Vec<i32>, usize)>> {
+        let indices = self.meshes.conns_entry_indices(mesh_id, classname);
+        if indices.is_empty() {
+            return Ok(None);
+        }
+        let mut out: Vec<i32> = Vec::new();
+        let mut ncols = 0usize;
+        for &idx in indices {
+            let entry = &self.directory.entries[idx];
+            let conn = mesh::decode_elem_conns(&self.a_mmap, entry, self.header)?;
+            let words = conn.conn_words;
+            if words < 2 {
+                continue;
+            }
+            ncols = words - 1;
+            let n_nodes = words - 2;
+            let raw = conn.to_i32_vec()?;
+            for row in raw.chunks_exact(words) {
+                for &fid in &row[..n_nodes] {
+                    out.push(fid - 1); // fortran 1-based -> 0-based index
+                }
+                out.push(row[n_nodes]); // material (raw), part column dropped
+            }
+        }
+        Ok(Some((out, ncols)))
+    }
+
     /// Concatenated label array for `(mesh_id, classname)`.
     ///
     /// Implements the TI_PARAM-as-storage recipe from

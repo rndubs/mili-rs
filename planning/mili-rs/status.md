@@ -190,7 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 24    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); **+ `parity_reshape` — every Phase-G `_MiliInternal` reshape bit-exact vs. the upstream oracle across the full serial corpus**; `scripts/setup-parity.sh` then `cargo test --workspace --exclude mili-py --features parity` |
-| `milox` parity + redirect      | 384 + 201 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`) **+ the `test_milidatabase.py` read half closed**: `MiliDatabase` wrapper does return-code raising (`parse_return_codes`) + mdg-enum arg coercion, `_MiliInternal` gained upstream-signature `query`/`connectivity` input validation, and the Rust core query gained **named-component subscript** (`nodpos[ux]`/`stress[sy]`) + **multi-parent bare-component disambiguation by subrec membership** (`sx` on `brick`), each bit-exact vs the upstream oracle (`tests/parity_component_subscript.rs`). Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (34 pass, 7 Phase-H `xfail`) + `test_milidatabase.py` read half** green; the parallel handler classes + geometry/derived/projection/result-modifier serial methods are honest strict `xfail` (Phase H / parallel scope). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
+| `milox` parity + redirect      | 399 + 186 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`) **+ the `test_milidatabase.py` read half closed**: `MiliDatabase` wrapper does return-code raising (`parse_return_codes`) + mdg-enum arg coercion, `_MiliInternal` gained upstream-signature `query`/`connectivity` input validation, and the Rust core query gained **named-component subscript** (`nodpos[ux]`/`stress[sy]`) + **multi-parent bare-component disambiguation by subrec membership** (`sx` on `brick`), each bit-exact vs the upstream oracle (`tests/parity_component_subscript.rs`). **+ Phase H geometry sub-slice**: `connectivity_ids`, `nodes_of_elems`, `nodes_of_material`, `faces`, `measure` in the Rust core (`mili_rs::geometry`, thin `database.rs`/`miliinternal.py` bindings), bit-exact vs the upstream `_MiliInternal` oracle across the serial corpus (`tests/parity_geometry.rs`); 15 `test_miliinternal`/`test_milidatabase` xfails promoted to green. Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (37 pass, 4 Phase-H `xfail`) + `test_milidatabase.py` read half** green; the parallel handler classes + the remaining derived/projection/result-modifier serial methods are honest strict `xfail` (Phase H / parallel scope). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -286,6 +286,30 @@ were updated to match. Read the linked source for the full story.
   with the **parent's** title (`svar_query_meta`). `query.rs` /
   `family.rs`; bit-exact in `parity_component_subscript.rs`. Found by
   `milox` Phase-G `test_milidatabase` read-half parity.
+- **`measure` is upstream a `MiliDatabase` method but lands on
+  `_MiliInternal` in milox, as self-contained centroid geometry —
+  *not* the derived engine.** Upstream `MiliDatabase.measure`
+  (`milidatabase.py:882`) routes through `query("centroid",…)` +
+  `reductions.combine`, and `centroid` is a `derived.py` expression.
+  The Phase-H geometry sub-slice deliberately excludes the derived
+  engine, so `measure` is implemented in `mili_rs::geometry` as the
+  *self-contained* `__compute_centroid` arithmetic (`derived.py:1962`:
+  NODE → its `nodpos`; element → mean of its first `node_count` node
+  positions, BEAM dropping its 3rd node) over the already
+  parity-correct primal `nodpos` query — no `centroid` derived var, no
+  `reductions`. milox forwards engine attrs through
+  `MiliDatabase.__getattr__`, so placing `measure` on `_MiliInternal`
+  is wire-compatible. Validated by the redirected `test_measure`
+  (hard-coded upstream distances; the four geometry `_MiliInternal`
+  methods are bit-exact vs the oracle in `parity_geometry.rs`).
+- **`__conns_ids` is fortran-1-based node ids minus 1, material kept
+  raw** — upstream `connectivity_ids` (`miliinternal.py:213-218`) is
+  `elem_conn[:,:-1]` (drop the trailing `part`) with the node columns
+  `-= 1` and the `material` column left verbatim;
+  `Database::connectivity_ids` mirrors this exactly (the labels
+  variant maps the same `fid-1` through `node_labels`). Found while
+  porting the Phase-H geometry sub-slice; bit-exact in
+  `parity_geometry.rs`.
 - **`element_sets()` key is `es_<n>`, not `<n>`** — upstream keys by
   `sname[sname.find('es_'):]` (`miliinternal.py:113-115`), so strip
   only `IntLabel_`. `integration_points()` then keys by `eset[-1:]`
