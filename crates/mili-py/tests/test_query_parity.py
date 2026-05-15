@@ -241,11 +241,18 @@ def test_bugfixes_slice_a_values(bf):
 
 
 # Slice B — bare-component-of-VEC_ARRAY + ip-label semantics +
-# cross-material InconsistentIpCounts. Split to M4-followup
-# (m4.md §"Slice B" / decision 17). These carry the exact upstream
-# oracle values from test_bugfixes.py so the follow-up lands against
-# a ready gate; xfail(strict) so closing the gap flips them green and
-# trips the xpass guard.
+# cross-material InconsistentIpCounts (M4-followup, now landed; see
+# m4.md §"Slice B" / decision 17). Exact upstream oracle values lifted
+# verbatim from reference/mili-python/tests/test_bugfixes.py
+# (`VectorsInVectorArrays`, `InconsistantIntPointsForElementClassResult`).
+#
+# NOTE: the `sx`/`brick` cross-material case uses `serial/basic1`, not
+# `parallel/basic1`. Upstream's own `InconsistantIntPointsForElementClassResult`
+# uses serial; the parallel fragments carry no element-set TI params
+# (verified across all 8 parts) so upstream there treats `sx` as a
+# plain scalar, ignores `ips`, and does NOT raise — there is no Slice-B
+# oracle on the parallel base. Recorded in
+# planning/mili-rs/status.md §"Surprises worth remembering".
 _BUGFIX_SLICE_B = [
     ("d3samp4-eps-ip1", "serial/d3samp4/d3samp4.plt", "eps", "shell",
      dict(labels=[1], states=[2], ips=[1]), (0, 0, 0), 2.3293568e-02),
@@ -253,19 +260,13 @@ _BUGFIX_SLICE_B = [
      dict(labels=[1], states=[2], ips=[2]), (0, 0, 0), 7.1215495e-03),
     ("d3samp4-sy-ip1", "serial/d3samp4/d3samp4.plt", "sy", "shell",
      dict(labels=[24], states=[10], ips=[1]), (0, 0, 0), -2.20756815e-03),
-    ("basic1-sx-ip4", "parallel/basic1/basic1.plt", "sx", "brick",
+    ("basic1-sx-ip4", "serial/basic1/basic1.plt", "sx", "brick",
      dict(labels=[144, 212], states=[101], ips=4), (0, 0, 0), 3.36948112e-02),
 ]
 
 
 @pytest.mark.parametrize(
     "bf", _BUGFIX_SLICE_B, ids=[b[0] for b in _BUGFIX_SLICE_B]
-)
-@pytest.mark.xfail(
-    strict=True,
-    reason="Slice B (bare-component VEC_ARRAY + ip-label semantics + "
-    "cross-material InconsistentIpCounts) is M4-followup — see "
-    "planning/mili-py/m4.md §'Slice B'",
 )
 def test_bugfixes_slice_b_oracle(bf):
     _id, rel, svar, cls, kwargs, idx, expected = bf
@@ -277,15 +278,34 @@ def test_bugfixes_slice_b_oracle(bf):
     assert abs(float(np.asarray(r[svar]["data"])[idx]) - expected) <= 1e-7
 
 
-def test_bugfixes_cross_material_inconsistent_ips_contract():
-    """basic1 sx/brick over materials 5 (8 IPs) & 7 (9 IPs) with no
-    `ips` must raise (upstream ValueError; milox typed
-    InconsistentIpCounts → MiliPythonError). The contract holds today
-    via LabelNotFound; Slice B tightens it to the IP-count message.
-    Either way it must NOT silently return mismatched data."""
+def test_bugfixes_slice_b_component_names():
+    """Slice B also fixes the `f"{comp} ipt. {label}"` component
+    naming (`miliinternal.py:1367`). Values + names lifted from
+    `VectorsInVectorArrays` (d3samp4)."""
     base = (
         REPO_ROOT / "reference" / "mili-python" / "tests" / "data"
-        / "parallel" / "basic1" / "basic1.plt"
+        / "serial" / "d3samp4" / "d3samp4.plt"
+    )
+    if not _base_present(str(base)):
+        pytest.skip("d3samp4 absent")
+    g = milox.open_database(str(base))
+    r = g.query("eps", "shell", labels=[1], states=[2])
+    assert list(r["eps"]["layout"]["components"]) == ["eps ipt. 1", "eps ipt. 2"]
+    r = g.query("sy", "shell", labels=[24], states=[10])
+    assert list(r["sy"]["layout"]["components"]) == ["sy ipt. 1", "sy ipt. 2"]
+    r = g.query("sy", "shell", labels=[24], states=[10], ips=[1])
+    assert list(r["sy"]["layout"]["components"]) == ["sy ipt. 1"]
+
+
+def test_bugfixes_cross_material_inconsistent_ips_contract():
+    """serial/basic1 sx/brick over materials 5 (8 IPs) & 7 (9 IPs)
+    with no `ips` must raise (upstream ValueError; milox typed
+    InconsistentIpCounts → MiliPythonError). Mirrors upstream's
+    `InconsistantIntPointsForElementClassResult` (serial base). Must
+    NOT silently return mismatched data."""
+    base = (
+        REPO_ROOT / "reference" / "mili-python" / "tests" / "data"
+        / "serial" / "basic1" / "basic1.plt"
     )
     if not _base_present(str(base)):
         pytest.skip("basic1 absent")

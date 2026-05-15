@@ -119,6 +119,12 @@ pub(crate) struct ReadPlan {
     /// comes from each matching subrec's `id_blocks` in directory
     /// order; for label-filtered queries this is the input list.
     pub labels: Vec<i32>,
+    /// Component-name override. `Some` only on the bare-component-of-
+    /// VEC_ARRAY substitution path (Slice B), where the names carry the
+    /// resolved IP labels (`f"{comp} ipt. {label}"`,
+    /// `reference/mili-python/src/mili/miliinternal.py:1367`). `None`
+    /// means "derive from the svar table" (`svar_query_meta`).
+    pub components: Option<Vec<String>>,
 }
 
 impl ReadPlan {
@@ -147,6 +153,7 @@ impl ReadPlan {
             slabs,
             state_data_start: new_start,
             labels: self.labels.clone(),
+            components: self.components.clone(),
         })
     }
 }
@@ -169,6 +176,51 @@ pub(crate) struct Filter<'a> {
     pub subrec: Option<&'a str>,
 }
 
+/// svar → element-set → IP-label linkage, the core analogue of upstream
+/// `_MiliInternal.__int_points` (`reference/mili-python/src/mili/
+/// miliinternal.py:156-192`). Keyed by component (or vector, or
+/// element-set) svar name; each entry lists the VEC_ARRAY parent svars
+/// (`es_<n>a`) that carry it, with that parent's element-set payload
+/// (the integration-point *labels* followed by the trailing count, as
+/// written — `family.rs::element_sets`).
+///
+/// Built once per query by [`crate::Database::build_int_points`]; the
+/// gather planner consumes it to substitute a bare component of a
+/// VEC_ARRAY (Slice B) and to map user `ips=` *labels* → 0-based
+/// positional indices.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct IntPoints {
+    map: std::collections::HashMap<String, Vec<IpParent>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct IpParent {
+    /// The VEC_ARRAY svar name (e.g. `es_1a`) that carries the
+    /// component, and whose subrecord we substitute onto.
+    pub es_svar: String,
+    /// Element-set payload exactly as written: IP labels then a single
+    /// trailing count entry (`miliinternal.py:113-115` /
+    /// `family.rs::element_sets`).
+    pub payload: Vec<i32>,
+}
+
+impl IntPoints {
+    pub(crate) fn insert(&mut self, comp: &str, es_svar: &str, payload: &[i32]) {
+        let entry = self.map.entry(comp.to_owned()).or_default();
+        // Mirror upstream's dict semantics: one entry per (comp, es).
+        if !entry.iter().any(|p| p.es_svar == es_svar) {
+            entry.push(IpParent {
+                es_svar: es_svar.to_owned(),
+                payload: payload.to_vec(),
+            });
+        }
+    }
+
+    fn parents(&self, comp: &str) -> &[IpParent] {
+        self.map.get(comp).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// Build the read plan for one `(svar, class, state)` tuple under the
 /// given filter, rooted at the state's data block (the byte offset of
 /// the first subrec inside its state file).
@@ -179,6 +231,7 @@ pub(crate) struct Filter<'a> {
 /// - a label in `filter.labels` is not covered by any matching subrec
 /// - an `ips` filter against a non-vec_array svar
 /// - an `ips` value out of range
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn plan_state_svar(
     srec: &Srec,
     svars: &SvarTable,
@@ -187,7 +240,37 @@ pub(crate) fn plan_state_svar(
     state_data_start: u64,
     filter: Filter<'_>,
 ) -> Result<ReadPlan> {
+    plan_state_svar_ip(
+        srec,
+        svars,
+        svar_input,
+        class_name,
+        state_data_start,
+        filter,
+        &IntPoints::default(),
+    )
+}
+
+/// As [`plan_state_svar`], plus the svar→element-set→IP-label linkage
+/// (`int_points`) needed to substitute a bare component of a VEC_ARRAY
+/// and to interpret `filter.ips` as element-set IP *labels* (Slice B,
+/// `reference/mili-python/src/mili/miliinternal.py:1251-1270,1362-1378`).
+/// The no-linkage path is byte-for-byte the pre-Slice-B behaviour.
+// Slice B couples four resolution stages (direct → VECTOR parent →
+// VEC_ARRAY substitution → consistency) in one read-plan builder; the
+// branches are sequential and individually small.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn plan_state_svar_ip(
+    srec: &Srec,
+    svars: &SvarTable,
+    svar_input: &str,
+    class_name: &str,
+    state_data_start: u64,
+    filter: Filter<'_>,
+    int_points: &IntPoints,
+) -> Result<ReadPlan> {
     let parsed = parse_query_name(svar_input)?;
+    let is_subscript = matches!(parsed, QueryName::Subscript { .. });
     let mut resolved = resolve_target(svars, parsed, filter.ips)?;
 
     let mut matches = collect_matching_subrecs(
@@ -202,11 +285,8 @@ pub(crate) fn plan_state_svar(
     // Bare component-name fallback: if no subrec carries the named svar
     // directly, see whether it is a component of a VECTOR parent
     // (`reference/mili-python/src/mili/miliinternal.py:990-996`) and
-    // retry against that parent. VEC_ARRAY parents are intentionally
-    // not auto-resolved here — the component data is spread across IP
-    // slots and needs explicit `ips` filter composition; defer that to
-    // when a fixture demands it.
-    if matches.is_empty() && filter.ips.is_none() {
+    // retry against that parent.
+    if matches.is_empty() && filter.ips.is_none() && !is_subscript {
         if let Some(parent) = find_vector_parent(svars, &resolved.base_name) {
             let parent_matches = collect_matching_subrecs(
                 srec,
@@ -229,11 +309,71 @@ pub(crate) fn plan_state_svar(
         }
     }
 
+    // Bare component-of-VEC_ARRAY substitution (Slice B). When the
+    // component is not carried directly and not a plain VECTOR member,
+    // it may live inside a VEC_ARRAY parent (`es_<n>a`). Resolve via the
+    // `int_points` linkage, mapping user `ips=` *labels* → positional
+    // IP indices and naming components `f"{comp} ipt. {label}"`
+    // (`miliinternal.py:1251-1270,1362-1378`). This composes the
+    // existing per-object slab gather: each substituted subrec gets its
+    // own `AtomPicker::Specific` (component-outer, IP-inner) so the data
+    // axis matches the component-name order.
+    if matches.is_empty() && !is_subscript {
+        if let Some(sub) = try_vec_array_substitution(
+            srec,
+            svars,
+            &resolved.base_name,
+            class_name,
+            state_data_start,
+            filter,
+            int_points,
+        )? {
+            let width = sub.num_type.width();
+            let (slabs, labels) = match filter.labels {
+                None => gather_all(&sub.matches, width, &AtomPicker::AllAtoms),
+                Some(labels) => (
+                    gather_by_labels(
+                        &sub.matches,
+                        width,
+                        &AtomPicker::AllAtoms,
+                        labels,
+                        class_name,
+                    )?,
+                    labels.to_vec(),
+                ),
+            };
+            return Ok(ReadPlan {
+                num_type: sub.num_type,
+                slabs,
+                state_data_start,
+                labels,
+                components: Some(sub.components),
+            });
+        }
+    }
+
     if matches.is_empty() {
         return Err(MiliError::NoMatchingSubrec {
             svar: svar_input.to_owned(),
             class: class_name.to_owned(),
         });
+    }
+
+    // `ips` was requested against a svar that resolved directly (no
+    // VEC_ARRAY substitution) and is not itself a vec_array — upstream
+    // ignores it silently, but mili-rs keeps the stricter typed error
+    // it has always surfaced here (`query_fixtures.rs::
+    // basic1_ips_filter_on_scalar_svar_errors`). Subscript + ips is
+    // rejected earlier in `resolve_target`.
+    if filter.ips.is_some() {
+        if let Some(s) = svars.get(&resolved.base_name) {
+            if !matches!(s.agg, SvarAgg::VecArray { .. }) {
+                return Err(MiliError::IpFilterNotApplicable {
+                    svar: resolved.base_name.clone(),
+                    agg: agg_label(&s.agg),
+                });
+            }
+        }
     }
 
     // Inconsistent integration-point counts across subrecords on the
@@ -278,7 +418,207 @@ pub(crate) fn plan_state_svar(
         slabs,
         state_data_start,
         labels,
+        components: None,
     })
+}
+
+/// Result of resolving a bare component against a VEC_ARRAY parent.
+struct SubstitutionPlan<'a> {
+    matches: Vec<SubrecMatch<'a>>,
+    num_type: NumType,
+    components: Vec<String>,
+}
+
+/// Resolve `comp_name` as a component of a VEC_ARRAY parent listed in
+/// the `int_points` linkage, producing one [`SubrecMatch`] per carrying
+/// subrecord with its own component-outer/IP-inner [`AtomPicker`].
+/// Mirrors `miliinternal.py:1251-1270` (label→index via `.index(ip)`,
+/// all-IPs via `range(payload[-1])`) and the cross-subrecord IP-count
+/// consistency check (`miliinternal.py:1340-1349`).
+// One linear pass over the srec mirroring upstream's per-subrec
+// int-point resolution; extracting sub-steps would only scatter the
+// shared running-offset / payload state.
+#[allow(clippy::too_many_lines)]
+fn try_vec_array_substitution<'a>(
+    srec: &'a Srec,
+    svars: &SvarTable,
+    comp_name: &str,
+    class_name: &str,
+    state_data_start: u64,
+    filter: Filter<'_>,
+    int_points: &IntPoints,
+) -> Result<Option<SubstitutionPlan<'a>>> {
+    let parents = int_points.parents(comp_name);
+    if parents.is_empty() {
+        return Ok(None);
+    }
+    // The leaf scalar components this query expands to (a scalar maps to
+    // itself; a VECTOR like `stress` maps to its leaves in order).
+    let leaves = leaf_components(svars, comp_name);
+    if leaves.is_empty() {
+        return Ok(None);
+    }
+    let num_type = svars
+        .get(&leaves[0])
+        .map(|s| s.num_type)
+        .ok_or_else(|| MiliError::UnknownSvar(leaves[0].clone()))?;
+
+    // Walk the srec; for each subrecord on this class that carries one
+    // of the candidate VEC_ARRAY parents, build its picker.
+    let mut running: u64 = state_data_start;
+    let mut out: Vec<SubrecMatch<'a>> = Vec::new();
+    let mut comp_qtys: Vec<usize> = Vec::new();
+    let mut components: Option<Vec<String>> = None;
+    for sub in &srec.subrecords {
+        let (atoms, widths) = atoms_and_widths(sub, svars)?;
+        let lumps = derive_lumps(&atoms, &widths);
+        let n = sub.object_count() as usize;
+        let size = n
+            .checked_mul(lumps.bytes_per_object())
+            .ok_or(MiliError::MalformedDirectory("query: subrec size overflow"))?;
+        let subrec_start = running;
+        running = running
+            .checked_add(size as u64)
+            .ok_or(MiliError::MalformedDirectory(
+                "query: subrec offset overflow",
+            ))?;
+
+        if sub.mclass != class_name {
+            continue;
+        }
+        if let Some(want) = filter.subrec {
+            if sub.name != want {
+                continue;
+            }
+        }
+        // Which candidate VEC_ARRAY parent does this subrec carry?
+        let Some((svar_idx, parent)) = sub
+            .svar_names
+            .iter()
+            .enumerate()
+            .find_map(|(i, sn)| parents.iter().find(|p| &p.es_svar == sn).map(|p| (i, p)))
+        else {
+            continue;
+        };
+
+        let es = svars
+            .get(&parent.es_svar)
+            .ok_or_else(|| MiliError::UnknownSvar(parent.es_svar.clone()))?;
+        let n_ip = *parent.payload.last().ok_or(MiliError::MalformedDirectory(
+            "element set payload missing trailing count",
+        ))? as usize;
+        if n_ip == 0 || es.atoms % n_ip != 0 {
+            return Err(MiliError::MalformedDirectory(
+                "vec_array parent atoms not divisible by IP count",
+            ));
+        }
+        let atoms_per_ip = es.atoms / n_ip;
+        let ip_labels = &parent.payload[..parent.payload.len() - 1];
+
+        // Selected IP positional indices + their labels. With `ips=`,
+        // map each *label* to its position (`list.index(ip)`); else all.
+        let (ip_positions, sel_labels): (Vec<usize>, Vec<i32>) = match filter.ips {
+            Some(reqs) => {
+                let mut pos = Vec::with_capacity(reqs.len());
+                let mut labs = Vec::with_capacity(reqs.len());
+                for &r in reqs {
+                    let want = i32::try_from(r)
+                        .map_err(|_| MiliError::IpOutOfRange { ip: r, atoms: n_ip })?;
+                    let p = ip_labels
+                        .iter()
+                        .position(|&x| x == want)
+                        .ok_or(MiliError::IpOutOfRange { ip: r, atoms: n_ip })?;
+                    pos.push(p);
+                    labs.push(want);
+                }
+                (pos, labs)
+            }
+            None => ((0..n_ip).collect(), ip_labels.to_vec()),
+        };
+
+        // Per-leaf atom offset within one IP block (the leaf's index in
+        // the flattened component list of the parent). VEC_ARRAY inner
+        // order is components-fastest, IP-slowest, so atom for
+        // (leaf, ip) = ip_pos * atoms_per_ip + leaf_offset.
+        let parent_leaves = leaf_components(svars, &parent.es_svar);
+        let mut atom_indices = Vec::with_capacity(leaves.len() * ip_positions.len());
+        for leaf in &leaves {
+            let leaf_off = parent_leaves
+                .iter()
+                .position(|l| l == leaf)
+                .ok_or_else(|| MiliError::UnknownSvar(leaf.clone()))?;
+            for &ipp in &ip_positions {
+                atom_indices.push(ipp * atoms_per_ip + leaf_off);
+            }
+        }
+
+        // Component names: component-outer, IP-inner — matches the
+        // atom-index order above (`miliinternal.py:1367`).
+        if components.is_none() {
+            let mut names = Vec::with_capacity(leaves.len() * sel_labels.len());
+            for leaf in &leaves {
+                for lab in &sel_labels {
+                    names.push(format!("{leaf} ipt. {lab}"));
+                }
+            }
+            components = Some(names);
+        }
+        comp_qtys.push(leaves.len() * ip_positions.len());
+
+        out.push(SubrecMatch {
+            sub,
+            subrec_start,
+            svar_idx,
+            lumps,
+            n,
+            picker_override: Some(AtomPicker::Specific { atom_indices }),
+        });
+    }
+
+    if out.is_empty() {
+        return Ok(None);
+    }
+
+    // Cross-material / cross-subrecord IP-count consistency
+    // (`miliinternal.py:1340-1349`). Inconsistent component counts are
+    // unrepresentable as a single rectangular array — upstream raises
+    // `ValueError`; surface the typed equivalent.
+    let mut distinct: Vec<usize> = Vec::new();
+    for &q in &comp_qtys {
+        if !distinct.contains(&q) {
+            distinct.push(q);
+        }
+    }
+    if distinct.len() > 1 {
+        return Err(MiliError::InconsistentIpCounts {
+            svar: comp_name.to_owned(),
+            class: class_name.to_owned(),
+            counts: distinct,
+        });
+    }
+
+    Ok(Some(SubstitutionPlan {
+        matches: out,
+        num_type,
+        components: components.unwrap_or_default(),
+    }))
+}
+
+/// Flatten a svar to its leaf scalar component names, in declaration
+/// order. A scalar (or unknown) maps to itself; a VECTOR / VEC_ARRAY
+/// recurses through its components. Mirrors the recursion upstream
+/// applies via `StateVariable.svars` (`miliinternal.py:140-154`).
+fn leaf_components(svars: &SvarTable, name: &str) -> Vec<String> {
+    match svars.get(name).map(|s| &s.agg) {
+        Some(SvarAgg::Vector { comps } | SvarAgg::VecArray { comps, .. }) => {
+            let mut out = Vec::new();
+            for c in comps {
+                out.extend(leaf_components(svars, c));
+            }
+            out
+        }
+        _ => vec![name.to_owned()],
+    }
 }
 
 /// Parsed form of a user-supplied svar query name.
@@ -359,7 +699,17 @@ fn resolve_target(
             let s = svars
                 .get(n)
                 .ok_or_else(|| MiliError::UnknownSvar(n.to_owned()))?;
-            let picker = resolve_atom_picker(s, ips)?;
+            // Only a vec_array consumes `ips` positionally here. For
+            // every other agg the `ips` semantics is the element-set
+            // IP-*label* path resolved later against the VEC_ARRAY
+            // parent (`plan_state_svar_ip` → `try_vec_array_substitution`);
+            // the genuine-misuse typed error (svar carried directly,
+            // no linkage) is raised there.
+            let picker = if matches!(s.agg, SvarAgg::VecArray { .. }) {
+                resolve_atom_picker(s, ips)?
+            } else {
+                AtomPicker::AllAtoms
+            };
             Ok(Resolved {
                 base_name: n.to_owned(),
                 num_type: s.num_type,
@@ -503,6 +853,12 @@ struct SubrecMatch<'a> {
     lumps: Lumps,
     /// Object count in this subrec.
     n: usize,
+    /// Per-subrecord picker override. `Some` only on the VEC_ARRAY
+    /// substitution path (Slice B), where each carrying subrec needs its
+    /// own component-outer/IP-inner atom-index list (the element-set
+    /// payload — hence the label→index map — can differ per subrec). The
+    /// shared `picker` argument is used when this is `None`.
+    picker_override: Option<AtomPicker>,
 }
 
 fn collect_matching_subrecs<'a>(
@@ -546,6 +902,7 @@ fn collect_matching_subrecs<'a>(
             svar_idx,
             lumps,
             n,
+            picker_override: None,
         });
     }
     Ok(out)
@@ -561,8 +918,9 @@ fn gather_all(
     for m in matches {
         let block_labels = expand_id_blocks(&m.sub.id_blocks);
         debug_assert_eq!(block_labels.len(), m.n);
+        let pk = m.picker_override.as_ref().unwrap_or(picker);
         for (j, &label) in block_labels.iter().enumerate().take(m.n) {
-            push_object_rows(&mut slabs, m, width, picker, j);
+            push_object_rows(&mut slabs, m, width, pk, j);
             labels.push(label);
         }
     }
@@ -606,7 +964,8 @@ fn gather_by_labels(
                         "query: label ordinal exceeds subrec object count",
                     ));
                 }
-                push_object_rows(&mut slabs, m, width, picker, ord);
+                let pk = m.picker_override.as_ref().unwrap_or(picker);
+                push_object_rows(&mut slabs, m, width, pk, ord);
                 found = true;
                 break;
             }
@@ -1638,6 +1997,65 @@ mod tests {
     }
 
     #[test]
+    fn plan_bare_component_of_vec_array_substitutes_with_ip_labels() {
+        // Slice B: `eps` is not a subrec svar — it is a scalar
+        // component of the VEC_ARRAY `es_1a` (dims=[2], comps=[sx,eps],
+        // 2 atoms/IP, 2 IPs). With the int_points linkage carrying the
+        // element-set payload `[1, 2, 2]` (IP labels 1,2 + trailing
+        // count), `ips=[2]` maps label 2 → positional IP index 1; eps
+        // is leaf-offset 1, so atom = 1*2 + 1 = 3. Component name is
+        // `eps ipt. 2` (`miliinternal.py:1367`).
+        let svars = make_vec_array_svars("es_1a", NumType::Float4, &[2], &["sx", "eps"]);
+        let srec = Srec {
+            srec_id: 0,
+            mesh_id: 0,
+            srec_size: 0,
+            subrecords: vec![mk_subrec(
+                "shell",
+                Organization::ResultOrdered,
+                &["es_1a"],
+                &[(1, 1)],
+            )],
+        };
+        let mut ip = IntPoints::default();
+        ip.insert("sx", "es_1a", &[1, 2, 2]);
+        ip.insert("eps", "es_1a", &[1, 2, 2]);
+
+        let labels = [1];
+        let ips = [2usize];
+        let f = Filter {
+            labels: Some(&labels),
+            ips: Some(&ips),
+            subrec: None,
+        };
+        let plan = plan_state_svar_ip(&srec, &svars, "eps", "shell", 0, f, &ip).unwrap();
+        assert_eq!(plan.slabs, vec![ByteSlab { start: 12, len: 4 }]);
+        assert_eq!(
+            plan.components.as_deref(),
+            Some(["eps ipt. 2".to_owned()].as_slice())
+        );
+
+        // No `ips` → every IP, component-outer/IP-inner naming.
+        let f_all = Filter {
+            labels: Some(&labels),
+            ips: None,
+            subrec: None,
+        };
+        let plan = plan_state_svar_ip(&srec, &svars, "eps", "shell", 0, f_all, &ip).unwrap();
+        assert_eq!(
+            plan.slabs,
+            vec![
+                ByteSlab { start: 4, len: 4 },
+                ByteSlab { start: 12, len: 4 },
+            ]
+        );
+        assert_eq!(
+            plan.components.as_deref(),
+            Some(["eps ipt. 1".to_owned(), "eps ipt. 2".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
     fn plan_array_subscript_on_vec_array_errors() {
         let svars = make_vec_array_svars("stress", NumType::Float4, &[2], &["sx", "sy"]);
         let srec = Srec {
@@ -1815,6 +2233,7 @@ mod tests {
             ],
             state_data_start: 100,
             labels: vec![1, 2],
+            components: None,
         };
         let new = plan.rebased(500).unwrap();
         assert_eq!(new.state_data_start, 500);

@@ -29,7 +29,7 @@ use crate::error::{MiliError, Result};
 use crate::header::Header;
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
-use crate::query::{plan_state_svar, Filter, QueryResult, ReadPlan, StateValues};
+use crate::query::{plan_state_svar_ip, Filter, IntPoints, QueryResult, ReadPlan, StateValues};
 use crate::srec::SrecTable;
 use crate::state::{self, StateMapSource, StateMeta};
 use crate::svar::{NumType, SvarAgg, SvarTable};
@@ -417,6 +417,75 @@ impl Database {
         Ok(out)
     }
 
+    /// Build the svar→element-set→IP-label linkage (the core analogue of
+    /// upstream `_MiliInternal.__int_points`,
+    /// `reference/mili-python/src/mili/miliinternal.py:156-192`). A
+    /// VEC_ARRAY svar `es_<n>a` whose name minus its last char is an
+    /// element-set key links every component it carries (recursively)
+    /// to that set's IP-label payload, plus the upstream `stress` /
+    /// `strain` special-case and the query-by-set-name self entry.
+    /// Empty when the family declares no element sets (the common
+    /// scalar/vector corpus, and every multi-fragment basic1 part).
+    pub(crate) fn build_int_points(&self) -> IntPoints {
+        let mut ip = IntPoints::default();
+        let Ok(element_sets) = self.element_sets() else {
+            return ip;
+        };
+        if element_sets.is_empty() {
+            return ip;
+        }
+        let direct_comps = |name: &str| -> Vec<String> {
+            match self.svars.get(name).map(|s| &s.agg) {
+                Some(SvarAgg::Vector { comps } | SvarAgg::VecArray { comps, .. }) => comps.clone(),
+                _ => Vec::new(),
+            }
+        };
+        let stress_comps = direct_comps("stress");
+        let strain_comps = direct_comps("strain");
+        for sv in self.svars.iter() {
+            let Some(eset_name) = sv.name.get(..sv.name.len().saturating_sub(1)) else {
+                continue;
+            };
+            let Some(payload) = element_sets.get(eset_name) else {
+                continue;
+            };
+            let comps = direct_comps(&sv.name);
+            // Upstream `stress` / `strain` special blocks: an element
+            // set whose direct components *are* the six stress (resp.
+            // strain) components is also queryable by `"stress"` /
+            // `"strain"` (`miliinternal.py:170-181`).
+            if stress_comps.len() == 6
+                && comps.iter().filter(|c| stress_comps.contains(c)).count() == 6
+            {
+                ip.insert("stress", &sv.name, payload);
+            }
+            if strain_comps.len() == 6
+                && comps.iter().filter(|c| strain_comps.contains(c)).count() == 6
+            {
+                ip.insert("strain", &sv.name, payload);
+            }
+            self.add_int_points(&mut ip, &sv.name, &comps, payload);
+            // Query-by-element-set-name self entry (`miliinternal.py:191`).
+            ip.insert(&sv.name, &sv.name, payload);
+        }
+        ip
+    }
+
+    /// Recursive half of [`Self::build_int_points`] — upstream
+    /// `addIntPoints` (`miliinternal.py:156-163`): link every
+    /// (transitive) component of the element-set VEC_ARRAY to its
+    /// IP-label payload.
+    fn add_int_points(&self, ip: &mut IntPoints, es_name: &str, comps: &[String], payload: &[i32]) {
+        for c in comps {
+            ip.insert(c, es_name, payload);
+            if let Some(SvarAgg::Vector { comps: cc } | SvarAgg::VecArray { comps: cc, .. }) =
+                self.svars.get(c).map(|s| s.agg.clone())
+            {
+                self.add_int_points(ip, es_name, &cc, payload);
+            }
+        }
+    }
+
     /// Read every value of `svar_name` on objects of class `class` at
     /// state index `state_idx`, returning a typed flat vector keyed by
     /// the svar's numeric type.
@@ -469,6 +538,17 @@ impl Database {
     /// when merging per-fragment results. End users should prefer
     /// [`Database::query`] plus [`Database::labels`].
     pub fn query_with_labels(&self, args: &QueryArgs<'_>) -> Result<(StateValues, Vec<i32>)> {
+        let (values, labels, _) = self.run_query(args)?;
+        Ok((values, labels))
+    }
+
+    /// Core query: values, entity-axis labels, and an optional
+    /// component-name override (the Slice-B VEC_ARRAY-substitution path
+    /// resolves `f"{comp} ipt. {label}"` names during planning).
+    fn run_query(
+        &self,
+        args: &QueryArgs<'_>,
+    ) -> Result<(StateValues, Vec<i32>, Option<Vec<String>>)> {
         if args.states.is_empty() {
             return Err(MiliError::MalformedDirectory(
                 "query: states must be non-empty",
@@ -522,14 +602,17 @@ impl Database {
                 "state references unknown srec_format",
             ))?;
         let first_data_start = state_data_start(first)?;
-        let plan = plan_state_svar(
+        let int_points = self.build_int_points();
+        let plan = plan_state_svar_ip(
             srec,
             &self.svars,
             args.svar,
             args.class,
             first_data_start,
             filter,
+            &int_points,
         )?;
+        let plan_components = plan.components.clone();
 
         let byteswap = !self.header.is_native_endian();
         let bytes_per_state = plan.total_bytes();
@@ -586,7 +669,7 @@ impl Database {
         } else {
             plan.labels
         };
-        Ok((values, labels))
+        Ok((values, labels, plan_components))
     }
 
     /// QueryDict-shaped result (`planning/mili-py/m3.md`). Reuses
@@ -595,8 +678,9 @@ impl Database {
     /// (`reference/mili-python/src/mili/miliinternal.py:1320-1336`).
     /// Primal only; `states`/`times` are attached caller-side.
     pub fn query_full(&self, args: &QueryArgs<'_>) -> Result<QueryResult> {
-        let (values, labels) = self.query_with_labels(args)?;
-        let (components, title) = self.svar_query_meta(args.svar)?;
+        let (values, labels, comp_override) = self.run_query(args)?;
+        let (fallback_components, title) = self.svar_query_meta(args.svar)?;
+        let components = comp_override.unwrap_or(fallback_components);
         Ok(QueryResult {
             values,
             labels,
