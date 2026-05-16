@@ -16,11 +16,61 @@
 //! wrapper raises as `MiliPythonError`.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::{Add, Div, Mul, Neg, Sub};
 
 use crate::mesh::Superclass;
 use crate::{
     Database, MaterialArg, MeshId, MiliError, QueryArgs, QueryResult, Result, StateValues,
 };
+
+/// The float element type a `nodpos`-driven geometry kernel runs in.
+/// Upstream computes every geometry derived (`element_volume`, `area`,
+/// `centroid`, `measure`) element-wise in the primal `nodpos` dtype —
+/// f32 for a single-precision database, f64 for a double-precision one
+/// (`dbl_nodtang`) — so the kernels are generic over `T` and the f32
+/// instantiation is bit-identical to the original f32-only code (same
+/// ops, same exactly-representable integer divisors). `relative_volume`
+/// is the one exception: its jacobian math is always `np.float64` and
+/// the result always f32, so it reads the gathered coords as f64
+/// regardless via the standalone [`nodpos_f64`] helper.
+trait GeomF:
+    Copy
+    + Add<Output = Self>
+    + Sub<Output = Self>
+    + Mul<Output = Self>
+    + Div<Output = Self>
+    + Neg<Output = Self>
+{
+    const ZERO: Self;
+    /// An exact small integer divisor (`12`, `6`, `16`, a node count);
+    /// every value used here is exactly representable in f32 and f64,
+    /// so this matches the upstream weak-scalar Python `int` / float
+    /// divisor bit-for-bit.
+    fn from_count(n: usize) -> Self;
+    fn sqrt(self) -> Self;
+}
+
+impl GeomF for f32 {
+    const ZERO: f32 = 0.0;
+    #[allow(clippy::cast_precision_loss)]
+    fn from_count(n: usize) -> f32 {
+        n as f32
+    }
+    fn sqrt(self) -> f32 {
+        f32::sqrt(self)
+    }
+}
+
+impl GeomF for f64 {
+    const ZERO: f64 = 0.0;
+    #[allow(clippy::cast_precision_loss)]
+    fn from_count(n: usize) -> f64 {
+        n as f64
+    }
+    fn sqrt(self) -> f64 {
+        f64::sqrt(self)
+    }
+}
 
 /// Result of [`Database::nodes_of_elems`], mirroring upstream's
 /// `ReturnCode.ERROR` branches (`miliinternal.py:935-944`).
@@ -181,36 +231,51 @@ impl Database {
         b_label: i32,
         state_idx: &[usize],
     ) -> Result<Vec<f32>> {
-        let ca = self.centroid(mesh, a_class, a_label, state_idx)?;
-        let cb = self.centroid(mesh, b_class, b_label, state_idx)?;
-        let mut out = Vec::with_capacity(state_idx.len());
-        for s in 0..state_idx.len() {
-            // Upstream sums (B-A)^2 over x,y,z then sqrt, all float32.
-            let mut sum = 0f32;
-            for d in 0..ca[s].len() {
-                let diff = cb[s][d] - ca[s][d];
-                sum += diff * diff;
+        let (ca, da, ns) = self.centroid(mesh, a_class, a_label, state_idx)?;
+        let (cb, db, _) = self.centroid(mesh, b_class, b_label, state_idx)?;
+        let dims = da.min(db);
+        // Upstream sums (B-A)^2 over x,y,z then sqrt, in the centroid
+        // (= nodpos primal) dtype. `ca`/`cb` come from the same
+        // database so they share a variant. The f32 path is
+        // bit-identical to the original; the f64 path (no measure
+        // value-test corpus is double-precision) mirrors the same op
+        // order at f64, cast to f32 for the public Vec<f32> contract.
+        let out: Vec<f32> = match (&ca, &cb) {
+            (StateValues::F64(a), StateValues::F64(b)) => {
+                (0..ns).map(|s| measure_one(a, b, s, dims) as f32).collect()
             }
-            out.push(sum.sqrt());
-        }
+            (StateValues::F32(a), StateValues::F32(b)) => {
+                (0..ns).map(|s| measure_one(a, b, s, dims)).collect()
+            }
+            _ => {
+                return Err(MiliError::MalformedDirectory(
+                    "measure: centroid is not a float buffer",
+                ))
+            }
+        };
         Ok(out)
     }
 
     /// Per-state element/node centroid — the self-contained
     /// `__compute_centroid` geometry (`derived.py:1962-2008`) over the
-    /// primal `nodpos` query. Returns one `dims`-long coord per state.
+    /// primal `nodpos` query. Returns a flat `[state][dims]` buffer in
+    /// the primal `nodpos` dtype (f32 / f64 — `dbl_nodtang` is f64),
+    /// the `dims`, and the state count. The gather is dtype-agnostic;
+    /// the mean/copy kernel is generic so the f32 path stays
+    /// bit-identical and the f64 path mirrors the same op order.
     fn centroid(
         &self,
         mesh: MeshId,
         class: &str,
         label: i32,
         state_idx: &[usize],
-    ) -> Result<Vec<Vec<f32>>> {
+    ) -> Result<(StateValues, usize, usize)> {
         let code = self
             .superclass_code(mesh, class)
             .ok_or_else(|| MiliError::UnknownClass(class.to_owned()))?;
         let sclass = Superclass::from_code(i64::from(code))
             .ok_or(MiliError::MalformedDirectory("centroid: bad superclass"))?;
+        let ns = state_idx.len();
 
         if sclass == Superclass::Node {
             // NODE: centroid is the node position itself.
@@ -223,12 +288,18 @@ impl Database {
                     class: class.to_owned(),
                 })?;
             let nlab = ret.len();
-            let mut out = Vec::with_capacity(state_idx.len());
-            for s in 0..state_idx.len() {
-                let base = s * nlab * dims + row * dims;
-                out.push(data[base..base + dims].to_vec());
-            }
-            return Ok(out);
+            let pick = |src: &StateValues| -> StateValues {
+                match src {
+                    StateValues::F32(v) => {
+                        StateValues::F32(centroid_node_kernel(v, ns, nlab, dims, row))
+                    }
+                    StateValues::F64(v) => {
+                        StateValues::F64(centroid_node_kernel(v, ns, nlab, dims, row))
+                    }
+                    _ => StateValues::F32(Vec::new()),
+                }
+            };
+            return Ok((pick(&data), dims, ns));
         }
 
         // Element: mean of its first `qty_conns` node positions.
@@ -262,26 +333,17 @@ impl Database {
             row_of.entry(l).or_insert(i);
         }
         let nlab = ret.len();
-        // qty is a superclass node count (<= 10); f32 is exact here and
-        // upstream divides the float32 sum by this same python int.
-        #[allow(clippy::cast_precision_loss)]
-        let qty_f = qty as f32;
-        let mut out = Vec::with_capacity(state_idx.len());
-        for s in 0..state_idx.len() {
-            let mut c = vec![0f32; dims];
-            for &nl in &node_labels {
-                let r = row_of[&nl];
-                let base = s * nlab * dims + r * dims;
-                for d in 0..dims {
-                    c[d] += data[base + d];
-                }
+        let rows: Vec<usize> = node_labels.iter().map(|nl| row_of[nl]).collect();
+        let values = match &data {
+            StateValues::F32(v) => StateValues::F32(centroid_mean_kernel(v, ns, nlab, dims, &rows)),
+            StateValues::F64(v) => StateValues::F64(centroid_mean_kernel(v, ns, nlab, dims, &rows)),
+            _ => {
+                return Err(MiliError::MalformedDirectory(
+                    "centroid: nodpos is not a float buffer",
+                ))
             }
-            for v in &mut c {
-                *v /= qty_f;
-            }
-            out.push(c);
-        }
-        Ok(out)
+        };
+        Ok((values, dims, ns))
     }
 
     /// Derived `centroid` query (`derived.py.__compute_centroid`):
@@ -320,30 +382,51 @@ impl Database {
         labels.sort_unstable();
         labels.dedup();
 
+        let ns = state_idx.len();
         let mut dims = 3usize;
-        let mut values: Vec<f32> = Vec::new();
-        // Build [state][label][dims]: centroid() returns per-state
-        // dims-vectors for one label, so transpose into state-major.
-        let mut per_label: Vec<Vec<Vec<f32>>> = Vec::with_capacity(labels.len());
+        // centroid() returns a flat `[state][dims]` buffer per label;
+        // transpose into state-major `[state][label][dims]`, preserving
+        // the primal `nodpos` dtype (f32 / f64).
+        let mut per_label: Vec<StateValues> = Vec::with_capacity(labels.len());
         for &lab in &labels {
-            let c = self.centroid(mesh, class, lab, state_idx)?;
-            if let Some(first) = c.first() {
-                dims = first.len();
-            }
+            let (c, d, _) = self.centroid(mesh, class, lab, state_idx)?;
+            dims = d;
             per_label.push(c);
         }
-        values.reserve(state_idx.len() * labels.len() * dims);
-        for s in 0..state_idx.len() {
-            for lc in &per_label {
-                values.extend_from_slice(&lc[s]);
+        let interleave_f32 = |buf: &mut Vec<f32>| {
+            for s in 0..ns {
+                for lc in &per_label {
+                    if let StateValues::F32(v) = lc {
+                        buf.extend_from_slice(&v[s * dims..s * dims + dims]);
+                    }
+                }
             }
-        }
+        };
+        let interleave_f64 = |buf: &mut Vec<f64>| {
+            for s in 0..ns {
+                for lc in &per_label {
+                    if let StateValues::F64(v) = lc {
+                        buf.extend_from_slice(&v[s * dims..s * dims + dims]);
+                    }
+                }
+            }
+        };
+        let cap = ns * labels.len() * dims;
+        let values = if let Some(StateValues::F64(_)) = per_label.first() {
+            let mut b = Vec::with_capacity(cap);
+            interleave_f64(&mut b);
+            StateValues::F64(b)
+        } else {
+            let mut b = Vec::with_capacity(cap);
+            interleave_f32(&mut b);
+            StateValues::F32(b)
+        };
         let components: Vec<String> = ["ux", "uy", "uz"][..dims.min(3)]
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
         Ok(QueryResult {
-            values: StateValues::F32(values),
+            values,
             labels,
             components,
             title: "Centroid Position".to_owned(),
@@ -369,7 +452,7 @@ impl Database {
         req_labels: Option<&[i32]>,
         state_idx: &[usize],
     ) -> Result<(
-        Vec<f32>,
+        StateValues,
         usize,
         usize,
         usize,
@@ -432,27 +515,22 @@ impl Database {
         let (np, dims, nr, k, em, elems, _ret) =
             self.elem_node_gather(mesh, class, req_labels, state_idx)?;
         let ne = elems.len();
-        // nodpos accessor: state s, element e, local node j, comp c.
-        let at = |s: usize, e: usize, j: usize, c: usize| -> f32 {
-            np[s * nr * dims + em[e * k + j] * dims + c]
-        };
-        let mut out: Vec<f32> = Vec::with_capacity(state_idx.len() * ne);
-        for s in 0..state_idx.len() {
-            for e in 0..ne {
-                let v = if sclass == Superclass::Hex {
-                    hex_volume(&|j, c| at(s, e, j, c))
-                } else if sclass == Superclass::Tet {
-                    tet_volume(&|j, c| at(s, e, j, c))
-                } else {
-                    return Err(MiliError::Unsupported(
-                        "element_volume is only defined for M_HEX / M_TET",
-                    ));
-                };
-                out.push(v);
+        let ns = state_idx.len();
+        let values = match &np {
+            StateValues::F32(d) => {
+                StateValues::F32(element_volume_kernel(d, dims, nr, k, &em, ne, ns, sclass)?)
             }
-        }
+            StateValues::F64(d) => {
+                StateValues::F64(element_volume_kernel(d, dims, nr, k, &em, ne, ns, sclass)?)
+            }
+            _ => {
+                return Err(MiliError::MalformedDirectory(
+                    "element_volume: nodpos is not a float buffer",
+                ))
+            }
+        };
         Ok(QueryResult {
-            values: StateValues::F32(out),
+            values,
             labels: elems,
             components: vec!["element_volume".to_owned()],
             title: "Element Volume".to_owned(),
@@ -472,28 +550,18 @@ impl Database {
         let (np, dims, nr, k, em, elems, _ret) =
             self.elem_node_gather(mesh, class, req_labels, state_idx)?;
         let ne = elems.len();
-        let at = |s: usize, e: usize, j: usize, c: usize| -> f32 {
-            np[s * nr * dims + em[e * k + j] * dims + c]
-        };
-        let mut out: Vec<f32> = Vec::with_capacity(state_idx.len() * ne);
-        for s in 0..state_idx.len() {
-            for e in 0..ne {
-                let n = |j: usize, c: usize| at(s, e, j, c);
-                let fs1 = -n(0, 0) + n(1, 0) + n(2, 0) - n(3, 0);
-                let fs2 = -n(0, 1) + n(1, 1) + n(2, 1) - n(3, 1);
-                let fs3 = -n(0, 2) + n(1, 2) + n(2, 2) - n(3, 2);
-                let ft1 = -n(0, 0) - n(1, 0) + n(2, 0) + n(3, 0);
-                let ft2 = -n(0, 1) - n(1, 1) + n(2, 1) + n(3, 1);
-                let ft3 = -n(0, 2) - n(1, 2) + n(2, 2) + n(3, 2);
-                let e_ = fs1 * fs1 + fs2 * fs2 + fs3 * fs3;
-                let f_ = fs1 * ft1 + fs2 * ft2 + fs3 * ft3;
-                let g_ = ft1 * ft1 + ft2 * ft2 + ft3 * ft3;
-                let sixteen: f32 = 16.0;
-                out.push(((e_ * g_ - f_ * f_) / sixteen).sqrt());
+        let ns = state_idx.len();
+        let values = match &np {
+            StateValues::F32(d) => StateValues::F32(quad_area_kernel(d, dims, nr, k, &em, ne, ns)),
+            StateValues::F64(d) => StateValues::F64(quad_area_kernel(d, dims, nr, k, &em, ne, ns)),
+            _ => {
+                return Err(MiliError::MalformedDirectory(
+                    "area: nodpos is not a float buffer",
+                ))
             }
-        }
+        };
         Ok(QueryResult {
-            values: StateValues::F32(out),
+            values,
             labels: elems,
             components: vec!["area".to_owned()],
             title: "Quad Area".to_owned(),
@@ -601,11 +669,11 @@ impl Database {
             let dnz: [f64; 8] = std::array::from_fn(|j| i6 * DN1[j] + i7 * DN2[j] + i8 * DN3[j]);
             for (s, _) in state_idx.iter().enumerate() {
                 let cx: [f64; 8] =
-                    std::array::from_fn(|j| f64::from(np[s * nr * dims + idx8[j] * dims]));
+                    std::array::from_fn(|j| nodpos_f64(&np, s * nr * dims + idx8[j] * dims));
                 let cy: [f64; 8] =
-                    std::array::from_fn(|j| f64::from(np[s * nr * dims + idx8[j] * dims + 1]));
+                    std::array::from_fn(|j| nodpos_f64(&np, s * nr * dims + idx8[j] * dims + 1));
                 let cz: [f64; 8] =
-                    std::array::from_fn(|j| f64::from(np[s * nr * dims + idx8[j] * dims + 2]));
+                    std::array::from_fn(|j| nodpos_f64(&np, s * nr * dims + idx8[j] * dims + 2));
                 let f0 = dot(&dnx, &cx);
                 let f1 = dot(&dny, &cx);
                 let f2 = dot(&dnz, &cx);
@@ -632,14 +700,15 @@ impl Database {
     }
 
     /// Primal `nodpos` for a node-label set across states. Returns the
-    /// flat `[state][label][dim]` f32 buffer, the entity-axis labels in
-    /// row order, and `dims` (atoms per node).
+    /// flat `[state][label][dim]` buffer (f32 *or* f64 — the primal
+    /// dtype, double-precision for `dbl_nodtang`), the entity-axis
+    /// labels in row order, and `dims` (atoms per node).
     fn query_nodpos(
         &self,
         _mesh: MeshId,
         node_labels: &[i32],
         state_idx: &[usize],
-    ) -> Result<(Vec<f32>, Vec<i32>, usize)> {
+    ) -> Result<(StateValues, Vec<i32>, usize)> {
         let mut seen: HashSet<i32> = HashSet::new();
         let mut filtered: Vec<i32> = Vec::with_capacity(node_labels.len());
         for &l in node_labels {
@@ -657,14 +726,14 @@ impl Database {
             subrec: None,
         };
         let (vals, ret_labels) = self.query_with_labels(&args)?;
-        let StateValues::F32(data) = vals else {
+        if !matches!(vals, StateValues::F32(_) | StateValues::F64(_)) {
             return Err(MiliError::MalformedDirectory(
-                "nodpos query returned a non-f32 buffer",
+                "nodpos query returned a non-float buffer",
             ));
-        };
+        }
         let denom = state_idx.len().max(1) * ret_labels.len().max(1);
-        let dims = data.len() / denom;
-        Ok((data, ret_labels, dims))
+        let dims = vals.len() / denom;
+        Ok((vals, ret_labels, dims))
     }
 }
 
@@ -674,7 +743,7 @@ impl Database {
 /// sub-expression and its evaluation order mirrors the numpy source
 /// exactly (each is an element-wise op there; scalar here is
 /// bit-identical), `/ 12.0` with the weak-scalar f32 divisor.
-fn hex_volume(n: &impl Fn(usize, usize) -> f32) -> f32 {
+fn hex_volume<T: GeomF>(n: &impl Fn(usize, usize) -> T) -> T {
     let a45 = n(3, 2) - n(4, 2);
     let a24 = n(1, 2) - n(3, 2);
     let a52 = n(4, 2) - n(1, 2);
@@ -729,15 +798,14 @@ fn hex_volume(n: &impl Fn(usize, usize) -> f32) -> f32 {
         + px6 * n(5, 0)
         + px7 * n(6, 0)
         + px8 * n(7, 0);
-    let twelve: f32 = 12.0;
-    vol / twelve
+    vol / T::from_count(12)
 }
 
 /// M_TET element volume `w · (u × v) / 6`
 /// (`derived.py.__compute_element_volume`, M_TET branch ~1904-1911):
 /// `u = n1-n0`, `v = n2-n0`, `w = n3-n0`, `np.cross(u,v)` then the
 /// `np.sum(..., axis=2)` left-fold over x,y,z, `/ 6.0` weak-scalar.
-fn tet_volume(n: &impl Fn(usize, usize) -> f32) -> f32 {
+fn tet_volume<T: GeomF>(n: &impl Fn(usize, usize) -> T) -> T {
     let u = [n(1, 0) - n(0, 0), n(1, 1) - n(0, 1), n(1, 2) - n(0, 2)];
     let v = [n(2, 0) - n(0, 0), n(2, 1) - n(0, 1), n(2, 2) - n(0, 2)];
     let w = [n(3, 0) - n(0, 0), n(3, 1) - n(0, 1), n(3, 2) - n(0, 2)];
@@ -745,6 +813,141 @@ fn tet_volume(n: &impl Fn(usize, usize) -> f32) -> f32 {
     let cy = u[2] * v[0] - u[0] * v[2];
     let cz = u[0] * v[1] - u[1] * v[0];
     let vol = w[0] * cx + w[1] * cy + w[2] * cz;
-    let six: f32 = 6.0;
-    vol / six
+    vol / T::from_count(6)
+}
+
+/// Read a single flat element of a float `nodpos` buffer widened to
+/// f64 — `relative_volume`'s jacobian math is always `np.float64`
+/// (`derived.py:2324-2334`), so it consumes the gathered coords as
+/// f64 regardless of the on-disk precision. Out-of-range / non-float
+/// yields `0.0` (callers index within the gathered extent).
+fn nodpos_f64(sv: &StateValues, i: usize) -> f64 {
+    match sv {
+        StateValues::F32(v) => v.get(i).copied().map_or(0.0, f64::from),
+        StateValues::F64(v) => v.get(i).copied().unwrap_or(0.0),
+        _ => 0.0,
+    }
+}
+
+/// NODE centroid: the node's own position. Flat `[state][dims]`.
+fn centroid_node_kernel<T: GeomF>(
+    data: &[T],
+    ns: usize,
+    nlab: usize,
+    dims: usize,
+    row: usize,
+) -> Vec<T> {
+    let mut out = Vec::with_capacity(ns * dims);
+    for s in 0..ns {
+        let base = s * nlab * dims + row * dims;
+        out.extend_from_slice(&data[base..base + dims]);
+    }
+    out
+}
+
+/// Element centroid: mean of the element's `rows.len()` node
+/// positions, divided by the (exact, weak-scalar) node count. Flat
+/// `[state][dims]`. `T` is the primal `nodpos` dtype.
+fn centroid_mean_kernel<T: GeomF>(
+    data: &[T],
+    ns: usize,
+    nlab: usize,
+    dims: usize,
+    rows: &[usize],
+) -> Vec<T> {
+    let qty = T::from_count(rows.len());
+    let mut out = Vec::with_capacity(ns * dims);
+    for s in 0..ns {
+        let mut c = vec![T::ZERO; dims];
+        for &r in rows {
+            let base = s * nlab * dims + r * dims;
+            for d in 0..dims {
+                c[d] = c[d] + data[base + d];
+            }
+        }
+        for v in &mut c {
+            *v = *v / qty;
+        }
+        out.extend_from_slice(&c);
+    }
+    out
+}
+
+/// `measure`: `sqrt(sum_d (b - a)^2)` over one state's `dims` centroid
+/// components, in the centroid dtype `T`.
+fn measure_one<T: GeomF>(a: &[T], b: &[T], s: usize, dims: usize) -> T {
+    let mut sum = T::ZERO;
+    for d in 0..dims {
+        let diff = b[s * dims + d] - a[s * dims + d];
+        sum = sum + diff * diff;
+    }
+    sum.sqrt()
+}
+
+/// `element_volume` numeric kernel, generic over the primal `nodpos`
+/// dtype `T` (f32 / f64). `np` is the flat `[state][node_row][dims]`
+/// gathered buffer; `em` the `[elem][k]` node-row map.
+#[allow(clippy::too_many_arguments)]
+fn element_volume_kernel<T: GeomF>(
+    np: &[T],
+    dims: usize,
+    nr: usize,
+    k: usize,
+    em: &[usize],
+    ne: usize,
+    ns: usize,
+    sclass: Superclass,
+) -> Result<Vec<T>> {
+    let at = |s: usize, e: usize, j: usize, c: usize| -> T {
+        np[s * nr * dims + em[e * k + j] * dims + c]
+    };
+    let mut out: Vec<T> = Vec::with_capacity(ns * ne);
+    for s in 0..ns {
+        for e in 0..ne {
+            let v = if sclass == Superclass::Hex {
+                hex_volume(&|j, c| at(s, e, j, c))
+            } else if sclass == Superclass::Tet {
+                tet_volume(&|j, c| at(s, e, j, c))
+            } else {
+                return Err(MiliError::Unsupported(
+                    "element_volume is only defined for M_HEX / M_TET",
+                ));
+            };
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
+/// `area` (M_QUAD) numeric kernel: `sqrt((e·g - f·f)/16)` of the
+/// surface metric, generic over the primal `nodpos` dtype `T`.
+fn quad_area_kernel<T: GeomF>(
+    np: &[T],
+    dims: usize,
+    nr: usize,
+    k: usize,
+    em: &[usize],
+    ne: usize,
+    ns: usize,
+) -> Vec<T> {
+    let at = |s: usize, e: usize, j: usize, c: usize| -> T {
+        np[s * nr * dims + em[e * k + j] * dims + c]
+    };
+    let mut out: Vec<T> = Vec::with_capacity(ns * ne);
+    for s in 0..ns {
+        for e in 0..ne {
+            let n = |j: usize, c: usize| at(s, e, j, c);
+            let fs1 = -n(0, 0) + n(1, 0) + n(2, 0) - n(3, 0);
+            let fs2 = -n(0, 1) + n(1, 1) + n(2, 1) - n(3, 1);
+            let fs3 = -n(0, 2) + n(1, 2) + n(2, 2) - n(3, 2);
+            let ft1 = -n(0, 0) - n(1, 0) + n(2, 0) + n(3, 0);
+            let ft2 = -n(0, 1) - n(1, 1) + n(2, 1) + n(3, 1);
+            let ft3 = -n(0, 2) - n(1, 2) + n(2, 2) + n(3, 2);
+            let e_ = fs1 * fs1 + fs2 * fs2 + fs3 * fs3;
+            let f_ = fs1 * ft1 + fs2 * ft2 + fs3 * ft3;
+            let g_ = ft1 * ft1 + ft2 * ft2 + ft3 * ft3;
+            out.push(((e_ * g_ - f_ * f_) / T::from_count(16)).sqrt());
+        }
+    }
+    out
 }

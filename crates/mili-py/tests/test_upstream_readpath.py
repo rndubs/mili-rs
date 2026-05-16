@@ -270,28 +270,29 @@ _DERIVED_SERIAL_PASSING = {
     "test_force_y",
     "test_force_z",
     "test_mat_cog_disp",
-}
-# The dbl_nodtang (diablo) corpus has a systematic *core primal-query*
-# bug independent of the derived engine: every svar on `cbs1_particle`
-# (and the diablo brick) rejects non-first labels (e.g. 95/115 on
-# cbs1_particle) which upstream mili returns. The derived math for
-# these is implemented + oracle-verified, but the primal gather fails
-# first. These stay honest strict-xfail with a precise reason; it is a
-# settled-core-query-semantics investigation, separate from the derived
-# value engine. test_surfstrain is *additionally* the `face=`
-# projection layer (deferred, task-flagged).
-_DERIVED_DBL_NODTANG_BLOCKED = {
+    # The dbl_nodtang (diablo) core primal-query label-resolution bug
+    # is fixed (subrecord `id_blocks` enumerate 1-based class mo ids,
+    # not user labels — they coincide only for contiguous `1..=qty`
+    # label classes; `cbs1_particle` is `[5,10,..,125]` over mo ids
+    # `1..=25`). `nodtangmag` is a pure sqrt-of-squares magnitude with
+    # no internal geometry query, so it now passes outright.
     "test_nodetangmag",
+    # The geometry-derived path is now generic over the primal `nodpos`
+    # dtype (`mili_rs::geometry` GeomF kernels + `compute_contact_force`
+    # f64): dbl_nodtang is double-precision, so `relative_volume`
+    # (f64-internal jacobian, f32 result) and `normal_force` (f64
+    # nodpres × the f64 M_QUAD area) are now bit-exact vs the upstream
+    # oracle. The f32 path is unchanged (same ops / exact divisors).
     "test_hex_relative_volume",
     "test_diablo_normal_force",
 }
+# No remaining dbl_nodtang derived-value blockers; test_surfstrain is
+# the `face=` projection layer (deferred, task-flagged) — see the
+# surfstrain reason below.
+_DERIVED_DBL_NODTANG_BLOCKED: set[str] = set()
 _DERIVED_DBL_NODTANG_REASON = (
-    "core primal-query label-resolution divergence on the dbl_nodtang "
-    "(diablo) corpus: every svar on cbs1_particle / diablo brick "
-    "rejects non-first labels (e.g. 95/115) that upstream mili returns. "
-    "The derived math is implemented + oracle-verified; the primal "
-    "gather fails first — a separate settled-core-query investigation, "
-    "independent of the derived value engine."
+    "dbl_nodtang derived-value path is complete (label-resolution + "
+    "geometry-derived f64 both landed); no remaining blocker."
 )
 _DERIVED_SURFSTRAIN_REASON = (
     "surfstrain requires the `face=` projection layer (task-flagged "
