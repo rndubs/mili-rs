@@ -629,6 +629,11 @@ impl Database {
     /// Core query: values, entity-axis labels, and an optional
     /// component-name override (the Slice-B VEC_ARRAY-substitution path
     /// resolves `f"{comp} ipt. {label}"` names during planning).
+    // Material→label resolution, label→mo-id mapping, the multi-state
+    // gather macro, and entity-axis remap are sequential and
+    // individually small; splitting them would only scatter the
+    // single linear query flow.
+    #[allow(clippy::too_many_lines)]
     fn run_query(
         &self,
         args: &QueryArgs<'_>,
@@ -660,8 +665,37 @@ impl Database {
             (Some(l), Some(m)) => Some(l.iter().copied().filter(|x| m.contains(x)).collect()),
         };
 
+        // Map the requested entity labels into the on-disk subrecord
+        // ordinal space (1-based class mesh-object ids), mirroring
+        // upstream `np.where(np.isin(labels_of_class, labels))[0]`
+        // (`reference/mili-python/src/mili/miliinternal.py:1183`). The
+        // subrecord `id_blocks` enumerate mo ids, not user labels —
+        // they coincide only when a class has contiguous `1..=qty`
+        // labels, which is why this divergence stayed hidden until the
+        // dbl_nodtang (diablo) corpus, whose `cbs1_particle` labels are
+        // `[5,10,..,125]` over mo ids `1..=25`.
+        let mo_id_labels: Option<Vec<i32>> = match &resolved_labels {
+            Some(l) => {
+                let ids = self.labels_to_mo_ids(args.class, l)?;
+                // Upstream errors when the label/material filter
+                // resolves to no class ordinal at all
+                // (`miliinternal.py:1196-1198`,
+                // `ReturnCode.ERROR "No labels found for the class"`);
+                // a *partial* match (some labels absent) is not an
+                // error — `np.isin` just drops the missing ones.
+                if ids.is_empty() {
+                    return Err(MiliError::LabelNotFound {
+                        label: l.first().copied().unwrap_or_default(),
+                        class: args.class.to_owned(),
+                    });
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+
         let filter = Filter {
-            labels: resolved_labels.as_deref(),
+            labels: mo_id_labels.as_deref(),
             ips: args.ips,
             subrec: args.subrec,
         };
@@ -744,15 +778,12 @@ impl Database {
             NumType::Int8 => gather!(i64, I64),
         };
 
-        // With an explicit label/material filter `gather_by_labels`
-        // already emitted real labels; the unfiltered `gather_all` path
-        // emits subrecord mesh-object ids that must be mapped through
-        // the class label array (see `map_mo_ids_to_labels`).
-        let labels = if resolved_labels.is_none() {
-            self.map_mo_ids_to_labels(args.class, plan.labels)?
-        } else {
-            plan.labels
-        };
+        // Both the filtered (`gather_by_labels`) and unfiltered
+        // (`gather_all`) paths now emit subrecord mesh-object ids — the
+        // filter labels were pre-mapped into the mo-id space above — so
+        // the entity axis is always mapped back through the class label
+        // array (see `map_mo_ids_to_labels`).
+        let labels = self.map_mo_ids_to_labels(args.class, plan.labels)?;
         Ok((values, labels, plan_components))
     }
 
@@ -853,6 +884,30 @@ impl Database {
     /// `Labels` TI param mili-python defaults labels to the MO ids
     /// themselves (`miliinternal.py:281`), so the ordinal vector is
     /// already correct and is returned unchanged.
+    /// Map requested entity labels onto 1-based class mesh-object ids
+    /// (the on-disk subrecord `id_blocks` ordinal space), mirroring
+    /// upstream `np.where(np.isin(labels_of_class, labels))[0]`
+    /// (`reference/mili-python/src/mili/miliinternal.py:1183`):
+    /// positions are taken in class-label-array order (ascending) and a
+    /// requested label absent from the class is silently dropped.
+    /// Returns the labels unchanged when the class has no explicit
+    /// label array — upstream then defaults its labels to
+    /// `arange(1, qty+1)` (`miliinternal.py:281`), so a label already
+    /// equals its mo id.
+    fn labels_to_mo_ids(&self, class: &str, labels: &[i32]) -> Result<Vec<i32>> {
+        let Some(class_labels) = self.labels(MeshId(0), class)? else {
+            return Ok(labels.to_vec());
+        };
+        let want: std::collections::HashSet<i32> = labels.iter().copied().collect();
+        let mut mo_ids = Vec::with_capacity(labels.len().min(class_labels.len()));
+        for (idx, &lbl) in class_labels.iter().enumerate() {
+            if want.contains(&lbl) {
+                mo_ids.push(idx as i32 + 1);
+            }
+        }
+        Ok(mo_ids)
+    }
+
     fn map_mo_ids_to_labels(&self, class: &str, mo_ids: Vec<i32>) -> Result<Vec<i32>> {
         let Some(class_labels) = self.labels(MeshId(0), class)? else {
             return Ok(mo_ids);

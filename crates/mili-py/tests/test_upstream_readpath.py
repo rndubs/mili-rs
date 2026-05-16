@@ -270,28 +270,37 @@ _DERIVED_SERIAL_PASSING = {
     "test_force_y",
     "test_force_z",
     "test_mat_cog_disp",
-}
-# The dbl_nodtang (diablo) corpus has a systematic *core primal-query*
-# bug independent of the derived engine: every svar on `cbs1_particle`
-# (and the diablo brick) rejects non-first labels (e.g. 95/115 on
-# cbs1_particle) which upstream mili returns. The derived math for
-# these is implemented + oracle-verified, but the primal gather fails
-# first. These stay honest strict-xfail with a precise reason; it is a
-# settled-core-query-semantics investigation, separate from the derived
-# value engine. test_surfstrain is *additionally* the `face=`
-# projection layer (deferred, task-flagged).
-_DERIVED_DBL_NODTANG_BLOCKED = {
+    # The dbl_nodtang (diablo) core primal-query label-resolution bug
+    # is fixed (subrecord `id_blocks` enumerate 1-based class mo ids,
+    # not user labels — they coincide only for contiguous `1..=qty`
+    # label classes; `cbs1_particle` is `[5,10,..,125]` over mo ids
+    # `1..=25`). `nodtangmag` is a pure sqrt-of-squares magnitude with
+    # no internal geometry query, so it now passes outright.
     "test_nodetangmag",
+}
+# `test_hex_relative_volume` / `test_diablo_normal_force` hit a
+# *second, distinct* blocker once the label bug is fixed: the
+# geometry-derived path (`mili_rs::geometry`) is hardcoded f32 for its
+# internal `nodpos` query, but dbl_nodtang is double-precision (f64
+# nodpos). That is a separate, parity-sensitive "generalize
+# geometry-derived to f64" sub-slice (numpy op-order / NEP50 over the
+# volume / area / jacobian / centroid math), not the label-resolution
+# bug. They stay honest strict-xfail with the accurate reason.
+# test_surfstrain is *additionally* the `face=` projection layer
+# (deferred, task-flagged).
+_DERIVED_DBL_NODTANG_BLOCKED = {
     "test_hex_relative_volume",
     "test_diablo_normal_force",
 }
 _DERIVED_DBL_NODTANG_REASON = (
-    "core primal-query label-resolution divergence on the dbl_nodtang "
-    "(diablo) corpus: every svar on cbs1_particle / diablo brick "
-    "rejects non-first labels (e.g. 95/115) that upstream mili returns. "
-    "The derived math is implemented + oracle-verified; the primal "
-    "gather fails first — a separate settled-core-query investigation, "
-    "independent of the derived value engine."
+    "geometry-derived path is hardcoded f32 but the dbl_nodtang "
+    "(diablo) corpus is double-precision (f64 nodpos): the internal "
+    "`mili_rs::geometry` nodpos query rejects the f64 buffer. The core "
+    "primal-query label-resolution bug that previously blocked these "
+    "is fixed; this is a separate parity-sensitive 'generalize "
+    "geometry-derived to f64' sub-slice (numpy op-order / NEP50 over "
+    "the volume / area / jacobian / centroid math), independent of the "
+    "label-resolution fix and the derived value engine."
 )
 _DERIVED_SURFSTRAIN_REASON = (
     "surfstrain requires the `face=` projection layer (task-flagged "

@@ -149,7 +149,7 @@ fn basic1_unknown_class_errors() {
 }
 
 #[test]
-fn basic1_nodpos_label_filter_returns_subset_in_argument_order() {
+fn basic1_nodpos_label_filter_returns_subset_in_ascending_class_order() {
     let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
     if !path.exists() {
         return;
@@ -158,6 +158,11 @@ fn basic1_nodpos_label_filter_returns_subset_in_argument_order() {
 
     // Pull all-nodes nodpos at state 0, then a 3-label subset and
     // confirm bytes match the corresponding rows of the full read.
+    // The entity axis follows class-label-array (ascending) order,
+    // *not* the argument order, mirroring upstream
+    // `np.where(np.isin(labels_of_class, labels))[0]`
+    // (`miliinternal.py:1183`) — verified bit-exact vs the `mili`
+    // oracle (`basic1` `node`, labels `[5,1,1400]` → `[1,5,1400]`).
     let all = db.state_var_values("nodpos", "node", 0).unwrap();
     let StateValues::F32(all) = all else {
         panic!("nodpos is f32");
@@ -179,7 +184,10 @@ fn basic1_nodpos_label_filter_returns_subset_in_argument_order() {
         panic!("nodpos is f32");
     };
     assert_eq!(subset.len(), 3 * 3);
-    for (i, &label) in labels.iter().enumerate() {
+    // basic1 `node` labels are the contiguous `1..=1400`, so ascending
+    // class order is simply the sorted request.
+    let expected_order = [1_i32, 5, 1400];
+    for (i, &label) in expected_order.iter().enumerate() {
         let ord = (label - 1) as usize;
         for c in 0..3 {
             assert_eq!(
@@ -255,9 +263,12 @@ fn basic1_label_filter_routes_to_object_ordered_brick() {
     let StateValues::F32(subset) = subset else {
         panic!("sand is f32");
     };
+    // Entity axis is class-label-array (ascending) order, not the
+    // argument order — `[3,1]` → `[1,3]` (oracle-faithful, see
+    // `basic1_nodpos_label_filter_returns_subset_in_ascending_class_order`).
     assert_eq!(subset.len(), 2);
-    assert_eq!(subset[0].to_bits(), all[2].to_bits()); // label 3 -> ord 2
-    assert_eq!(subset[1].to_bits(), all[0].to_bits()); // label 1 -> ord 0
+    assert_eq!(subset[0].to_bits(), all[0].to_bits()); // label 1 -> ord 0
+    assert_eq!(subset[1].to_bits(), all[2].to_bits()); // label 3 -> ord 2
 }
 
 #[test]
