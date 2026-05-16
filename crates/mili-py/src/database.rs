@@ -1287,6 +1287,93 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if svar == "centroid" {
+                // centroid: element/node centroid geometry over the
+                // internal `nodpos` gather (`derived.py.
+                // __compute_centroid`). Self-contained in the core
+                // (reuses the bit-exact `measure` centroid); the result
+                // class is the requested element class.
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .centroid_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if svar == "element_volume" {
+                // element_volume: M_HEX/M_TET volume over the internal
+                // elem→node→nodpos gather (`derived.py.
+                // __compute_element_volume`). Self-contained in core.
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .element_volume_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if svar == "area" {
+                // area: M_QUAD surface area over the internal
+                // elem→node→nodpos gather (`derived.py.
+                // __compute_quad_area`). Self-contained in core.
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .quad_area_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some(title) = mili_rs::eps_rate_spec(svar) {
+                // eps_rate: finite difference of the `eps` primal over
+                // states (`derived.py.__compute_plastic_strain_rate`).
+                // Gather `eps` at every stencil-touched state in one
+                // query; the core does the difference math.
+                let max_state = n_states as i64;
+                let mut needed: Vec<i64> = Vec::new();
+                for &s in &state_nums {
+                    needed.push(s);
+                    if s != 1 {
+                        needed.push(s - 1);
+                    }
+                    if s != 1 && s != max_state {
+                        needed.push(s + 1);
+                    }
+                }
+                needed.retain(|&n| n >= 1 && n <= max_state);
+                needed.sort_unstable();
+                needed.dedup();
+                let needed_idx: Vec<usize> = needed.iter().map(|&n| (n - 1) as usize).collect();
+                let req_states = state_nums.clone();
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let gargs = QueryArgs {
+                            svar: "eps",
+                            class: &entity_type,
+                            labels: labels_ref,
+                            states: &needed_idx,
+                            materials: materials_ref,
+                            ips: ips_ref,
+                            subrec: subrec_ref,
+                        };
+                        let gathered = match &self.backend {
+                            Backend::Single(db) => db.query_full(&gargs)?,
+                            Backend::Set(s) => s.query_full(&gargs)?,
+                        };
+                        let raw_times: Vec<f32> = match &self.backend {
+                            Backend::Single(db) => db.times(),
+                            Backend::Set(s) => s.times(),
+                        };
+                        mili_rs::compute_eps_rate(
+                            gathered,
+                            &needed,
+                            &req_states,
+                            &raw_times,
+                            max_state,
+                            svar,
+                            title,
+                        )
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else if let Some((inv, title)) = mili_rs::stress_invariant_spec(svar) {
                 // Scalar stress invariants (pressure / eff_stress /
                 // triaxiality / norm_press): pure element-wise math

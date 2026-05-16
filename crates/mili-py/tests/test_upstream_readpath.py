@@ -256,6 +256,14 @@ _DERIVED_SERIAL_PASSING = {
     "test_prin_dev_strain2",
     "test_prin_dev_strain3",
     "test_shear_magnitude",
+    "test_eps_rate",
+    "test_hex_centroid",
+    "test_beam_centroid",
+    "test_shell_centroid",
+    "test_node_centroid",
+    "test_hex_element_volume",
+    "test_tet_element_volume",
+    "test_quad_area",
 }
 # test_nodetangmag's magnitude math is implemented and verified
 # bit-exact vs the oracle (sqrt(nx^2+ny^2+nz^2), f64 dbl_nodtang), but

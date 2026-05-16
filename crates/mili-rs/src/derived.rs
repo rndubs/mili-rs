@@ -278,6 +278,12 @@ pub fn node_acc_spec(name: &str) -> Option<(usize, &'static str)> {
     }
 }
 
+/// `eps_rate` → its title; the single primal is always `eps`
+/// (`derived.py:420-425`).
+pub fn eps_rate_spec(name: &str) -> Option<&'static str> {
+    (name == "eps_rate").then_some("Equiv. Plastic Strain Rate")
+}
+
 /// Time of 1-based state `n`: upstream `db.times()[n-1]` (the f32
 /// per-state header time).
 fn state_time(times: &[f32], n: i64) -> Result<f32> {
@@ -477,6 +483,115 @@ pub fn compute_node_acceleration(
         _ => {
             return Err(MiliError::Unsupported(
                 "nodal acceleration requires float nodal position primals",
+            ))
+        }
+    };
+    Ok(QueryResult {
+        values,
+        labels: gathered.labels,
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: gathered.class_name,
+    })
+}
+
+/// `eps_rate` — effective plastic strain rate
+/// (`derived.py.__compute_plastic_strain_rate` ~1673). Single primal
+/// `eps` on the requested class; per requested state `s` (1-based,
+/// `max_state` total):
+/// - `s == 1` → 0
+/// - `1 < s < max_state` → average of the backward and forward
+///   difference: `e0 = (eps(s)-eps(s-1))/(t(s)-t(s-1))`,
+///   `e1 = (e0 + (eps(s+1)-eps(s))/(t(s+1)-t(s))) * 0.5`
+/// - `s == max_state` → backward difference only
+///   `(eps(s)-eps(s-1))/(t(s)-t(s-1))`
+///
+/// Time factor in f32 then promoted to the primal dtype (numpy NEP50,
+/// same as the velocity/acceleration cut); `*0.5` weak-scalar in the
+/// primal dtype. Generic f32/f64.
+macro_rules! impl_eps_rate {
+    ($fn:ident, $t:ty) => {
+        fn $fn(
+            vals: &[$t],
+            gsn: &[i64],
+            req: &[i64],
+            times: &[f32],
+            max_state: i64,
+            row_len: usize,
+        ) -> Result<Vec<$t>> {
+            // `row_len = labels * atoms` — eps is per integration point,
+            // so the difference math runs element-wise over the whole
+            // per-state (label x ip) block, not just the label axis.
+            let half: $t = 0.5;
+            let mut out: Vec<$t> = Vec::with_capacity(req.len() * row_len);
+            for &s in req {
+                if s == 1 {
+                    out.extend(std::iter::repeat(<$t>::default()).take(row_len));
+                    continue;
+                }
+                let cur = gathered_row(vals, gsn, row_len, s)?;
+                let prev = gathered_row(vals, gsn, row_len, s - 1)?;
+                let inv1 = 1.0f32 / (state_time(times, s)? - state_time(times, s - 1)?);
+                if s == max_state {
+                    for l in 0..row_len {
+                        out.push((cur[l] - prev[l]) * (inv1 as $t));
+                    }
+                } else {
+                    let next = gathered_row(vals, gsn, row_len, s + 1)?;
+                    let inv2 = 1.0f32 / (state_time(times, s + 1)? - state_time(times, s)?);
+                    for l in 0..row_len {
+                        let e0 = (cur[l] - prev[l]) * (inv1 as $t);
+                        out.push((e0 + (next[l] - cur[l]) * (inv2 as $t)) * half);
+                    }
+                }
+            }
+            Ok(out)
+        }
+    };
+}
+
+impl_eps_rate!(eps_rate_f32, f32);
+impl_eps_rate!(eps_rate_f64, f64);
+
+/// `eps_rate` over the gathered `eps` primal (queried at every
+/// stencil-touched state, `gathered_state_nums` parallel to its state
+/// axis); one result row per `requested_state_nums` entry.
+pub fn compute_eps_rate(
+    gathered: QueryResult,
+    gathered_state_nums: &[i64],
+    requested_state_nums: &[i64],
+    times: &[f32],
+    max_state: i64,
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    // Per-state row is labels x atoms (atoms = ip count). Derive it
+    // from the flat length so the per-IP axis is preserved.
+    let row_len = if gathered_state_nums.is_empty() {
+        0
+    } else {
+        gathered.values.len() / gathered_state_nums.len()
+    };
+    let values = match &gathered.values {
+        StateValues::F32(v) => StateValues::F32(eps_rate_f32(
+            v,
+            gathered_state_nums,
+            requested_state_nums,
+            times,
+            max_state,
+            row_len,
+        )?),
+        StateValues::F64(v) => StateValues::F64(eps_rate_f64(
+            v,
+            gathered_state_nums,
+            requested_state_nums,
+            times,
+            max_state,
+            row_len,
+        )?),
+        _ => {
+            return Err(MiliError::Unsupported(
+                "eps_rate requires a float eps primal",
             ))
         }
     };
