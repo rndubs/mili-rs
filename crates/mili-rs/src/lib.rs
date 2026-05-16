@@ -48,8 +48,8 @@ pub use derived::{
     mat_cog_disp_spec, nodal_reference_from_coords, nodal_reference_from_query, node_acc_spec,
     node_disp_mag_spec, node_disp_primal, node_disp_spec, node_vel_spec, principal_strain_primals,
     principal_strain_spec, principal_stress_primals, principal_stress_spec,
-    stress_invariant_primals, stress_invariant_spec, MagnitudeDerived, PrincipalStrain,
-    PrincipalStress, StressInvariant,
+    stress_invariant_primals, stress_invariant_spec, surfstrain_spec, MagnitudeDerived,
+    PrincipalStrain, PrincipalStress, StressInvariant,
 };
 #[doc(hidden)]
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};

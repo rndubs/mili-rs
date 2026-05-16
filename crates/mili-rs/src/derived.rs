@@ -1416,6 +1416,22 @@ pub fn magnitude_spec(name: &str) -> Option<(MagnitudeDerived, &'static str)> {
     }
 }
 
+/// Resolve a surface-strain derived name to `(title, jr, ic)`, where
+/// `(jr, ic)` is the `e3dg[:,:,jr,ic]` component the name extracts
+/// (`derived.py.__compute_surface_strain` ~2249-2260). M_HEX only
+/// (`only_sclasses = [Superclass.M_HEX]`).
+pub fn surfstrain_spec(name: &str) -> Option<(&'static str, usize, usize)> {
+    match name {
+        "surfstrainx" => Some(("Surface Strain X", 0, 0)),
+        "surfstrainy" => Some(("Surface Strain Y", 1, 1)),
+        "surfstrainz" => Some(("Surface Strain Z", 2, 2)),
+        "surfstrainxy" => Some(("Surface Strain XY", 1, 0)),
+        "surfstrainyz" => Some(("Surface Strain YZ", 2, 1)),
+        "surfstrainzx" => Some(("Surface Strain ZX", 2, 0)),
+        _ => None,
+    }
+}
+
 /// The component primals this magnitude reads, in kernel order.
 pub fn magnitude_primals(kind: MagnitudeDerived) -> &'static [&'static str] {
     match kind {

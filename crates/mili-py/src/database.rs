@@ -979,6 +979,9 @@ impl PyMiliDatabase {
         // Whether the caller explicitly passed `reference_state`
         // (mat_cog_disp's default is state 1, not 0).
         let mut reference_state_set = false;
+        // `face` (1-6) for the surfstrain derived family
+        // (`derived.py.__compute_surface_strain`); validated per-svar.
+        let mut face: Option<i64> = None;
         if let Some(kw) = kwargs {
             const ALLOWED: [&str; 5] = [
                 "output_object_labels",
@@ -1009,11 +1012,10 @@ impl PyMiliDatabase {
                     ));
                 }
             }
-            if kwargs_present(kw, "face")? {
-                return Err(MiliPythonError::new_err(
-                    "the 'face' kwarg requires the projection layer \
-                     (Python-over-primal; M4-followup)",
-                ));
+            if let Some(v) = kw.get_item("face")? {
+                if !v.is_none() {
+                    face = Some(v.extract()?);
+                }
             }
             if let Some(v) = kw.get_item("reference_state")? {
                 if !v.is_none() {
@@ -1597,6 +1599,50 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if let Some((title, jr, ic)) = mili_rs::surfstrain_spec(svar) {
+                // surfstrain{x,y,z,xy,yz,zx}: per-face Hex surface
+                // strain over the elem→node `nodpos` gather + the
+                // state-0 reference node coords
+                // (`derived.py.__compute_surface_strain`). The `face`
+                // kwarg (1-6) is mandatory; the error messages mirror
+                // upstream's `ValueError`s (surfaced as
+                // `MiliPythonError`). Only `reference_state == 0` is
+                // exercised by the corpus; a non-zero value is a typed
+                // error (extension scope), never a silent wrong answer.
+                let f = face.ok_or_else(|| {
+                    MiliPythonError::new_err(
+                        "A valid face number (1-6) must be specified. \
+                         Use the keyword argument 'face'.",
+                    )
+                })?;
+                if !(1..=6).contains(&f) {
+                    return Err(MiliPythonError::new_err(format!(
+                        "The provided face ({f}) is invalid. \
+                         Valid face numbers include 1-6"
+                    )));
+                }
+                if reference_state != 0 {
+                    return Err(MiliPythonError::new_err(
+                        "surfstrain with a non-zero reference_state \
+                         is not yet supported (M4-followup extension)",
+                    ));
+                }
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0().surface_strain_query(
+                            mesh,
+                            &entity_type,
+                            labels_ref,
+                            &state_idx,
+                            f,
+                            jr,
+                            ic,
+                            svar,
+                            title,
+                        )
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else {
                 let args = QueryArgs {
                     svar,
@@ -1765,14 +1811,6 @@ impl PyMiliDatabase {
             "The material '{name}' does not exist."
         )))
     }
-}
-
-/// True if `kw` has `key` set to a non-`None` value.
-fn kwargs_present(kw: &Bound<'_, PyDict>, key: &str) -> PyResult<bool> {
-    Ok(match kw.get_item(key)? {
-        Some(v) => !v.is_none(),
-        None => false,
-    })
 }
 
 /// Extract a scalar int or an iterable of ints (upstream
