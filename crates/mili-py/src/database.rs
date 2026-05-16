@@ -1354,6 +1354,37 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if let Some((kind, title)) = mili_rs::principal_strain_spec(svar) {
+                // Strain invariants (vol_strain / prin_strain* /
+                // prin_dev_strain*): vol_strain is the trivial strain
+                // trace; the principal strains reuse the same
+                // symmetric-3x3 Jacobi eigensolver as the stress
+                // family on the 6 strain components (vol_strain reads
+                // only the 3 normals). Same gather pattern.
+                let primal_names = mili_rs::principal_strain_primals(kind);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_principal_strain(kind, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else {
                 let args = QueryArgs {
                     svar,

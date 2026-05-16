@@ -211,9 +211,10 @@ _DERIVED_LISTING_METHODS = {
 # symmetric stress (or deviatoric) 3x3 from the 6 component primals
 # and read a symmetric-3x3 Jacobi eigensolver in the core (computed
 # in f64, cast to the primal dtype — bit-identical to numpy's f32
-# eigvalsh at every literal-checked point). The strain invariants
-# (vol_strain / prin_strain* / prin_dev_strain* / the *_alt griz
-# closed-form variants) and the remaining geometry-ish derived
+# eigvalsh at every literal-checked point). vol_strain is the trivial
+# strain trace; prin_strain* / prin_dev_strain* reuse that same
+# eigensolver on the 6 strain components. The *_alt griz closed-form
+# trig variants and the remaining geometry-ish derived
 # (centroid/element_volume/…) are later sub-slices.
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
@@ -241,6 +242,13 @@ _DERIVED_SERIAL_PASSING = {
     "test_prin_dev_stress2",
     "test_prin_dev_stress3",
     "test_max_shear_stress",
+    "test_vol_strain",
+    "test_prin_strain1",
+    "test_prin_strain2",
+    "test_prin_strain3",
+    "test_prin_dev_strain1",
+    "test_prin_dev_strain2",
+    "test_prin_dev_strain3",
 }
 
 

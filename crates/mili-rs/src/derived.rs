@@ -896,3 +896,176 @@ pub fn compute_principal_stress(
         class_name: first.class_name.clone(),
     })
 }
+
+/// The non-`*_alt` strain invariants
+/// (`derived.py.__compute_{vol_strain,principal_strain,
+/// dev_principal_strain}` ~1157-1340). `vol_strain` is the trivial
+/// strain trace `ex+ey+ez`; the principal / principal-deviatoric
+/// strains reuse the same symmetric-3x3 Jacobi eigensolver as the
+/// stress family ([`jacobi_eigvalsh_sym3`]) on the 6 strain
+/// components. The `*_alt` griz closed-form trig variants are a
+/// distinct algorithm — a later sub-slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalStrain {
+    Vol,
+    Prin1,
+    Prin2,
+    Prin3,
+    Dev1,
+    Dev2,
+    Dev3,
+}
+
+/// Resolve a strain-invariant derived name to `(kind, title)`
+/// (`derived.py` `__derived_expressions` table, ~137-217).
+pub fn principal_strain_spec(name: &str) -> Option<(PrincipalStrain, &'static str)> {
+    match name {
+        "vol_strain" => Some((PrincipalStrain::Vol, "Volumetric Strain")),
+        "prin_strain1" => Some((PrincipalStrain::Prin1, "Principal Strain 1")),
+        "prin_strain2" => Some((PrincipalStrain::Prin2, "Principal Strain 2")),
+        "prin_strain3" => Some((PrincipalStrain::Prin3, "Principal Strain 3")),
+        "prin_dev_strain1" => Some((PrincipalStrain::Dev1, "Principal Deviatoric Strain 1")),
+        "prin_dev_strain2" => Some((PrincipalStrain::Dev2, "Principal Deviatoric Strain 2")),
+        "prin_dev_strain3" => Some((PrincipalStrain::Dev3, "Principal Deviatoric Strain 3")),
+        _ => None,
+    }
+}
+
+/// The strain component primals this invariant reads, in kernel order.
+/// `vol_strain` needs only the three normal strains
+/// (`derived.py:1167-1169`); the principal strains need all six.
+pub fn principal_strain_primals(kind: PrincipalStrain) -> &'static [&'static str] {
+    match kind {
+        PrincipalStrain::Vol => &["ex", "ey", "ez"],
+        _ => &["ex", "ey", "ez", "exy", "eyz", "ezx"],
+    }
+}
+
+// Generic over f32 / f64 (mirrors `impl_principal_stress`). The
+// hydrostatic strain `e_hyd = (1/3)*(ex+ey+ez)` (note: *positive*
+// 1/3, and the deviatoric diagonal is `ex - e_hyd`, vs stress's
+// `p = -(1/3)*sum; sx + p` — algebraically and bit-for-bit the same
+// `component - (1/3)*trace`, but the source spells it this way for
+// strain, so we mirror that spelling) is computed in the primal dtype
+// with numpy NEP50 weak-scalar promotion (type-annotated `$t`
+// literal); the matrix is promoted to f64 for the shared eigensolver
+// and the eigenvalues cast back, exactly as the stress family.
+macro_rules! impl_principal_strain {
+    ($fn:ident, $t:ty) => {
+        fn $fn(kind: PrincipalStrain, c: &[&[$t]]) -> Vec<$t> {
+            let n = c[0].len();
+            let (ex, ey, ez) = (c[0], c[1], c[2]);
+            if let PrincipalStrain::Vol = kind {
+                // `ex + ey + ez` (`derived.py:1170`).
+                return (0..n).map(|i| (ex[i] + ey[i]) + ez[i]).collect();
+            }
+            // numpy weak-scalar `(1/3)` cast to the array dtype.
+            let e_third: $t = 1.0 / 3.0;
+            let (exy, eyz, ezx) = (c[3], c[4], c[5]);
+            let dev = !matches!(
+                kind,
+                PrincipalStrain::Prin1 | PrincipalStrain::Prin2 | PrincipalStrain::Prin3
+            );
+            (0..n)
+                .map(|i| {
+                    let (dxx, dyy, dzz) = if dev {
+                        // e_hyd = (1/3)*(ex+ey+ez); diag = e - e_hyd
+                        // (`derived.py:1312-1317`).
+                        let eh = e_third * ((ex[i] + ey[i]) + ez[i]);
+                        (ex[i] - eh, ey[i] - eh, ez[i] - eh)
+                    } else {
+                        (ex[i], ey[i], ez[i])
+                    };
+                    // Symmetric matrix [[dxx,exy,ezx],[exy,dyy,eyz],
+                    // [ezx,eyz,dzz]] (`derived.py:1192-1195`),
+                    // promoted to f64.
+                    let m = [
+                        [dxx as f64, exy[i] as f64, ezx[i] as f64],
+                        [exy[i] as f64, dyy as f64, eyz[i] as f64],
+                        [ezx[i] as f64, eyz[i] as f64, dzz as f64],
+                    ];
+                    let ev = jacobi_eigvalsh_sym3(m); // ascending
+                    let mn = ev[0] as $t;
+                    let md = ev[1] as $t;
+                    let mx = ev[2] as $t;
+                    match kind {
+                        // eigvalsh ascending: max = [...]1, mid = [...]2,
+                        // min = [...]3 (`derived.py:1207-1212`).
+                        PrincipalStrain::Prin1 | PrincipalStrain::Dev1 => mx,
+                        PrincipalStrain::Prin2 | PrincipalStrain::Dev2 => md,
+                        PrincipalStrain::Prin3 | PrincipalStrain::Dev3 => mn,
+                        PrincipalStrain::Vol => unreachable!(),
+                    }
+                })
+                .collect()
+        }
+    };
+}
+
+impl_principal_strain!(principal_strain_f32, f32);
+impl_principal_strain!(principal_strain_f64, f64);
+
+/// Compute a strain invariant from its component primals (same shape
+/// contract as [`compute_stress_invariant`]).
+pub fn compute_principal_strain(
+    kind: PrincipalStrain,
+    primals: &[QueryResult],
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let need = principal_strain_primals(kind).len();
+    if primals.len() != need {
+        return Err(MiliError::Unsupported(
+            "principal strain primal count mismatch",
+        ));
+    }
+    let first = &primals[0];
+    let n = first.values.len();
+    for p in primals {
+        if p.values.len() != n || p.labels.len() != first.labels.len() {
+            return Err(MiliError::Unsupported(
+                "principal strain component primals disagree in shape",
+            ));
+        }
+    }
+
+    let values = match &first.values {
+        StateValues::F32(_) => {
+            let mut cols: Vec<&[f32]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F32(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "principal strain component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F32(principal_strain_f32(kind, &cols))
+        }
+        StateValues::F64(_) => {
+            let mut cols: Vec<&[f64]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F64(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "principal strain component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F64(principal_strain_f64(kind, &cols))
+        }
+        _ => {
+            return Err(MiliError::Unsupported(
+                "principal strain requires float strain primals",
+            ))
+        }
+    };
+
+    Ok(QueryResult {
+        values,
+        labels: first.labels.clone(),
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: first.class_name.clone(),
+    })
+}
