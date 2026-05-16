@@ -213,9 +213,15 @@ _DERIVED_LISTING_METHODS = {
 # in f64, cast to the primal dtype — bit-identical to numpy's f32
 # eigvalsh at every literal-checked point). vol_strain is the trivial
 # strain trace; prin_strain* / prin_dev_strain* reuse that same
-# eigensolver on the 6 strain components. The *_alt griz closed-form
-# trig variants and the remaining geometry-ish derived
-# (centroid/element_volume/…) are later sub-slices.
+# eigensolver on the 6 strain components. nodtangmag /
+# shear_magnitude are the sqrt-of-sum-of-component-squares pattern
+# (like disp_mag, generic f32/f64, no connectivity). The *_alt griz
+# closed-form trig variants have no value-test (listing-only) and the
+# connectivity-coupled geometry derived
+# (centroid/element_volume/area/force/surfstrain) + projection are
+# later sub-slices (an architectural decision point — they thread
+# connectivity / cross-derived deps / projection into the derived
+# query routing).
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
     "test_disp_y",
@@ -249,7 +255,22 @@ _DERIVED_SERIAL_PASSING = {
     "test_prin_dev_strain1",
     "test_prin_dev_strain2",
     "test_prin_dev_strain3",
+    "test_shear_magnitude",
 }
+# test_nodetangmag's magnitude math is implemented and verified
+# bit-exact vs the oracle (sqrt(nx^2+ny^2+nz^2), f64 dbl_nodtang), but
+# the test stays honest strict-xfail: the core primal query rejects
+# `label 95 on class cbs1_particle` (which upstream mili accepts) — a
+# pre-existing core label/class-membership divergence on the
+# dbl_nodtang corpus, surfaced (not caused) by this cut. It is a
+# settled-core-query-semantics investigation, independent of the
+# derived value engine.
+_DERIVED_NODTANGMAG_BLOCKED = (
+    "core label-resolution divergence on the dbl_nodtang corpus "
+    "(primal query rejects label 95 on cbs1_particle; upstream mili "
+    "accepts it) — independent of the derived magnitude math, which "
+    "is implemented + oracle-verified; separate core-query investigation"
+)
 
 
 def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
@@ -273,6 +294,8 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
                 "DatabaseSet collapses the per-proc fan-out; Phase H "
                 "derived value sub-slice)"
             )
+        if cls == "SerialDerivedExpressions" and meth == "test_nodetangmag":
+            return _DERIVED_NODTANGMAG_BLOCKED
         return "Phase H: derived value engine (next sub-slice)"
     if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
         return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"

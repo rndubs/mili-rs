@@ -1385,6 +1385,34 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if let Some((kind, title)) = mili_rs::magnitude_spec(svar) {
+                // sqrt-of-sum-of-component-squares magnitudes
+                // (nodtangmag / shear_magnitude): same element-wise
+                // pattern as the scalar invariants, no connectivity.
+                let primal_names = mili_rs::magnitude_primals(kind);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_magnitude(kind, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else {
                 let args = QueryArgs {
                     svar,

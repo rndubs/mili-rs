@@ -1069,3 +1069,125 @@ pub fn compute_principal_strain(
         class_name: first.class_name.clone(),
     })
 }
+
+/// The remaining sqrt-of-sum-of-component-squares magnitude derived
+/// (`derived.py.__compute_{nodal_tangential_traction_magnitude,
+/// shear_magnitude}` ~1742 / ~2427) — the same element-wise pattern as
+/// `disp_mag` / `eff_stress`, no connectivity / projection /
+/// cross-derived dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MagnitudeDerived {
+    /// `nodtangmag = sqrt(nodtang_x^2 + nodtang_y^2 + nodtang_z^2)`.
+    Nodtang,
+    /// `shear_magnitude = sqrt(qxx^2 + qyy^2)`.
+    Shear,
+}
+
+/// Resolve a magnitude derived name to `(kind, title)` (`derived.py`
+/// `__derived_expressions` table, ~427 / ~593).
+pub fn magnitude_spec(name: &str) -> Option<(MagnitudeDerived, &'static str)> {
+    match name {
+        "nodtangmag" => Some((
+            MagnitudeDerived::Nodtang,
+            "Nodal Tangential Traction Magnitude",
+        )),
+        "shear_magnitude" => Some((MagnitudeDerived::Shear, "Shear Magnitude")),
+        _ => None,
+    }
+}
+
+/// The component primals this magnitude reads, in kernel order.
+pub fn magnitude_primals(kind: MagnitudeDerived) -> &'static [&'static str] {
+    match kind {
+        MagnitudeDerived::Nodtang => &["nodtang_x", "nodtang_y", "nodtang_z"],
+        MagnitudeDerived::Shear => &["qxx", "qyy"],
+    }
+}
+
+// `sqrt(sum_i c_i^2)` with the squares summed left-associatively
+// exactly as the Python source spells it (`sqrt(((x*x + y*y) + z*z))`
+// / `sqrt((qxx*qxx + qyy*qyy))`); `**2` is numpy `fast_scalar_power`
+// -> `x*x`. Pure primal-dtype arithmetic (generic f32/f64), no scalar
+// constants so no NEP50 promotion to track.
+macro_rules! impl_magnitude {
+    ($fn:ident, $t:ty) => {
+        fn $fn(c: &[&[$t]]) -> Vec<$t> {
+            let n = c[0].len();
+            (0..n)
+                .map(|i| {
+                    let mut acc = c[0][i] * c[0][i];
+                    for col in &c[1..] {
+                        acc += col[i] * col[i];
+                    }
+                    acc.sqrt()
+                })
+                .collect()
+        }
+    };
+}
+
+impl_magnitude!(magnitude_f32, f32);
+impl_magnitude!(magnitude_f64, f64);
+
+/// Compute a magnitude derived from its component primals (same shape
+/// contract as [`compute_stress_invariant`]).
+pub fn compute_magnitude(
+    kind: MagnitudeDerived,
+    primals: &[QueryResult],
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let need = magnitude_primals(kind).len();
+    if primals.len() != need {
+        return Err(MiliError::Unsupported("magnitude primal count mismatch"));
+    }
+    let first = &primals[0];
+    let n = first.values.len();
+    for p in primals {
+        if p.values.len() != n || p.labels.len() != first.labels.len() {
+            return Err(MiliError::Unsupported(
+                "magnitude component primals disagree in shape",
+            ));
+        }
+    }
+
+    let values = match &first.values {
+        StateValues::F32(_) => {
+            let mut cols: Vec<&[f32]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F32(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "magnitude component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F32(magnitude_f32(&cols))
+        }
+        StateValues::F64(_) => {
+            let mut cols: Vec<&[f64]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F64(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "magnitude component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F64(magnitude_f64(&cols))
+        }
+        _ => {
+            return Err(MiliError::Unsupported(
+                "magnitude requires float component primals",
+            ))
+        }
+    };
+
+    Ok(QueryResult {
+        values,
+        labels: first.labels.clone(),
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: first.class_name.clone(),
+    })
+}
