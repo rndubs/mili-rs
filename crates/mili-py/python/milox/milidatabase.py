@@ -24,6 +24,7 @@ runs ``engine.returncode()`` -> ``parse_return_codes`` (which raises
 
 from __future__ import annotations
 
+import warnings
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
@@ -31,9 +32,18 @@ import numpy as np
 import pandas as pd
 
 from ._native import MiliPythonError
-from .datatypes import QueryDict, ReturnCode, ReturnCodeTuple
+from .datatypes import QueryDict, ReturnCode, ReturnCodeTuple, Superclass
 from .mdg_defines import mdg_enum_to_string
 from .miliinternal import _MiliInternal
+from .projection import (
+    beam_to_nodal,
+    hex_to_nodal,
+    particle_to_nodal,
+    quad_to_nodal,
+    tet_to_nodal,
+    tri_to_nodal,
+    truss_to_nodal,
+)
 from .reductions import combine
 from .utils import result_dictionary_to_dataframe
 
@@ -311,6 +321,57 @@ class MiliDatabase:
 
         return merged_results
 
+    def _project_result(
+        self,
+        result: Union[Dict[str, QueryDict], List[Dict[str, QueryDict]]],
+    ) -> Dict[str, QueryDict]:
+        """Verbatim port of upstream ``MiliDatabase.__project_result``
+        (``reference/mili-python/src/mili/milidatabase.py:731``).
+
+        Decision-18/19 non-parity post-process: dispatch on the
+        already-parity-correct ``superclass_from_class_name``
+        (``mili_rs::reshape``) into the ``milox.projection`` routines,
+        which are verbatim numpy over the parity-correct core query /
+        ``nodes_of_elems`` / ``element_volume``. ``combine`` is identity
+        here (the Rust ``DatabaseSet`` already merged — decision 19)."""
+        nodal_result: Dict[str, QueryDict] = {}
+        result = combine(result)
+
+        warnings.warn(
+            "Nodal values are computed by averaging the adjacent element results. This is an "
+            "approximation and may introduce error into the field values. Please exercise caution "
+            "when using these results for analysis work.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+        for result_name, result_dict in result.items():
+            class_name = result_dict["class_name"]
+            superclass = self.superclass_from_class_name(class_name)
+
+            if superclass == Superclass.M_NODE:
+                nodal_result[result_name] = result_dict
+            elif superclass == Superclass.M_HEX:
+                nodal_result[result_name] = hex_to_nodal(self, result_dict)
+            elif superclass == Superclass.M_QUAD:
+                nodal_result[result_name] = quad_to_nodal(self, result_dict)
+            elif superclass == Superclass.M_TRI:
+                nodal_result[result_name] = tri_to_nodal(self, result_dict)
+            elif superclass == Superclass.M_BEAM:
+                nodal_result[result_name] = beam_to_nodal(self, result_dict)
+            elif superclass == Superclass.M_TRUSS:
+                nodal_result[result_name] = truss_to_nodal(self, result_dict)
+            elif superclass == Superclass.M_TET:
+                nodal_result[result_name] = tet_to_nodal(self, result_dict)
+            elif superclass == Superclass.M_PARTICLE or superclass == Superclass.M_INODE:
+                nodal_result[result_name] = particle_to_nodal(self, result_dict)
+            else:
+                raise NotImplementedError(
+                    f"Projection is not supported for the type {superclass}"
+                )
+
+        return nodal_result
+
     def query(
         self,
         svar_names: Union[List[str], str],
@@ -379,11 +440,7 @@ class MiliDatabase:
             )
 
         if project_to_nodes:
-            raise MiliPythonError(
-                "project_to_nodes: not yet ported (mili-py M4-followup "
-                "phase H projection sub-slice; see planning/mili-py/m4.md "
-                "decision 19)"
-            )
+            result = self._project_result(result)
 
         if as_dataframe:
             return result_dictionary_to_dataframe(result)

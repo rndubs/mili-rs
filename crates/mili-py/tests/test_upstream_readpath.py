@@ -44,6 +44,7 @@ _REDIRECT = {
     "mili.adjacency": milox.adjacency,
     "mili.reductions": milox.reductions,
     "mili.utils": milox.utils,
+    "mili.projection": milox.projection,
 }
 
 # Tests in redirected modules that exercise still-unported surface.
@@ -67,12 +68,11 @@ _MDB_PARALLEL_CLASSES = (
     "LoopWrapperContextManagerParallelTests",
     "ServerWrapperContextManagerParallelTests",
 )
-# Serial read-half methods that need a still-unported core engine
-# (geometry / derived / projection / query result-modifiers — none of
-# which the Phase-G primal surface provides). Honest Phase-H xfail.
-_MDB_PHASE_H_METHODS = {
-    "test_query_project_to_nodes": "Phase H: projection engine",
-}
+# Serial read-half methods that need a still-unported core engine.
+# The projection sub-slice landed (milox.projection verbatim port +
+# MiliDatabase._project_result), so test_query_project_to_nodes is no
+# longer xfailed — nothing else in the Phase-G read half is unported.
+_MDB_PHASE_H_METHODS: dict[str, str] = {}
 # Parallel-class methods that legitimately *pass* now that the
 # ResultModifier reductions are ported: the AVERAGE dataframe reduces to
 # one partition-independent value per state (no per-proc label axis), so
@@ -405,6 +405,7 @@ _REDIRECTED = [
     "test_adjacency",
     "test_reductions",
     "test_derived",
+    "test_projection",
 ]
 
 
