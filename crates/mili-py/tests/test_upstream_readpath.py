@@ -45,6 +45,7 @@ _REDIRECT = {
     "mili.reductions": milox.reductions,
     "mili.utils": milox.utils,
     "mili.projection": milox.projection,
+    "mili.grizinterface": milox.grizinterface,
 }
 
 # Tests in redirected modules that exercise still-unported surface.
@@ -406,6 +407,7 @@ _REDIRECTED = [
     "test_reductions",
     "test_derived",
     "test_projection",
+    "test_grizinterface",
 ]
 
 

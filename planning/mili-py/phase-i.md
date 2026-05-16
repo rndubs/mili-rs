@@ -1,6 +1,6 @@
 # Phase I — parallel per-proc-unmerged surface
 
-> **Status: I.1 LANDED; I.2 next.** This is the self-contained
+> **Status: I.1 + I.2 LANDED; I.3 next.** This is the self-contained
 > entry-point doc for the parallel slice. The summary + decision 20
 > live in [`m4.md`](m4.md) § "Phase I"; this file carries the
 > reproducible starting state so a fresh session can pick it up
@@ -30,8 +30,8 @@ bucket**: the parallel per-proc-*unmerged* handler surface. Breakdown
 | `test_projection`  | 0 / 5 |
 | `test_reader`      | 0 / 7 |
 
-Plus `test_grizinterface` (4 cases, **not yet in the harness's
-`_REDIRECTED` list**). Everything else (serial primal / reshape /
+Plus `test_grizinterface` (4 cases — **redirected + green as of
+I.2**). Everything else (serial primal / reshape /
 geometry / adjacency / reductions / derived value engine / projection)
 is green.
 
@@ -155,17 +155,58 @@ and `.../parallel/basic1` (the corpora the parallel tests use). Follow
 the existing `parity_*.rs` pattern (skip-not-fail when the submodule /
 oracle is absent — see `CLAUDE.md`).
 
-### Phase I.2 — milox `LoopWrapper`/`ServerWrapper` per-proc forwarding
+### Phase I.2 — milox `LoopWrapper`/`ServerWrapper` per-proc forwarding  ✅ **LANDED**
 
-Replace the marker passthrough in
-`crates/mili-py/python/milox/parallel.py` with upstream's
-method-forwarding contract (verbatim port of the `parallel.py:19-356`
-forwarding skeleton) over the Phase-I.1 accessors: each public method
-→ the per-proc list. Port `grizinterface.py` into
-`crates/mili-py/python/milox/grizinterface.py` and wire
-`test_grizinterface` into the harness's `_REDIRECTED` +
-`_REDIRECT` (`"mili.grizinterface": milox.grizinterface`).
-**Green: redirected `test_grizinterface` (4 cases).**
+The marker `__getattr__`-passthrough in
+`crates/mili-py/python/milox/parallel.py` was replaced with the
+upstream per-proc forwarding contract adapted onto the Phase-I.1
+`*_per_fragment()` accessors (decision 20 shape (a):
+`db.<m>_per_fragment(...)` *is* upstream's
+`[proc.<m>(...) for proc in procs]`). `grizinterface.py` ported
+**verbatim** into `crates/mili-py/python/milox/grizinterface.py`
+(imports rebased `mili.*`→`.`; bodies byte-for-byte); wired into the
+harness `_REDIRECT` (`"mili.grizinterface": milox.grizinterface`) +
+`_REDIRECTED`. **Redirected `test_grizinterface` (4 cases) green;
+milox 542 → 546 pass / 287 xfail unchanged.**
+
+**Decision (recorded — the I.2/I.4 boundary, no surprise):** the
+forwarding is **`merge_results`-gated** and **scoped to the
+`GrizInterface.__init__` per-proc contract**, not a blanket
+"every public method → per-proc":
+
+- The wrapper now carries `merge_results` (threaded from
+  `reader.open_database`). `merge_results=True` keeps the
+  **merged** single-`Set` accessor (the Rust `DatabaseSet` already
+  performed upstream's reduction — decision 19; the Python combine
+  is identity). This is mandatory, not optional: the
+  `test_reductions` `TestServerWrapperReductions` /
+  `TestLoopWrapperReductions` classes open the *parallel* db with
+  `merge_results=True` and their non-xfailed methods
+  (`test_class_names`/`test_mesh_dimensions`/`test_srec_fmt_qty`/
+  `test_state_maps`/…) compare it against the *serial* merged db —
+  a blanket per-proc wrapper would regress those **already-green**
+  cases (a 542 drop), which is why upstream's
+  `MiliDatabase.__postprocess`-applies-`combine` split maps in milox
+  to *the wrapper being merge-aware* (the I.3 re-reduce only moves
+  *where* the `True` merge happens, never its result).
+- Under `merge_results=False`, only the methods
+  `GrizInterface.__init__` actually consumes per-proc
+  (`class_names`, `state_maps`, `mesh_dimensions`, `srec_fmt_qty`,
+  `parameters`, and the `db._mili.*` direct reads
+  `connectivity_ids` / `mesh_object_classes` / `subrecords`) route
+  to their `*_per_fragment()` sibling; every other field
+  `GrizInterface` merely stores, so the merged shape satisfies it.
+  Methods outside that set stay merged under `merge_results=False`
+  too — so the standing `_MDB_PARALLEL_CLASSES`
+  (`merge_results=False`) bucket does **not** incidentally flip:
+  its `state_maps` / `mesh_object_classes` / `reload_state_maps`
+  assertions still legitimately differ (raw per-proc dicts/tuples
+  are not the upstream `StateMap` / `Dict[str,MeshObjectClass]`
+  shape — verified: `_MDB_PARALLEL_CLASSES`/`_ADJ_PARALLEL_CLASSES`/
+  `_REDUCTIONS_*` all hold, 287 xfail unmoved). The remaining
+  per-proc accessor surface + the xfail-bucket promotion is **I.4**;
+  the `merge_results=True` re-reduce relocation is **I.3** — exactly
+  the phased split this doc already prescribes.
 
 ### Phase I.3 — `merge_results=True` re-reduce (highest risk)
 
