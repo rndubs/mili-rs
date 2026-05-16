@@ -1714,6 +1714,550 @@ impl PyMiliDatabase {
         }
         Ok(out)
     }
+
+    // ---- Phase I.1: per-fragment (merge_results=False) read surface ----
+    //
+    // Decision (planning/mili-py/phase-i.md, m4.md decision 20):
+    // option (a) — `*_per_fragment()` siblings returning a per-fragment
+    // list (a 1-element list for the `Single` backend, matching
+    // upstream's 1-proc `_MiliInternal` selection). This is exactly the
+    // `[proc.method(...) for proc in procs]` shape upstream's
+    // LoopWrapper/ServerWrapper forwarding (Phase I.2) consumes. No
+    // merge logic is touched — the `DatabaseSet` merge stays the
+    // `merge_results=True` path (decision 19 invariant intact); these
+    // accessors expose the *already-parity-correct* per-fragment
+    // `Database` outputs verbatim (decision 20).
+
+    /// Fragment (== MPI rank) count. `Single` → 1.
+    fn fragment_count(&self) -> usize {
+        self.frags().len()
+    }
+
+    fn times_per_fragment(&self) -> Vec<Vec<f64>> {
+        self.frags()
+            .iter()
+            .map(|f| f.times().into_iter().map(f64::from).collect())
+            .collect()
+    }
+
+    fn state_count_per_fragment(&self) -> Vec<usize> {
+        self.frags().iter().map(|f| f.state_count()).collect()
+    }
+
+    fn mesh_dimensions_per_fragment(&self) -> PyResult<Vec<i32>> {
+        self.frags()
+            .iter()
+            .map(|f| f.mesh_dimensions().map_err(|e| to_pyerr(&e)))
+            .collect()
+    }
+
+    fn srec_fmt_qty_per_fragment(&self) -> Vec<i32> {
+        self.frags().iter().map(|f| f.srec_fmt_qty()).collect()
+    }
+
+    fn class_names_per_fragment(&self) -> Vec<Vec<String>> {
+        let mesh = self.mesh;
+        self.frags().iter().map(|f| f.class_names(mesh)).collect()
+    }
+
+    fn material_numbers_per_fragment(&self, py: Python<'_>) -> PyResult<Vec<Vec<i32>>> {
+        py.allow_threads(|| {
+            self.frags()
+                .iter()
+                .map(|f| f.material_numbers())
+                .collect::<mili_rs::Result<Vec<_>>>()
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// Per-fragment labels of a single class (upstream
+    /// `labels(class_name)`; `[]` when the fragment declares none).
+    fn labels_of_class_per_fragment(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+    ) -> PyResult<Vec<Vec<i32>>> {
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.frags()
+                .iter()
+                .map(|f| f.labels(mesh, class_name).map(Option::unwrap_or_default))
+                .collect::<mili_rs::Result<Vec<_>>>()
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// Per-fragment `{class_name: [labels]}` (the no-arg `labels()`
+    /// dict, per fragment).
+    fn labels_per_fragment<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let mesh = self.mesh;
+        let collected: Vec<Vec<(String, Vec<i32>)>> = py.allow_threads(|| {
+            self.frags()
+                .iter()
+                .map(|f| {
+                    let mut out = Vec::new();
+                    for name in f.class_names(mesh) {
+                        if let Ok(Some(v)) = f.labels(mesh, &name) {
+                            out.push((name, v));
+                        }
+                    }
+                    out
+                })
+                .collect()
+        });
+        collected
+            .into_iter()
+            .map(|frag| {
+                let d = PyDict::new_bound(py);
+                for (k, v) in frag {
+                    d.set_item(k, v)?;
+                }
+                Ok(d)
+            })
+            .collect()
+    }
+
+    fn materials_per_fragment<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let maps = py
+            .allow_threads(|| {
+                self.frags()
+                    .iter()
+                    .map(|f| f.materials())
+                    .collect::<mili_rs::Result<Vec<_>>>()
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        maps.into_iter().map(|m| map_to_pydict(py, m)).collect()
+    }
+
+    fn parameters_per_fragment<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let frags = self.frags();
+        let mut out = Vec::with_capacity(frags.len());
+        for f in frags {
+            let pd = py
+                .allow_threads(|| f.parameters())
+                .map_err(|e| to_pyerr(&e))?;
+            let d = PyDict::new_bound(py);
+            for (k, v) in pd {
+                d.set_item(k, param_to_py(py, v))?;
+            }
+            out.push(d);
+        }
+        Ok(out)
+    }
+
+    /// Per-fragment state-map list (the fragment-local `file_number` /
+    /// `file_offset` / `time`; not the rank-0 reduction).
+    fn state_maps_per_fragment<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Vec<Bound<'py, PyDict>>>> {
+        let mut out = Vec::new();
+        for f in self.frags() {
+            let mut frag = Vec::new();
+            for sm in f.states() {
+                let d = PyDict::new_bound(py);
+                d.set_item("file_number", sm.file)?;
+                d.set_item("file_offset", sm.offset)?;
+                d.set_item("time", f64::from(sm.time))?;
+                frag.push(d);
+            }
+            out.push(frag);
+        }
+        Ok(out)
+    }
+
+    fn mesh_object_classes_per_fragment<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Vec<Bound<'py, PyList>>> {
+        let mesh = self.mesh;
+        let per = py
+            .allow_threads(|| {
+                self.frags()
+                    .iter()
+                    .map(|f| f.mesh_object_classes(mesh))
+                    .collect::<mili_rs::Result<Vec<_>>>()
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        Ok(per
+            .into_iter()
+            .map(|info| {
+                let rows: Vec<_> = info
+                    .into_iter()
+                    .map(|c| {
+                        (
+                            c.short_name,
+                            c.mesh_id,
+                            c.long_name,
+                            c.sclass,
+                            c.elem_qty,
+                            c.idents_exist,
+                        )
+                    })
+                    .collect();
+                PyList::new_bound(py, rows)
+            })
+            .collect())
+    }
+
+    fn subrecords_per_fragment<'py>(&self, py: Python<'py>) -> Vec<Bound<'py, PyList>> {
+        let mesh = self.mesh;
+        let per: Vec<_> = py.allow_threads(|| {
+            self.frags()
+                .iter()
+                .map(|f| f.subrecords(mesh))
+                .collect::<Vec<_>>()
+        });
+        per.into_iter()
+            .map(|info| {
+                let rows: Vec<_> = info
+                    .into_iter()
+                    .map(|s| {
+                        (
+                            s.name,
+                            s.class_name,
+                            s.superclass,
+                            s.organization,
+                            s.qty_svars,
+                            s.svar_names,
+                            s.ordinal_blocks,
+                        )
+                    })
+                    .collect();
+                PyList::new_bound(py, rows)
+            })
+            .collect()
+    }
+
+    /// Per-fragment initial nodal coordinates — one `np.float32`
+    /// `(n_nodes, mesh_dim)` array per fragment.
+    fn nodes_per_fragment<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyArray2<f32>>>> {
+        let mesh = self.mesh;
+        let per = py
+            .allow_threads(|| {
+                self.frags()
+                    .iter()
+                    .map(|f| f.node_coords(mesh))
+                    .collect::<mili_rs::Result<Vec<_>>>()
+            })
+            .map_err(|e| to_pyerr(&e))?;
+        per.into_iter()
+            .map(|got| {
+                let (data, dims) = got.unwrap_or_default();
+                array2(py, data, dims.max(1))
+            })
+            .collect()
+    }
+
+    /// Per-fragment element connectivity as zero-based node **ids**.
+    /// Same per-fragment-list contract as [`Self::connectivity_ids`]:
+    /// with `class_name` → one array per fragment; without → one
+    /// `{class_name: array}` dict per fragment.
+    #[pyo3(signature = (class_name=None))]
+    fn connectivity_ids_per_fragment<'py>(
+        &self,
+        py: Python<'py>,
+        class_name: Option<String>,
+    ) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        let mesh = self.mesh;
+        let frags = self.frags();
+        let mut out = Vec::with_capacity(frags.len());
+        if let Some(name) = class_name {
+            for f in frags {
+                let got = py
+                    .allow_threads(|| f.connectivity_ids(mesh, &name))
+                    .map_err(|e| to_pyerr(&e))?;
+                out.push(match got {
+                    Some((data, ncols)) => array2(py, data, ncols)?.into_any(),
+                    None => PyArray1::<i32>::zeros_bound(py, 0, false).into_any(),
+                });
+            }
+            return Ok(out);
+        }
+        for f in frags {
+            let names = f.class_names(mesh);
+            let d = PyDict::new_bound(py);
+            for name in names {
+                let got = py
+                    .allow_threads(|| f.connectivity_ids(mesh, &name))
+                    .map_err(|e| to_pyerr(&e))?;
+                if let Some((data, ncols)) = got {
+                    d.set_item(name, array2(py, data, ncols)?)?;
+                }
+            }
+            out.push(d.into_any());
+        }
+        Ok(out)
+    }
+
+    /// Per-fragment `(materials, class_ok)` for a class name.
+    fn materials_of_class_name_per_fragment(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+    ) -> PyResult<Vec<(Vec<i32>, bool)>> {
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.frags()
+                .iter()
+                .map(|f| {
+                    f.materials_of_class_name(mesh, class_name)
+                        .map(|r| r.map_or((vec![], false), |v| (v, true)))
+                })
+                .collect::<mili_rs::Result<Vec<_>>>()
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// Per-fragment `(parts, class_ok)` for a class name.
+    fn parts_of_class_name_per_fragment(
+        &self,
+        py: Python<'_>,
+        class_name: &str,
+    ) -> PyResult<Vec<(Vec<i32>, bool)>> {
+        let mesh = self.mesh;
+        py.allow_threads(|| {
+            self.frags()
+                .iter()
+                .map(|f| {
+                    f.parts_of_class_name(mesh, class_name)
+                        .map(|r| r.map_or((vec![], false), |v| (v, true)))
+                })
+                .collect::<mili_rs::Result<Vec<_>>>()
+        })
+        .map_err(|e| to_pyerr(&e))
+    }
+
+    /// Per-fragment **primal** `query()` — one upstream `QueryDict` per
+    /// fragment (the `merge_results=False` per-proc list). Mirrors
+    /// upstream's per-proc `_MiliInternal.query`, which is primal-only
+    /// (the derived layer lives in the `MiliDatabase` wrapper, not
+    /// `_MiliInternal`); a fragment that does not carry the class /
+    /// svar contributes an empty entry (the `LoopWrapper` leniency,
+    /// matching [`DatabaseSet::query`]). No entity-axis merge.
+    #[pyo3(signature = (svar_names, entity_type, material=None, labels=None, states=None, ips=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn query_per_fragment<'py>(
+        &self,
+        py: Python<'py>,
+        svar_names: &Bound<'py, PyAny>,
+        entity_type: String,
+        material: Option<&Bound<'py, PyAny>>,
+        labels: Option<&Bound<'py, PyAny>>,
+        states: Option<&Bound<'py, PyAny>>,
+        ips: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        let raw_svars: Vec<String> = if let Ok(s) = svar_names.extract::<String>() {
+            vec![s]
+        } else {
+            svar_names.extract::<Vec<String>>()?
+        };
+        let mut svars: Vec<String> = Vec::with_capacity(raw_svars.len());
+        for s in raw_svars {
+            if !svars.contains(&s) {
+                svars.push(s);
+            }
+        }
+        for s in &svars {
+            if mili_rs::node_disp_spec(s).is_some()
+                || mili_rs::node_disp_mag_spec(s).is_some()
+                || mili_rs::node_vel_spec(s).is_some()
+                || mili_rs::node_acc_spec(s).is_some()
+                || mili_rs::stress_invariant_spec(s).is_some()
+                || mili_rs::principal_stress_spec(s).is_some()
+                || mili_rs::principal_strain_spec(s).is_some()
+                || mili_rs::magnitude_spec(s).is_some()
+                || mili_rs::surfstrain_spec(s).is_some()
+            {
+                return Err(MiliPythonError::new_err(
+                    "query_per_fragment is the primal per-proc \
+                     `_MiliInternal` surface; derived families are the \
+                     `MiliDatabase`-wrapper layer (Phase I.2/I.3)",
+                ));
+            }
+        }
+
+        let material_nums: Option<Vec<i32>> = match material {
+            None => None,
+            Some(m) if m.is_none() => None,
+            Some(m) => Some(self.resolve_material(py, m)?),
+        };
+        let labels_vec: Option<Vec<i32>> = match labels {
+            None => None,
+            Some(l) if l.is_none() => None,
+            Some(l) => Some(extract_int_list::<i32>(l)?),
+        };
+        let mut ips_vec: Option<Vec<usize>> = match ips {
+            None => None,
+            Some(i) if i.is_none() => None,
+            Some(i) => {
+                let mut v = extract_int_list::<i64>(i)?;
+                v.sort_unstable();
+                v.dedup();
+                Some(v.into_iter().map(|x| x.max(0) as usize).collect())
+            }
+        };
+        if ips_vec.as_ref().is_some_and(Vec::is_empty) {
+            ips_vec = None;
+        }
+
+        let frags = self.frags();
+        let mut out = Vec::with_capacity(frags.len());
+        for f in frags {
+            let n_states = f.state_count();
+            let state_nums: Vec<i64> = match states {
+                None => (1..=n_states as i64).collect(),
+                Some(s) if s.is_none() => (1..=n_states as i64).collect(),
+                Some(s) => {
+                    let mut v: Vec<i64> = extract_int_list::<i64>(s)?
+                        .into_iter()
+                        .map(|x| if x < 0 { n_states as i64 + x + 1 } else { x })
+                        .collect();
+                    v.sort_unstable();
+                    v.dedup();
+                    v
+                }
+            };
+            let state_idx: Vec<usize> = state_nums
+                .iter()
+                .map(|&s| {
+                    usize::try_from(s - 1).map_err(|_| {
+                        MiliPythonError::new_err(format!(
+                            "Attempting to query states that do not exist. \
+                             Minimum state = 1, Maximum state = {n_states}"
+                        ))
+                    })
+                })
+                .collect::<PyResult<_>>()?;
+            let times: Vec<f64> = f.times().into_iter().map(f64::from).collect();
+
+            let entry_dict = PyDict::new_bound(py);
+            for svar in &svars {
+                let args = QueryArgs {
+                    svar,
+                    class: &entity_type,
+                    labels: labels_vec.as_deref(),
+                    states: &state_idx,
+                    materials: material_nums.as_deref(),
+                    ips: ips_vec.as_deref(),
+                    subrec: None,
+                };
+                let res = py.allow_threads(|| f.query_full(&args));
+                match res {
+                    Ok(r) => {
+                        let entry = build_query_entry(py, r, &state_nums, &state_idx, &times)?;
+                        entry_dict.set_item(svar, entry)?;
+                    }
+                    Err(MiliError::UnknownClass(_) | MiliError::NoMatchingSubrec { .. }) => {
+                        // `LoopWrapper` leniency: a fragment lacking the
+                        // class / svar contributes an empty entry.
+                        let entry = empty_query_entry(py, &entity_type, svar, &state_nums, &times)?;
+                        entry_dict.set_item(svar, entry)?;
+                    }
+                    Err(e) => return Err(to_pyerr(&e)),
+                }
+            }
+            out.push(entry_dict);
+        }
+        Ok(out)
+    }
+}
+
+/// Build the upstream `QueryDict` entry for one resolved
+/// [`QueryResult`] (the `{class_name, source, title, data, layout,
+/// modifier}` shape). Factored so the per-fragment primal path and the
+/// merged `query()` share the exact layout contract.
+fn build_query_entry<'py>(
+    py: Python<'py>,
+    res: QueryResult,
+    state_nums: &[i64],
+    state_idx: &[usize],
+    times: &[f64],
+) -> PyResult<Bound<'py, PyDict>> {
+    let n_st = state_idx.len();
+    let n_lab = res.labels.len();
+    let denom = n_st * n_lab;
+    let n_comp = if denom == 0 {
+        res.components.len()
+    } else {
+        res.values.len() / denom
+    };
+
+    let layout = PyDict::new_bound(py);
+    layout.set_item(
+        "states",
+        state_nums
+            .iter()
+            .map(|&s| s as i32)
+            .collect::<Vec<_>>()
+            .into_pyarray_bound(py),
+    )?;
+    layout.set_item("labels", res.labels.clone().into_pyarray_bound(py))?;
+    layout.set_item("components", PyList::new_bound(py, &res.components))?;
+    layout.set_item(
+        "times",
+        state_idx
+            .iter()
+            .map(|&i| times[i])
+            .collect::<Vec<f64>>()
+            .into_pyarray_bound(py),
+    )?;
+
+    let entry = PyDict::new_bound(py);
+    entry.set_item("class_name", &res.class_name)?;
+    entry.set_item("source", "primal")?;
+    entry.set_item("title", &res.title)?;
+    entry.set_item(
+        "data",
+        state_values_3d(py, res.values, n_st, n_lab, n_comp)?,
+    )?;
+    entry.set_item("layout", layout)?;
+    entry.set_item("modifier", "")?;
+    Ok(entry)
+}
+
+/// The empty `QueryDict` entry a fragment that does not carry the
+/// requested class / svar contributes (the `LoopWrapper` per-proc
+/// leniency): zero entities, an `(n_states, 0, 0)` data array.
+fn empty_query_entry<'py>(
+    py: Python<'py>,
+    class_name: &str,
+    svar: &str,
+    state_nums: &[i64],
+    times: &[f64],
+) -> PyResult<Bound<'py, PyDict>> {
+    let n_st = state_nums.len();
+    let layout = PyDict::new_bound(py);
+    layout.set_item(
+        "states",
+        state_nums
+            .iter()
+            .map(|&s| s as i32)
+            .collect::<Vec<_>>()
+            .into_pyarray_bound(py),
+    )?;
+    layout.set_item("labels", Vec::<i32>::new().into_pyarray_bound(py))?;
+    layout.set_item("components", PyList::new_bound(py, [svar]))?;
+    layout.set_item(
+        "times",
+        state_nums
+            .iter()
+            .enumerate()
+            .map(|(i, _)| times.get(i).copied().unwrap_or(0.0))
+            .collect::<Vec<f64>>()
+            .into_pyarray_bound(py),
+    )?;
+    let entry = PyDict::new_bound(py);
+    entry.set_item("class_name", class_name)?;
+    entry.set_item("source", "primal")?;
+    entry.set_item("title", svar)?;
+    entry.set_item(
+        "data",
+        state_values_3d(py, StateValues::F32(vec![]), n_st, 0, 0)?,
+    )?;
+    entry.set_item("layout", layout)?;
+    entry.set_item("modifier", "")?;
+    Ok(entry)
 }
 
 /// Reshape a flat `[state][label][atom]` [`StateValues`] into a 3-D
@@ -1770,6 +2314,17 @@ impl PyMiliDatabase {
         match &self.backend {
             Backend::Single(db) => db,
             Backend::Set(s) => s.fragment(0).expect("DatabaseSet has >= 1 fragment"),
+        }
+    }
+
+    /// Per-fragment `Database` list in rank order. `Single` is a
+    /// 1-element list (a serial db is a 1-proc family — matches
+    /// upstream's 1-proc `_MiliInternal` selection); `Set` is every
+    /// fragment. Backs the Phase I.1 `*_per_fragment()` surface.
+    fn frags(&self) -> Vec<&Database> {
+        match &self.backend {
+            Backend::Single(db) => vec![db.as_ref()],
+            Backend::Set(s) => s.fragments().iter().collect(),
         }
     }
 

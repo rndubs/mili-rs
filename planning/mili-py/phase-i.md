@@ -1,6 +1,6 @@
 # Phase I — parallel per-proc-unmerged surface
 
-> **Status: SCOPED, not started.** This is the self-contained
+> **Status: I.1 LANDED; I.2 next.** This is the self-contained
 > entry-point doc for the parallel slice. The summary + decision 20
 > live in [`m4.md`](m4.md) § "Phase I"; this file carries the
 > reproducible starting state so a fresh session can pick it up
@@ -108,15 +108,35 @@ already-bit-exact per-fragment `Database` outputs.
 
 ## Phased plan (each its own parity-validated PR)
 
-### Phase I.1 — per-fragment FFI accessors  ← **start here**
+### Phase I.1 — per-fragment FFI accessors  ✅ **LANDED**
 
-Add a per-fragment read surface to `crates/mili-py/src/database.rs`
-backed by the existing `DatabaseSet::fragment(rank)` /
-`fragment_count()`. Shape options (decide in I.1, record the choice):
-(a) `*_per_fragment()` sibling methods returning `List[<serial shape>]`,
-or (b) a lightweight `fragment_view(rank)` handle exposing the serial
-accessor set. The `Single` backend returns a 1-element list (a serial
-db is a 1-proc family — matches upstream `_MiliInternal` selection).
+**Shape decision: option (a) — `*_per_fragment()` siblings returning
+a per-fragment list** (1-element for the `Single` backend). Chosen
+over the `fragment_view(rank)` handle because it is exactly the
+`[proc.method(...) for proc in procs]` shape upstream's
+`LoopWrapper`/`ServerWrapper` forwarding (I.2) consumes — the direct
+FFI primitive for I.2 — whereas a borrowing handle would need PyO3
+shared-ownership/lifetime gymnastics over `DatabaseSet`-owned
+fragments for no contract benefit. Added to
+`crates/mili-py/src/database.rs` (a new `frags()` helper over
+`DatabaseSet::fragment(rank)`): `fragment_count`,
+`{times,state_count,mesh_dimensions,srec_fmt_qty,class_names,
+material_numbers,labels_of_class,labels,materials,parameters,
+state_maps,mesh_object_classes,subrecords,nodes,connectivity_ids,
+materials_of_class_name,parts_of_class_name,query}_per_fragment`
+(`query_per_fragment` is primal-only — upstream's per-proc
+`_MiliInternal.query` is primal; derived is the wrapper layer,
+I.2/I.3 — with the `LoopWrapper` empty-entry leniency). No merge
+logic touched. **Parity gate `parity_per_fragment.rs` green**;
+milox suite unchanged at **542 / 287 xfail** (additive API + Rust
+parity test, no behavior change; harness intentionally not narrowed
+— promotion is I.4).
+
+Original scope text (kept for I.2 reference): Add a per-fragment
+read surface to `crates/mili-py/src/database.rs` backed by the
+existing `DatabaseSet::fragment(rank)` / `fragment_count()`. The
+`Single` backend returns a 1-element list (a serial db is a 1-proc
+family — matches upstream `_MiliInternal` selection).
 
 Accessor set the parallel suite touches (from the GrizInterface +
 wrapper-class audit): `class_names`, `parameters`, `subrecords`,
