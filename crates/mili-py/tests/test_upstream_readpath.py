@@ -206,9 +206,14 @@ _DERIVED_LISTING_METHODS = {
 # invariants (pressure / eff_stress / triaxiality / norm_press) are
 # pure element-wise arithmetic over the 6 stress component primals
 # on the requested element class (f32/f64-generic, numpy NEP50 weak-
-# scalar promotion). The eigenvalue-based principal-stress /
-# principal-dev-stress / max-shear-stress family, the strain
-# invariants, and the remaining geometry-ish derived
+# scalar promotion). The eigenvalue-based stress invariants
+# (prin_stress1-3 / prin_dev_stress1-3 / max_shear_stress) build the
+# symmetric stress (or deviatoric) 3x3 from the 6 component primals
+# and read a symmetric-3x3 Jacobi eigensolver in the core (computed
+# in f64, cast to the primal dtype — bit-identical to numpy's f32
+# eigvalsh at every literal-checked point). The strain invariants
+# (vol_strain / prin_strain* / prin_dev_strain* / the *_alt griz
+# closed-form variants) and the remaining geometry-ish derived
 # (centroid/element_volume/…) are later sub-slices.
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
@@ -229,6 +234,13 @@ _DERIVED_SERIAL_PASSING = {
     "test_triaxiality",
     "test_normalized_pressure",
     "test_query_multiple_variables",
+    "test_prin_stress1",
+    "test_prin_stress2",
+    "test_prin_stress3",
+    "test_prin_dev_stress1",
+    "test_prin_dev_stress2",
+    "test_prin_dev_stress3",
+    "test_max_shear_stress",
 }
 
 

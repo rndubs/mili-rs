@@ -20,11 +20,14 @@
 //!
 //! Velocities / accelerations (finite-difference over states) landed
 //! in their own sub-slice; the scalar stress invariants (`pressure`,
-//! `eff_stress`, `triaxiality`, `norm_press`) are below. The
-//! eigenvalue-based principal-stress / principal-dev-stress /
-//! max-shear-stress family (and the strain analogues) are a later
-//! sub-slice — they need a symmetric-3x3 eigensolver, a distinct
-//! numerical unit. The reduction (`ResultModifier`) math is a
+//! `eff_stress`, `triaxiality`, `norm_press`) and the eigenvalue-based
+//! principal-stress / principal-dev-stress / max-shear-stress family
+//! are below (the latter on a symmetric-3x3 Jacobi eigensolver,
+//! computed in f64 then cast to the primal dtype — bit-identical to
+//! numpy's native `eigvalsh` at every literal-checked point). The
+//! strain analogues (`vol_strain`, `prin_strain*`, `prin_dev_strain*`,
+//! the `*_alt` griz closed-form variants) are a later sub-slice. The
+//! reduction (`ResultModifier`) math is a
 //! decision-18 Python-over-primal post-process and lives in `milox`,
 //! not here.
 
@@ -657,6 +660,230 @@ pub fn compute_stress_invariant(
         _ => {
             return Err(MiliError::Unsupported(
                 "stress invariants require float stress primals",
+            ))
+        }
+    };
+
+    Ok(QueryResult {
+        values,
+        labels: first.labels.clone(),
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: first.class_name.clone(),
+    })
+}
+
+/// Ascending eigenvalues of a symmetric 3x3 matrix via classic cyclic
+/// Jacobi rotations, all in f64.
+///
+/// Upstream computes `prin_stress*` / `prin_dev_stress*` /
+/// `max_shear_stress` with `np.linalg.eigvalsh` (LAPACK `?syevd`) on
+/// the primal-dtype matrix. LAPACK's exact bits are
+/// implementation-defined and not reproducible from a hand-written
+/// solver, **but** for these well-conditioned 3x3 stress matrices the
+/// eigenvalues computed in f64 and rounded to f32 are bit-identical to
+/// numpy's native f32 `eigvalsh` at every literal-checked test point
+/// (empirically verified across the brick/shell/beam corpus, all IP
+/// configs; the loose `test_derived` deltas — written to absorb the
+/// Griz-C vs numpy spread — leave ample margin). So: assemble the
+/// matrix in the primal dtype (numpy's matrix entries), promote to
+/// f64, eigensolve here, cast the eigenvalues back to the primal
+/// dtype. The rotation/threshold/sort schedule is fixed (50 sweeps,
+/// `1e-300` off-diagonal cutoff, `copysign` tangent) — that exact
+/// schedule is what was validated bit-for-bit against the oracle.
+fn jacobi_eigvalsh_sym3(mut a: [[f64; 3]; 3]) -> [f64; 3] {
+    for _ in 0..50 {
+        if a[0][1].abs() + a[0][2].abs() + a[1][2].abs() < 1e-300 {
+            break;
+        }
+        for &(p, q) in &[(0usize, 1usize), (0, 2), (1, 2)] {
+            let apq = a[p][q];
+            if apq == 0.0 {
+                continue;
+            }
+            let theta = (a[q][q] - a[p][p]) / (2.0 * apq);
+            // Python special-cases `th == 0.0` to `t = 1.0` (also picks
+            // up -0.0, which `copysign` would otherwise send to -1.0).
+            let t = if theta == 0.0 {
+                1.0
+            } else {
+                1.0_f64.copysign(theta) / (theta.abs() + (theta * theta + 1.0).sqrt())
+            };
+            let c = 1.0 / (t * t + 1.0).sqrt();
+            let s = t * c;
+            // Column then row rotation, unrolled over k = 0..3 (the
+            // 2-D mixed indexing isn't a plain range-loop pattern).
+            for k in [0usize, 1, 2] {
+                let (akp, akq) = (a[k][p], a[k][q]);
+                a[k][p] = c * akp - s * akq;
+                a[k][q] = s * akp + c * akq;
+            }
+            for k in [0usize, 1, 2] {
+                let (apk, aqk) = (a[p][k], a[q][k]);
+                a[p][k] = c * apk - s * aqk;
+                a[q][k] = s * apk + c * aqk;
+            }
+        }
+    }
+    let mut ev = [a[0][0], a[1][1], a[2][2]];
+    // Python `sorted(...)` ascending; the stress data is finite so the
+    // total order is well-defined (the `unwrap_or` never triggers).
+    ev.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    ev
+}
+
+/// The eigenvalue-based stress invariants
+/// (`derived.py.__compute_{principal_stress,principal_dev_stress,
+/// max_shear_stress}` ~1422-1607). Each builds the symmetric stress
+/// (or deviatoric) 3x3 and reads `eigvalsh`; the strain analogues are
+/// a later sub-slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalStress {
+    Prin1,
+    Prin2,
+    Prin3,
+    Dev1,
+    Dev2,
+    Dev3,
+    MaxShear,
+}
+
+/// Resolve an eigenvalue-stress derived name to `(kind, title)`
+/// (`derived.py` `__derived_expressions` table, ~291-395).
+pub fn principal_stress_spec(name: &str) -> Option<(PrincipalStress, &'static str)> {
+    match name {
+        "prin_stress1" => Some((PrincipalStress::Prin1, "Principal Stress 1")),
+        "prin_stress2" => Some((PrincipalStress::Prin2, "Principal Stress 2")),
+        "prin_stress3" => Some((PrincipalStress::Prin3, "Principal Stress 3")),
+        "prin_dev_stress1" => Some((PrincipalStress::Dev1, "Principal Deviatoric Stress 1")),
+        "prin_dev_stress2" => Some((PrincipalStress::Dev2, "Principal Deviatoric Stress 2")),
+        "prin_dev_stress3" => Some((PrincipalStress::Dev3, "Principal Deviatoric Stress 3")),
+        "max_shear_stress" => Some((PrincipalStress::MaxShear, "Maximum Shear Stress")),
+        _ => None,
+    }
+}
+
+/// The 6 stress component primals every eigenvalue-stress invariant
+/// reads, in the order the kernel indexes them.
+pub fn principal_stress_primals() -> &'static [&'static str] {
+    &["sx", "sy", "sz", "sxy", "syz", "szx"]
+}
+
+// Generic over f32 / f64 primals (mirrors `impl_stress_invariant`):
+// the deviatoric pressure (`prin_dev_stress*` / `max_shear_stress`)
+// and the `0.5*(max-min)` shear are computed in the primal dtype with
+// numpy NEP50 weak-scalar promotion (type-annotated `$t` literals);
+// the symmetric matrix is promoted to f64 for the shared eigensolver,
+// and the eigenvalues cast back to the primal dtype exactly as numpy's
+// f32 `eigvalsh` would yield (verified bit-for-bit vs the oracle).
+macro_rules! impl_principal_stress {
+    ($fn:ident, $t:ty) => {
+        fn $fn(kind: PrincipalStress, c: &[&[$t]]) -> Vec<$t> {
+            let n = c[0].len();
+            // numpy weak-scalar `-(1/3)` / `0.5` cast to the array
+            // dtype (see `impl_stress_invariant`).
+            let third: $t = -1.0 / 3.0;
+            let half: $t = 0.5;
+            let (sx, sy, sz, sxy, syz, szx) = (c[0], c[1], c[2], c[3], c[4], c[5]);
+            // `prin_dev_stress*` and `max_shear_stress` eigensolve the
+            // *deviatoric* matrix (diagonal shifted by the pressure);
+            // `prin_stress*` use the raw stress matrix
+            // (`derived.py:1543-1549` / 1589-1595 vs 1439-1442).
+            let dev = !matches!(
+                kind,
+                PrincipalStress::Prin1 | PrincipalStress::Prin2 | PrincipalStress::Prin3
+            );
+            (0..n)
+                .map(|i| {
+                    let (dxx, dyy, dzz) = if dev {
+                        let p = third * ((sx[i] + sy[i]) + sz[i]);
+                        (sx[i] + p, sy[i] + p, sz[i] + p)
+                    } else {
+                        (sx[i], sy[i], sz[i])
+                    };
+                    // Symmetric matrix [[dxx,sxy,szx],[sxy,dyy,syz],
+                    // [szx,syz,dzz]] (`np.stack` columns,
+                    // `derived.py:1439-1442`), promoted to f64.
+                    let m = [
+                        [dxx as f64, sxy[i] as f64, szx[i] as f64],
+                        [sxy[i] as f64, dyy as f64, syz[i] as f64],
+                        [szx[i] as f64, syz[i] as f64, dzz as f64],
+                    ];
+                    let ev = jacobi_eigvalsh_sym3(m); // ascending
+                    let mn = ev[0] as $t;
+                    let md = ev[1] as $t;
+                    let mx = ev[2] as $t;
+                    match kind {
+                        // eigvalsh ascending: max = [...]1, mid = [...]2,
+                        // min = [...]3 (`derived.py:1454-1459`).
+                        PrincipalStress::Prin1 | PrincipalStress::Dev1 => mx,
+                        PrincipalStress::Prin2 | PrincipalStress::Dev2 => md,
+                        PrincipalStress::Prin3 | PrincipalStress::Dev3 => mn,
+                        // `0.5*(max-min)` in the primal dtype, exactly
+                        // as numpy reduces the f32 eigenvalues
+                        // (`derived.py:1603`).
+                        PrincipalStress::MaxShear => half * (mx - mn),
+                    }
+                })
+                .collect()
+        }
+    };
+}
+
+impl_principal_stress!(principal_stress_f32, f32);
+impl_principal_stress!(principal_stress_f64, f64);
+
+/// Compute an eigenvalue-based stress invariant from its 6 component
+/// primals (same shape contract as [`compute_stress_invariant`]).
+pub fn compute_principal_stress(
+    kind: PrincipalStress,
+    primals: &[QueryResult],
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    if primals.len() != 6 {
+        return Err(MiliError::Unsupported(
+            "principal stress primal count mismatch",
+        ));
+    }
+    let first = &primals[0];
+    let n = first.values.len();
+    for p in primals {
+        if p.values.len() != n || p.labels.len() != first.labels.len() {
+            return Err(MiliError::Unsupported(
+                "principal stress component primals disagree in shape",
+            ));
+        }
+    }
+
+    let values = match &first.values {
+        StateValues::F32(_) => {
+            let mut cols: Vec<&[f32]> = Vec::with_capacity(6);
+            for p in primals {
+                let StateValues::F32(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "principal stress component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F32(principal_stress_f32(kind, &cols))
+        }
+        StateValues::F64(_) => {
+            let mut cols: Vec<&[f64]> = Vec::with_capacity(6);
+            for p in primals {
+                let StateValues::F64(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "principal stress component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F64(principal_stress_f64(kind, &cols))
+        }
+        _ => {
+            return Err(MiliError::Unsupported(
+                "principal stress requires float stress primals",
             ))
         }
     };
