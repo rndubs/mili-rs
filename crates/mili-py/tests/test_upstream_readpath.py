@@ -42,6 +42,8 @@ _REDIRECT = {
     "mili.mdg_defines": milox.mdg_defines,
     "mili.geometric_mesh_info": milox.geometric_mesh_info,
     "mili.adjacency": milox.adjacency,
+    "mili.reductions": milox.reductions,
+    "mili.utils": milox.utils,
 }
 
 # Tests in redirected modules that exercise still-unported surface.
@@ -70,20 +72,19 @@ _MDB_PARALLEL_CLASSES = (
 # (geometry / derived / projection / query result-modifiers — none of
 # which the Phase-G primal surface provides). Honest Phase-H xfail.
 _MDB_PHASE_H_METHODS = {
-    "test_derived_variables_of_class": "Phase H: derived engine",
+    "test_derived_variables_of_class": "Phase H: derived engine (listing)",
     "test_query_project_to_nodes": "Phase H: projection engine",
-    "test_cummin": "Phase H: query result modifiers (reductions)",
-    "test_cummax": "Phase H: query result modifiers (reductions)",
-    "test_query_min": "Phase H: query result modifiers (reductions)",
-    "test_query_min_dataframe": "Phase H: query result modifiers (reductions)",
-    "test_query_max": "Phase H: query result modifiers (reductions)",
-    "test_query_max_dataframe": "Phase H: query result modifiers (reductions)",
-    "test_query_average": "Phase H: query result modifiers (reductions)",
-    "test_query_average_dataframe": "Phase H: query result modifiers (reductions)",
-    "test_query_median": "Phase H: query result modifiers (reductions)",
-    "test_query_median_dataframe": "Phase H: query result modifiers (reductions)",
-    "test_query_stddev": "Phase H: query result modifiers (reductions)",
-    "test_query_stddev_dataframe": "Phase H: query result modifiers (reductions)",
+}
+# Parallel-class methods that legitimately *pass* now that the
+# ResultModifier reductions are ported: the AVERAGE dataframe reduces to
+# one partition-independent value per state (no per-proc label axis), so
+# the Rust-DatabaseSet-merged result is bit-identical to upstream's
+# per-proc-combined result. The other reduction methods keep a
+# label/argmin axis that differs per partition → still honest parallel
+# xfail. Excluded from the whole-class xfail so the strict harness
+# asserts the pass.
+_MDB_PARALLEL_PASSING = {
+    "test_query_average_dataframe",
 }
 
 
@@ -105,17 +106,115 @@ _ADJ_PARALLEL_CLASSES = (
 )
 
 
+# test_reductions: TestSerialReductions opens the *serial* d3samp6
+# twice (merge_results False/True) — both single-fragment _MiliInternal,
+# so the serial-vs-"parallel" comparison is the already-ported primal /
+# reshape / geometry surface and must pass. TestCombineFunction /
+# TestMergeDataFrames / TestServerWrapperReductions /
+# TestLoopWrapperReductions drive the *parallel* d3samp6 through the
+# per-proc-unmerged handlers (merge_results=False expects upstream's
+# per-proc list; milox collapses that fan-out in the Rust DatabaseSet),
+# so they legitimately differ — parallel scope, whole-class xfail like
+# _MDB_PARALLEL_CLASSES / _ADJ_PARALLEL_CLASSES.
+# TestCombineFunction drives the parallel d3samp6 with
+# merge_results=False and its helper iterates the upstream per-proc
+# *list*; milox returns the Rust-DatabaseSet-merged dict, so every
+# method legitimately differs (whole-class parallel scope, all fail —
+# no incidental pass).
+_REDUCTIONS_COMBINE_CLASS = "TestCombineFunction"
+# TestServerWrapperReductions / TestLoopWrapperReductions compare the
+# *serial* d3samp6 against the *parallel* d3samp6 (a different, per-proc
+# database) and call the ServerWrapper/LoopWrapper forwarding path
+# (per-proc-unmerged list shapes / raw PyMiliDatabase signatures); milox
+# collapses that fan-out in the Rust core, so these legitimately differ.
+# Parallel-handler scope, exactly like _MDB_PARALLEL_CLASSES — the
+# identical 22-method set fails for both wrapper classes; the remaining
+# methods incidentally agree (loose type/sorted checks) and must pass,
+# so the strict harness needs the precise per-method set, not a
+# whole-class xfail.
+_REDUCTIONS_WRAPPER_METHODS = {
+    "test_all_labels_of_material",
+    "test_append_state",
+    "test_class_labels_of_material",
+    "test_classes_of_derived_variable",
+    "test_classes_of_state_variable",
+    "test_components_of_vector_svar",
+    "test_connectivity",
+    "test_containing_state_variables_of_class",
+    "test_copy_non_state_data",
+    "test_derived_variables_of_class",
+    "test_int_points_of_state_variable",
+    "test_labels",
+    "test_materials_of_class_name",
+    "test_nodes",
+    "test_nodes_of_elems",
+    "test_nodes_of_material",
+    "test_parts_of_class_name",
+    "test_queriable_svars",
+    "test_state_variable_titles",
+    "test_state_variables_of_class",
+    "test_supported_derived_variables",
+    "test_times",
+}
+_REDUCTIONS_WRAPPER_CLASSES = (
+    "TestServerWrapperReductions",
+    "TestLoopWrapperReductions",
+)
+# TestMergeDataFrames queries the parallel d3samp6 brick/beam with
+# per-proc-local labels (e.g. brick label 20 lives on one proc only);
+# the merged Rust result legitimately differs from the per-proc-unmerged
+# expectation. node-class methods use global labels and pass.
+_REDUCTIONS_MERGEDF_CLASS = "TestMergeDataFrames"
+_REDUCTIONS_MERGEDF_METHODS = {
+    "test_multiple_scalars",
+    "test_single_scalar",
+    "test_vector",
+    "test_vector_array",
+}
+# Serial methods that still route through a genuinely-unported engine:
+# the derived-variable *listing* (a later Phase-H sub-slice — the
+# node-displacement *value* engine is ported, the listing isn't) and
+# the Phase-3 write path. Honest strict-xfail, never silently passed.
+_REDUCTIONS_PHASE_H_METHODS = {
+    "test_supported_derived_variables": "Phase H: derived engine (listing)",
+    "test_derived_variables_of_class": "Phase H: derived engine (listing)",
+    "test_classes_of_derived_variable": "Phase H: derived engine (listing)",
+}
+_REDUCTIONS_WRITE_METHODS = {
+    "test_append_state": "Phase 3 write path",
+    "test_copy_non_state_data": "Phase 3 write path",
+}
+
+
 def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
     key = f"{mod}::{cls}::{meth}"
     if key in _XFAIL:
         return _XFAIL[key]
     if mod == "test_milidatabase":
-        if cls in _MDB_PARALLEL_CLASSES:
+        if cls in _MDB_PARALLEL_CLASSES and meth not in _MDB_PARALLEL_PASSING:
             return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
         if meth in _MDB_PHASE_H_METHODS:
             return _MDB_PHASE_H_METHODS[meth]
     if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
         return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
+    if mod == "test_reductions":
+        if cls == _REDUCTIONS_COMBINE_CLASS:
+            return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
+        if (
+            cls in _REDUCTIONS_WRAPPER_CLASSES
+            and meth in _REDUCTIONS_WRAPPER_METHODS
+        ):
+            return "parallel handler scope (serial vs per-proc parallel d3samp6; Rust DatabaseSet collapses the fan-out; Phase H)"
+        if (
+            cls == _REDUCTIONS_MERGEDF_CLASS
+            and meth in _REDUCTIONS_MERGEDF_METHODS
+        ):
+            return "parallel handler scope (per-proc-local labels in parallel d3samp6; Phase H)"
+        if cls == "TestSerialReductions":
+            if meth in _REDUCTIONS_WRITE_METHODS:
+                return _REDUCTIONS_WRITE_METHODS[meth]
+            if meth in _REDUCTIONS_PHASE_H_METHODS:
+                return _REDUCTIONS_PHASE_H_METHODS[meth]
     return None
 
 
@@ -161,6 +260,7 @@ _REDIRECTED = [
     "test_miliinternal",
     "test_milidatabase",
     "test_adjacency",
+    "test_reductions",
 ]
 
 

@@ -29,6 +29,8 @@ from . import (
     miliinternal,
     parallel,
     reader,
+    reductions,
+    utils,
 )
 from .milidatabase import MiliDatabase
 from .reader import open_database as _open_database
@@ -50,6 +52,8 @@ __all__ = [
     "mdg_defines",
     "geometric_mesh_info",
     "adjacency",
+    "reductions",
+    "utils",
 ]
 
 
