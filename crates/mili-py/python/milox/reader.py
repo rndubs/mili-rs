@@ -58,8 +58,8 @@ def open_database(
     else:
         engine_db = PyMiliDatabase.open_set(os.path.join(dir_name, file_base))
         if suppress_parallel:
-            mili_engine = LoopWrapper(engine_db)
+            mili_engine = LoopWrapper(engine_db, merge_results)
         else:
-            mili_engine = ServerWrapper(engine_db)
+            mili_engine = ServerWrapper(engine_db, merge_results)
 
     return MiliDatabase(mili_engine, merge_results)
