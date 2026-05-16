@@ -247,3 +247,236 @@ pub fn compute_node_displacement_magnitude(
         class_name: first.class_name.clone(),
     })
 }
+
+/// Resolve a nodal-velocity derived name to `(direction, title)`
+/// (`derived.py:95-115`).
+pub fn node_vel_spec(name: &str) -> Option<(usize, &'static str)> {
+    match name {
+        "vel_x" => Some((0, "X Velocity")),
+        "vel_y" => Some((1, "Y Velocity")),
+        "vel_z" => Some((2, "Z Velocity")),
+        _ => None,
+    }
+}
+
+/// Resolve a nodal-acceleration derived name to `(direction, title)`
+/// (`derived.py:116-136`).
+pub fn node_acc_spec(name: &str) -> Option<(usize, &'static str)> {
+    match name {
+        "acc_x" => Some((0, "X Acceleration")),
+        "acc_y" => Some((1, "Y Acceleration")),
+        "acc_z" => Some((2, "Z Acceleration")),
+        _ => None,
+    }
+}
+
+/// Time of 1-based state `n`: upstream `db.times()[n-1]` (the f32
+/// per-state header time).
+fn state_time(times: &[f32], n: i64) -> Result<f32> {
+    usize::try_from(n - 1)
+        .ok()
+        .and_then(|i| times.get(i).copied())
+        .ok_or(MiliError::Unsupported(
+            "nodal kinematics: required state time out of range",
+        ))
+}
+
+/// `[label]` row for 1-based state `n` from the gathered
+/// `[state][label]` primal, located via `gathered_state_nums`.
+fn gathered_row<'a, T>(
+    vals: &'a [T],
+    gathered_state_nums: &[i64],
+    n_lab: usize,
+    n: i64,
+) -> Result<&'a [T]> {
+    let r = gathered_state_nums
+        .iter()
+        .position(|&g| g == n)
+        .ok_or(MiliError::Unsupported(
+            "nodal kinematics: required state not gathered",
+        ))?;
+    Ok(&vals[r * n_lab..r * n_lab + n_lab])
+}
+
+// The nodal velocity / acceleration finite-difference math is identical
+// for f32 (single-precision plt) and f64 (double-precision plt) primals
+// except the dtype the per-label arithmetic runs in. The time-derived
+// factor is computed in f32 (upstream `times()` is the f32 per-state
+// header; numpy NEP50 keeps `1.0 / f32` and `0.5 * f32` in f32), then
+// promoted to the primal dtype for the final multiply — exactly
+// numpy's `f64_disp * f32_factor -> f64` / `f32_disp * f32_factor ->
+// f32` promotion. This macro generates the two concrete bodies.
+macro_rules! impl_kinematics {
+    ($vel_fn:ident, $acc_fn:ident, $t:ty) => {
+        fn $vel_fn(
+            vals: &[$t],
+            gsn: &[i64],
+            req: &[i64],
+            times: &[f32],
+            n_lab: usize,
+        ) -> Result<Vec<$t>> {
+            let mut out: Vec<$t> = Vec::with_capacity(req.len() * n_lab);
+            for &s in req {
+                if s == 1 {
+                    // Velocity at the first state is defined zero
+                    // (`derived.py:1062`).
+                    out.extend(std::iter::repeat(<$t>::default()).take(n_lab));
+                    continue;
+                }
+                let cur = gathered_row(vals, gsn, n_lab, s)?;
+                let prev = gathered_row(vals, gsn, n_lab, s - 1)?;
+                let dt = state_time(times, s)? - state_time(times, s - 1)?;
+                let inv = 1.0f32 / dt;
+                for l in 0..n_lab {
+                    out.push((cur[l] - prev[l]) * (inv as $t));
+                }
+            }
+            Ok(out)
+        }
+
+        fn $acc_fn(
+            vals: &[$t],
+            gsn: &[i64],
+            req: &[i64],
+            times: &[f32],
+            max_state: i64,
+            n_lab: usize,
+        ) -> Result<Vec<$t>> {
+            let mut out: Vec<$t> = Vec::with_capacity(req.len() * n_lab);
+            for &s in req {
+                // (a, b, c, dt) so accel = (a - 2*b + c) / dt^2, with
+                // the three component rows picked per the central /
+                // forward / backward stencil (`derived.py:1117-1153`).
+                let (a, b, c, dt) = if s == 1 {
+                    // Forward difference: u(3) - 2 u(2) + u(1).
+                    let dt = 0.5f32 * (state_time(times, 3)? - state_time(times, 1)?);
+                    (
+                        gathered_row(vals, gsn, n_lab, 3)?,
+                        gathered_row(vals, gsn, n_lab, 2)?,
+                        gathered_row(vals, gsn, n_lab, 1)?,
+                        dt,
+                    )
+                } else if s == max_state {
+                    // Backward difference: u(N) - 2 u(N-1) + u(N-2).
+                    let dt = 0.5f32
+                        * (state_time(times, max_state)? - state_time(times, max_state - 2)?);
+                    (
+                        gathered_row(vals, gsn, n_lab, max_state)?,
+                        gathered_row(vals, gsn, n_lab, max_state - 1)?,
+                        gathered_row(vals, gsn, n_lab, max_state - 2)?,
+                        dt,
+                    )
+                } else {
+                    // Central difference: u(s+1) - 2 u(s) + u(s-1).
+                    let dt = 0.5f32 * (state_time(times, s + 1)? - state_time(times, s - 1)?);
+                    (
+                        gathered_row(vals, gsn, n_lab, s + 1)?,
+                        gathered_row(vals, gsn, n_lab, s)?,
+                        gathered_row(vals, gsn, n_lab, s - 1)?,
+                        dt,
+                    )
+                };
+                let ot = 1.0f32 / (dt * dt);
+                for l in 0..n_lab {
+                    // `2*b` as `b+b`: exact in IEEE (doubling never
+                    // rounds), bit-identical to numpy's `2*u_c`, and
+                    // avoids an `i32 as $t` precision-loss cast.
+                    out.push((a[l] - (b[l] + b[l]) + c[l]) * (ot as $t));
+                }
+            }
+            Ok(out)
+        }
+    };
+}
+
+impl_kinematics!(vel_f32, acc_f32, f32);
+impl_kinematics!(vel_f64, acc_f64, f64);
+
+/// `vel_<dir> = (u(s) - u(s-1)) / (t(s) - t(s-1))`, zero at state 1
+/// (`derived.py.__compute_node_velocity`).
+///
+/// `gathered` is the primal `u<dir>` queried at every state the
+/// stencil needs (`gathered_state_nums`, parallel to its state axis);
+/// the result is one row per `requested_state_nums` entry.
+pub fn compute_node_velocity(
+    gathered: QueryResult,
+    gathered_state_nums: &[i64],
+    requested_state_nums: &[i64],
+    times: &[f32],
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let n_lab = gathered.labels.len();
+    let values = match &gathered.values {
+        StateValues::F32(v) => StateValues::F32(vel_f32(
+            v,
+            gathered_state_nums,
+            requested_state_nums,
+            times,
+            n_lab,
+        )?),
+        StateValues::F64(v) => StateValues::F64(vel_f64(
+            v,
+            gathered_state_nums,
+            requested_state_nums,
+            times,
+            n_lab,
+        )?),
+        _ => {
+            return Err(MiliError::Unsupported(
+                "nodal velocity requires float nodal position primals",
+            ))
+        }
+    };
+    Ok(QueryResult {
+        values,
+        labels: gathered.labels,
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: gathered.class_name,
+    })
+}
+
+/// `acc_<dir>` via central difference, with forward/backward stencils
+/// at the first/last state (`derived.py.__compute_node_acceleration`).
+pub fn compute_node_acceleration(
+    gathered: QueryResult,
+    gathered_state_nums: &[i64],
+    requested_state_nums: &[i64],
+    times: &[f32],
+    max_state: i64,
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let n_lab = gathered.labels.len();
+    let values = match &gathered.values {
+        StateValues::F32(v) => StateValues::F32(acc_f32(
+            v,
+            gathered_state_nums,
+            requested_state_nums,
+            times,
+            max_state,
+            n_lab,
+        )?),
+        StateValues::F64(v) => StateValues::F64(acc_f64(
+            v,
+            gathered_state_nums,
+            requested_state_nums,
+            times,
+            max_state,
+            n_lab,
+        )?),
+        _ => {
+            return Err(MiliError::Unsupported(
+                "nodal acceleration requires float nodal position primals",
+            ))
+        }
+    };
+    Ok(QueryResult {
+        values,
+        labels: gathered.labels,
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: gathered.class_name,
+    })
+}

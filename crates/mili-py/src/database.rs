@@ -1208,6 +1208,85 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if let Some((dir, title)) = mili_rs::node_vel_spec(svar)
+                .map(|s| (s, false))
+                .or(mili_rs::node_acc_spec(svar).map(|s| (s, true)))
+                .map(|((d, t), is_acc)| (d, (t, is_acc)))
+            {
+                // Nodal velocity / acceleration: finite difference of
+                // the primal `u<dir>` over states + the f32 per-state
+                // times (`derived.py.__compute_node_{velocity,
+                // acceleration}`). Gather the primal at every state the
+                // stencil touches in one query, then the core does the
+                // parity-sensitive difference math.
+                let (title, is_acc) = title;
+                let primal_name = mili_rs::node_disp_primal(dir);
+                let max_state = n_states as i64;
+                // 1-based states the stencil needs across all requested.
+                let mut needed: Vec<i64> = Vec::new();
+                for &s in &state_nums {
+                    if is_acc {
+                        if s == 1 {
+                            needed.extend([1, 2, 3]);
+                        } else if s == max_state {
+                            needed.extend([max_state, max_state - 1, max_state - 2]);
+                        } else {
+                            needed.extend([s - 1, s, s + 1]);
+                        }
+                    } else {
+                        needed.push(s);
+                        if s != 1 {
+                            needed.push(s - 1);
+                        }
+                    }
+                }
+                needed.retain(|&n| n >= 1 && n <= max_state);
+                needed.sort_unstable();
+                needed.dedup();
+                let needed_idx: Vec<usize> = needed.iter().map(|&n| (n - 1) as usize).collect();
+                let req_states = state_nums.clone();
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let gargs = QueryArgs {
+                            svar: primal_name,
+                            class: &entity_type,
+                            labels: labels_ref,
+                            states: &needed_idx,
+                            materials: materials_ref,
+                            ips: ips_ref,
+                            subrec: subrec_ref,
+                        };
+                        let gathered = match &self.backend {
+                            Backend::Single(db) => db.query_full(&gargs)?,
+                            Backend::Set(s) => s.query_full(&gargs)?,
+                        };
+                        let raw_times: Vec<f32> = match &self.backend {
+                            Backend::Single(db) => db.times(),
+                            Backend::Set(s) => s.times(),
+                        };
+                        if is_acc {
+                            mili_rs::compute_node_acceleration(
+                                gathered,
+                                &needed,
+                                &req_states,
+                                &raw_times,
+                                max_state,
+                                svar,
+                                title,
+                            )
+                        } else {
+                            mili_rs::compute_node_velocity(
+                                gathered,
+                                &needed,
+                                &req_states,
+                                &raw_times,
+                                svar,
+                                title,
+                            )
+                        }
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else {
                 let args = QueryArgs {
                     svar,

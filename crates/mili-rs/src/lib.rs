@@ -41,8 +41,9 @@ mod ti;
 
 pub use adjacency::NeighborElems;
 pub use derived::{
-    compute_node_displacement, compute_node_displacement_magnitude, nodal_reference_from_coords,
-    nodal_reference_from_query, node_disp_mag_spec, node_disp_primal, node_disp_spec,
+    compute_node_acceleration, compute_node_displacement, compute_node_displacement_magnitude,
+    compute_node_velocity, nodal_reference_from_coords, nodal_reference_from_query, node_acc_spec,
+    node_disp_mag_spec, node_disp_primal, node_disp_spec, node_vel_spec,
 };
 #[doc(hidden)]
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};

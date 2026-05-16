@@ -194,13 +194,17 @@ _DERIVED_LISTING_METHODS = {
     "test_derived_variables_of_class",
     "test_classes_of_derived_variable",
 }
-# Serial nodal-displacement *value* tests in the Rust core
-# (mili_rs::derived). disp_x/disp_y/disp_z landed in the prior
-# reductions sub-slice; the displacement-magnitude + reference_state
-# extension (disp_mag, disp_rad_mag_xy, non-zero reference_state)
-# landed in this sub-slice. All route through MiliDatabase.query ->
-# Rust (not milox.derived). Velocities/accelerations (finite-difference
-# over states) and the stress/strain invariants are later sub-slices.
+# Serial nodal-kinematics *value* tests in the Rust core
+# (mili_rs::derived), all routing through MiliDatabase.query -> Rust
+# (not milox.derived): disp_x/disp_y/disp_z (prior reductions
+# sub-slice), the displacement-magnitude + reference_state extension
+# (disp_mag/disp_rad_mag_xy/non-zero reference_state), and the
+# velocity/acceleration finite-difference family
+# (vel_*/acc_* — f32 single-prec d3samp6 for acc, f64 double-prec
+# solids014_dblplt for vel; f32 per-state-time arithmetic mirrors
+# numpy NEP50 promotion). The stress/strain invariants and the
+# remaining geometry-ish derived (centroid/element_volume/…) are
+# later sub-slices.
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
     "test_disp_y",
@@ -209,6 +213,12 @@ _DERIVED_SERIAL_PASSING = {
     "test_disp_mag_ref",
     "test_disp_rad_mag_xy",
     "test_disp_y_reference_state",
+    "test_vel_x",
+    "test_vel_y",
+    "test_vel_z",
+    "test_acc_x",
+    "test_acc_y",
+    "test_acc_z",
 }
 
 
