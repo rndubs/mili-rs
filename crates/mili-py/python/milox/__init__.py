@@ -28,6 +28,7 @@ from . import (
     milidatabase,
     miliinternal,
     parallel,
+    projection,
     reader,
     reductions,
     utils,
@@ -52,6 +53,7 @@ __all__ = [
     "mdg_defines",
     "geometric_mesh_info",
     "adjacency",
+    "projection",
     "reductions",
     "utils",
 ]
