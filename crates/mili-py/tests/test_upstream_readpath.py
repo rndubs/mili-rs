@@ -41,6 +41,7 @@ _REDIRECT = {
     "mili.datatypes": milox.datatypes,
     "mili.mdg_defines": milox.mdg_defines,
     "mili.geometric_mesh_info": milox.geometric_mesh_info,
+    "mili.adjacency": milox.adjacency,
 }
 
 # Tests in redirected modules that exercise still-unported surface.
@@ -49,7 +50,6 @@ _REDIRECT = {
 # if one starts passing, the harness fails so it gets promoted.
 # Keyed by ``module::Class::method``.
 _XFAIL = {
-    "test_miliinternal::TestMiliInternal::test_geometry_property": "Phase H: GeometricMeshInfo",
     "test_miliinternal::TestMiliInternal::test_supported_variables": "Phase H: derived engine",
     "test_miliinternal::TestMiliInternal::test_derived_variables_of_class": "Phase H: derived engine",
     "test_miliinternal::TestMiliInternal::test_classes_of_derived_variable": "Phase H: derived engine",
@@ -87,6 +87,24 @@ _MDB_PHASE_H_METHODS = {
 }
 
 
+# test_adjacency: the serial GeometricMeshInfo / AdjacencyMapping
+# classes are the Phase-H adjacency sub-slice and must pass. The
+# LoopWrapper* / ServerWrapper* (incl. *MergeResults*) classes drive
+# the per-proc-unmerged parallel handlers — milox collapses that
+# fan-out in the Rust DatabaseSet, so they legitimately differ
+# (parallel scope, like _MDB_PARALLEL_CLASSES). Whole classes xfail.
+_ADJ_PARALLEL_CLASSES = (
+    "LoopWrapperGeometricMeshInfoTests",
+    "LoopWrapperAdjacencyMappingTests",
+    "ServerWrapperGeometricMeshInfoTests",
+    "ServerWrapperAdjacencyMappingTests",
+    "LoopWrapperGeometricMeshInfoMergeResultsTests",
+    "LoopWrapperAdjacencyMappingMergeResultsTests",
+    "ServerWrapperGeometricMeshInfoMergeResultsTests",
+    "ServerWrapperAdjacencyMappingMergeResultsTests",
+)
+
+
 def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
     key = f"{mod}::{cls}::{meth}"
     if key in _XFAIL:
@@ -96,6 +114,8 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
             return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
         if meth in _MDB_PHASE_H_METHODS:
             return _MDB_PHASE_H_METHODS[meth]
+    if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
+        return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
     return None
 
 
@@ -136,7 +156,12 @@ def _case_key(test) -> tuple[str, str]:
     return parts[-2], parts[-1]
 
 
-_REDIRECTED = ["test_reader", "test_miliinternal", "test_milidatabase"]
+_REDIRECTED = [
+    "test_reader",
+    "test_miliinternal",
+    "test_milidatabase",
+    "test_adjacency",
+]
 
 
 def _ids():

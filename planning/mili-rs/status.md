@@ -190,7 +190,7 @@ states. Green.
 |--------------------------------|------:|:------|
 | `cargo test --workspace`       | 206   | unit + fixture integration (+ 6 `DatabaseSet` fixture rows, + 8 `family_set` unit tests, + 1 corpus-wide smoke walker) |
 | mili-python parity (`pyo3`)    | 24    | 12 corpus fixtures bit-exact; xmilics per-fragment + d3samp6 set-level **state-axis and query-merge** parity (bit-exact); **+ `parity_reshape` — every Phase-G `_MiliInternal` reshape bit-exact vs. the upstream oracle across the full serial corpus**; `scripts/setup-parity.sh` then `cargo test --workspace --exclude mili-py --features parity` |
-| `milox` parity + redirect      | 399 + 186 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`) **+ the `test_milidatabase.py` read half closed**: `MiliDatabase` wrapper does return-code raising (`parse_return_codes`) + mdg-enum arg coercion, `_MiliInternal` gained upstream-signature `query`/`connectivity` input validation, and the Rust core query gained **named-component subscript** (`nodpos[ux]`/`stress[sy]`) + **multi-parent bare-component disambiguation by subrec membership** (`sx` on `brick`), each bit-exact vs the upstream oracle (`tests/parity_component_subscript.rs`). **+ Phase H geometry sub-slice**: `connectivity_ids`, `nodes_of_elems`, `nodes_of_material`, `faces`, `measure` in the Rust core (`mili_rs::geometry`, thin `database.rs`/`miliinternal.py` bindings), bit-exact vs the upstream `_MiliInternal` oracle across the serial corpus (`tests/parity_geometry.rs`); 15 `test_miliinternal`/`test_milidatabase` xfails promoted to green. Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (37 pass, 4 Phase-H `xfail`) + `test_milidatabase.py` read half** green; the parallel handler classes + the remaining derived/projection/result-modifier serial methods are honest strict `xfail` (Phase H / parallel scope). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
+| `milox` parity + redirect      | 411 + 225 xfail | `import milox` vs upstream `mili`. M1 metadata (171) + M2 (51) + M3 (17) + M4 Slice A/B (bit-exact) + **M4-followup Phase F** skeleton + **Phase G**: the primal-only `_MiliInternal` reshape surface (logic in Rust core `mili_rs::reshape`, thin `database.rs` binding; `StateVariable`/`Subrecord`/`MeshObjectClass`/`StateMap`/`MiliType` verbatim-ported to `milox.datatypes`) **+ the `test_milidatabase.py` read half closed**: `MiliDatabase` wrapper does return-code raising (`parse_return_codes`) + mdg-enum arg coercion, `_MiliInternal` gained upstream-signature `query`/`connectivity` input validation, and the Rust core query gained **named-component subscript** (`nodpos[ux]`/`stress[sy]`) + **multi-parent bare-component disambiguation by subrec membership** (`sx` on `brick`), each bit-exact vs the upstream oracle (`tests/parity_component_subscript.rs`). **+ Phase H geometry sub-slice**: `connectivity_ids`, `nodes_of_elems`, `nodes_of_material`, `faces`, `measure` in the Rust core (`mili_rs::geometry`, thin `database.rs`/`miliinternal.py` bindings), bit-exact vs the upstream `_MiliInternal` oracle across the serial corpus (`tests/parity_geometry.rs`); 15 `test_miliinternal`/`test_milidatabase` xfails promoted to green. **+ Phase H adjacency + geometric-mesh-info sub-slice**: the `_MiliInternal.geometry` (`GeometricMeshInfo`: `compute_centroid`/`nearest_node`/`nearest_element`/`nodes_within_radius`/`elems_of_nodes`) + serial `AdjacencyMapping` (`mesh_entities_*`/`neighbor_elements`/`neighbor_nodes`/…) surface in the Rust core (new `mili_rs::adjacency`, `Superclass::node_connections`; thin `milox.geometric_mesh_info`/`milox.adjacency` adapters), bit-exact vs the upstream `_MiliInternal.geometry`/`adjacency.AdjacencyMapping` oracle across the serial corpus (`tests/parity_adjacency.rs`); `test_geometry_property` promoted, `test_adjacency.py` wired into the harness (serial green, 8 parallel-handler classes strict-xfail). Import-redirect harness (`test_upstream_readpath.py`) runs upstream `test_reader.py` (7) **+ `test_miliinternal.py` (38 pass, 3 Phase-H `xfail`) + `test_milidatabase.py` read half + `test_adjacency.py` serial** green; the parallel handler classes + the remaining derived/projection/result-modifier serial methods are honest strict `xfail` (Phase H / parallel scope). Dedicated `test-milox` CI job; `mili-py` excluded from default `cargo test --workspace` |
 | cargo-fuzz (nightly cron)      | 3     | header, directory, param targets |
 | Criterion benches              | 4     | open, nodes, query_single, query_many (+ `mili_python_baseline` under `--features parity`) |
 
@@ -310,6 +310,40 @@ were updated to match. Read the linked source for the full story.
   variant maps the same `fid-1` through `node_labels`). Found while
   porting the Phase-H geometry sub-slice; bit-exact in
   `parity_geometry.rs`.
+- **`compute_centroid` sums `nodpos` rows in *query-return* (ascending
+  node-ordinal) order, not connectivity order, and float32 summation
+  is non-associative** — upstream
+  `np.sum(query("nodpos","node",labels=elem_conns)["data"][0],axis=0)`
+  (`geometric_mesh_info.py:149-151`): the query maps labels →
+  ordinals via `np.isin(labels_of_class, labels)`
+  (`miliinternal.py:1183`), a *membership* test that (a) silently
+  drops requested labels with no subrec coverage and (b) returns rows
+  in ascending node-ordinal order regardless of argument order.
+  Summing in `elem_conns` order gave `1.25` vs the oracle's
+  `1.2500001` (single-precision). `mili_rs::adjacency` sorts the
+  matched rows by node ordinal and sums in the buffer dtype (NEP50:
+  `float{32,64}` array / python float keeps the dtype — single-prec
+  plt → f32 sum, double → f64). Found by `parity_adjacency.rs`;
+  CLAUDE.md "corpus wins".
+- **`dictionary_merge_concat_unique` uses `pd.unique` →
+  first-occurrence order, NOT `np.unique` (sorted)** — upstream
+  `reductions.py:45` explicitly picks pandas for the order guarantee;
+  `neighbor_elements`'s per-class label arrays are concat-then-
+  `pd.unique`. `mili_rs::adjacency::dict_merge_concat_unique` keeps
+  first-occurrence. Found by `parity_adjacency.rs`.
+- **Upstream `compute_centroid` / `neighbor_nodes` have undefined
+  (crashing) regions — mirrored as typed errors, never silent wrong
+  answers** — `compute_centroid` on a non-element class or a
+  nodpos-uncovered node raises an uncaught `IndexError`
+  (`connectivity` is `np.empty`, never `None`; `data[0]` on an empty
+  result); `neighbor_nodes` on a BEAM's 3rd/orientation node
+  `IndexError`s (`n_connects[idx2]`: the `(2,1)` `M_BEAM`
+  `node_connections` vs 3-column beam connectivity). These are
+  upstream bugs with no oracle value; `parity_adjacency.rs` sweeps
+  only the defined surface (oracle `connectivity_ids().keys()` +
+  nodpos-covered nodes, skip-on-oracle-raise) and the core returns a
+  typed `MiliError` rather than panicking. Found by
+  `parity_adjacency.rs`.
 - **`element_sets()` key is `es_<n>`, not `<n>`** — upstream keys by
   `sname[sname.find('es_'):]` (`miliinternal.py:113-115`), so strip
   only `IntLabel_`. `integration_points()` then keys by `eset[-1:]`

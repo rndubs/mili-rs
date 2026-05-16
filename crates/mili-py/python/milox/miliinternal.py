@@ -53,7 +53,6 @@ __all__ = [
 # Phase G landed every primal-only reshape; the remainder is Phase H
 # (geometry / derived / adjacency — value-producing, fully parity-gated).
 _UNPORTED = {
-    "geometry": "H",
     "supported_derived_variables": "H",
     "derived_variables_of_class": "H",
     "classes_of_derived_variable": "H",
@@ -106,13 +105,16 @@ class _MiliInternal:
     def close(self) -> None:
         return None
 
-    # ---- Phase H placeholder ----
+    # ---- Phase H: GeometricMeshInfo (Rust-core-backed adapter) ----
     @property
     def geometry(self) -> Any:
-        raise MiliPythonError(
-            "geometry: not yet ported (mili-py M4-followup phase H; "
-            "see planning/mili-py/m4.md decision 19)"
-        )
+        from .geometric_mesh_info import GeometricMeshInfo
+
+        cached = self.__dict__.get("_geometry")
+        if cached is None:
+            cached = GeometricMeshInfo(self)
+            self.__dict__["_geometry"] = cached
+        return cached
 
     # ---- Phase G: primal-only reshapes (logic in Rust core) ----
     def metadata(self) -> Metadata:
