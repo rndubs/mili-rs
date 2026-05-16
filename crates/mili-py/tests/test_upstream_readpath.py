@@ -202,9 +202,26 @@ _DERIVED_LISTING_METHODS = {
 # velocity/acceleration finite-difference family
 # (vel_*/acc_* — f32 single-prec d3samp6 for acc, f64 double-prec
 # solids014_dblplt for vel; f32 per-state-time arithmetic mirrors
-# numpy NEP50 promotion). The stress/strain invariants and the
-# remaining geometry-ish derived (centroid/element_volume/…) are
-# later sub-slices.
+# numpy NEP50 promotion). The scalar (non-eigenvalue) stress
+# invariants (pressure / eff_stress / triaxiality / norm_press) are
+# pure element-wise arithmetic over the 6 stress component primals
+# on the requested element class (f32/f64-generic, numpy NEP50 weak-
+# scalar promotion). The eigenvalue-based stress invariants
+# (prin_stress1-3 / prin_dev_stress1-3 / max_shear_stress) build the
+# symmetric stress (or deviatoric) 3x3 from the 6 component primals
+# and read a symmetric-3x3 Jacobi eigensolver in the core (computed
+# in f64, cast to the primal dtype — bit-identical to numpy's f32
+# eigvalsh at every literal-checked point). vol_strain is the trivial
+# strain trace; prin_strain* / prin_dev_strain* reuse that same
+# eigensolver on the 6 strain components. nodtangmag /
+# shear_magnitude are the sqrt-of-sum-of-component-squares pattern
+# (like disp_mag, generic f32/f64, no connectivity). The *_alt griz
+# closed-form trig variants have no value-test (listing-only) and the
+# connectivity-coupled geometry derived
+# (centroid/element_volume/area/force/surfstrain) + projection are
+# later sub-slices (an architectural decision point — they thread
+# connectivity / cross-derived deps / projection into the derived
+# query routing).
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
     "test_disp_y",
@@ -219,7 +236,68 @@ _DERIVED_SERIAL_PASSING = {
     "test_acc_x",
     "test_acc_y",
     "test_acc_z",
+    "test_pressure",
+    "test_eff_stress",
+    "test_triaxiality",
+    "test_normalized_pressure",
+    "test_query_multiple_variables",
+    "test_prin_stress1",
+    "test_prin_stress2",
+    "test_prin_stress3",
+    "test_prin_dev_stress1",
+    "test_prin_dev_stress2",
+    "test_prin_dev_stress3",
+    "test_max_shear_stress",
+    "test_vol_strain",
+    "test_prin_strain1",
+    "test_prin_strain2",
+    "test_prin_strain3",
+    "test_prin_dev_strain1",
+    "test_prin_dev_strain2",
+    "test_prin_dev_strain3",
+    "test_shear_magnitude",
+    "test_eps_rate",
+    "test_hex_centroid",
+    "test_beam_centroid",
+    "test_shell_centroid",
+    "test_node_centroid",
+    "test_hex_element_volume",
+    "test_tet_element_volume",
+    "test_quad_area",
+    "test_tet_relative_volume",
+    "test_dyna_normal_force",
+    "test_force_x",
+    "test_force_y",
+    "test_force_z",
+    "test_mat_cog_disp",
 }
+# The dbl_nodtang (diablo) corpus has a systematic *core primal-query*
+# bug independent of the derived engine: every svar on `cbs1_particle`
+# (and the diablo brick) rejects non-first labels (e.g. 95/115 on
+# cbs1_particle) which upstream mili returns. The derived math for
+# these is implemented + oracle-verified, but the primal gather fails
+# first. These stay honest strict-xfail with a precise reason; it is a
+# settled-core-query-semantics investigation, separate from the derived
+# value engine. test_surfstrain is *additionally* the `face=`
+# projection layer (deferred, task-flagged).
+_DERIVED_DBL_NODTANG_BLOCKED = {
+    "test_nodetangmag",
+    "test_hex_relative_volume",
+    "test_diablo_normal_force",
+}
+_DERIVED_DBL_NODTANG_REASON = (
+    "core primal-query label-resolution divergence on the dbl_nodtang "
+    "(diablo) corpus: every svar on cbs1_particle / diablo brick "
+    "rejects non-first labels (e.g. 95/115) that upstream mili returns. "
+    "The derived math is implemented + oracle-verified; the primal "
+    "gather fails first — a separate settled-core-query investigation, "
+    "independent of the derived value engine."
+)
+_DERIVED_SURFSTRAIN_REASON = (
+    "surfstrain requires the `face=` projection layer (task-flagged "
+    "projection scope) AND runs on the dbl_nodtang corpus (core "
+    "primal-query bug above) — deferred."
+)
 
 
 def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
@@ -243,6 +321,11 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
                 "DatabaseSet collapses the per-proc fan-out; Phase H "
                 "derived value sub-slice)"
             )
+        if cls == "SerialDerivedExpressions":
+            if meth in _DERIVED_DBL_NODTANG_BLOCKED:
+                return _DERIVED_DBL_NODTANG_REASON
+            if meth == "test_surfstrain":
+                return _DERIVED_SURFSTRAIN_REASON
         return "Phase H: derived value engine (next sub-slice)"
     if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
         return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"

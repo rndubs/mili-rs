@@ -976,6 +976,9 @@ impl PyMiliDatabase {
         // `reference_state` for the nodal-displacement derived family
         // (`derived.py:982/948`); 0 = initial nodal coordinates.
         let mut reference_state: i64 = 0;
+        // Whether the caller explicitly passed `reference_state`
+        // (mat_cog_disp's default is state 1, not 0).
+        let mut reference_state_set = false;
         if let Some(kw) = kwargs {
             const ALLOWED: [&str; 5] = [
                 "output_object_labels",
@@ -1015,6 +1018,7 @@ impl PyMiliDatabase {
             if let Some(v) = kw.get_item("reference_state")? {
                 if !v.is_none() {
                     reference_state = v.extract()?;
+                    reference_state_set = true;
                 }
             }
             if let Some(v) = kw.get_item("output_object_labels")? {
@@ -1287,6 +1291,312 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if svar == "centroid" {
+                // centroid: element/node centroid geometry over the
+                // internal `nodpos` gather (`derived.py.
+                // __compute_centroid`). Self-contained in the core
+                // (reuses the bit-exact `measure` centroid); the result
+                // class is the requested element class.
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .centroid_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if svar == "element_volume" {
+                // element_volume: M_HEX/M_TET volume over the internal
+                // elem→node→nodpos gather (`derived.py.
+                // __compute_element_volume`). Self-contained in core.
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .element_volume_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if svar == "relative_volume" {
+                // relative_volume: det F (deformation-gradient
+                // determinant) over the internal elem→node→nodpos
+                // gather + the state-0 reference node coordinates
+                // (`derived.py.__compute_relative_volume`). Only
+                // reference_state == 0 is exercised by the corpus; a
+                // non-zero reference_state is a typed error (extension
+                // scope), never a silent wrong answer.
+                if reference_state != 0 {
+                    return Err(MiliPythonError::new_err(
+                        "relative_volume with a non-zero reference_state \
+                         is not yet supported (M4-followup extension)",
+                    ));
+                }
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .relative_volume_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if svar == "area" {
+                // area: M_QUAD surface area over the internal
+                // elem→node→nodpos gather (`derived.py.
+                // __compute_quad_area`). Self-contained in core.
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .quad_area_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((pname, title)) = mili_rs::mat_cog_disp_spec(svar) {
+                // mat_cog_disp_<d> = matcg<d>(s) - matcg<d>(ref);
+                // upstream's reference_state default is **state 1**
+                // (not 0) unless the caller overrides it
+                // (`derived.py.__compute_material_cog_displacement`).
+                let ref_state = if reference_state_set {
+                    reference_state
+                } else {
+                    1
+                };
+                let ref_idx = usize::try_from(ref_state - 1).map_err(|_| {
+                    MiliPythonError::new_err("mat_cog_disp: reference_state out of range")
+                })?;
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mk = |st: &[usize]| -> mili_rs::Result<QueryResult> {
+                            let a = QueryArgs {
+                                svar: pname,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: st,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            match &self.backend {
+                                Backend::Single(db) => db.query_full(&a),
+                                Backend::Set(s) => s.query_full(&a),
+                            }
+                        };
+                        let primal = mk(&state_idx)?;
+                        let reference = mk(&[ref_idx])?;
+                        mili_rs::compute_mat_cog_disp(primal, &reference, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((title, primal_candidates)) = mili_rs::contact_force_spec(svar) {
+                // normal_force / force_<d> = contact primal * the
+                // M_QUAD `area` derived (`derived.py.
+                // __compute_{normal_force,force}`). Cross-derived:
+                // gather the primal, compute `area` over the same
+                // labels/states in core, multiply (label-aligned).
+                let pname = primal_candidates
+                    .iter()
+                    .copied()
+                    .find(|p| self.db0_has_svar(p))
+                    .unwrap_or(primal_candidates[0]);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let pa = QueryArgs {
+                            svar: pname,
+                            class: &entity_type,
+                            labels: labels_ref,
+                            states: &state_idx,
+                            materials: materials_ref,
+                            ips: ips_ref,
+                            subrec: subrec_ref,
+                        };
+                        let primal = match &self.backend {
+                            Backend::Single(db) => db.query_full(&pa)?,
+                            Backend::Set(s) => s.query_full(&pa)?,
+                        };
+                        let area = self.db0().quad_area_query(
+                            mesh,
+                            &entity_type,
+                            labels_ref,
+                            &state_idx,
+                        )?;
+                        mili_rs::compute_contact_force(primal, &area, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some(title) = mili_rs::eps_rate_spec(svar) {
+                // eps_rate: finite difference of the `eps` primal over
+                // states (`derived.py.__compute_plastic_strain_rate`).
+                // Gather `eps` at every stencil-touched state in one
+                // query; the core does the difference math.
+                let max_state = n_states as i64;
+                let mut needed: Vec<i64> = Vec::new();
+                for &s in &state_nums {
+                    needed.push(s);
+                    if s != 1 {
+                        needed.push(s - 1);
+                    }
+                    if s != 1 && s != max_state {
+                        needed.push(s + 1);
+                    }
+                }
+                needed.retain(|&n| n >= 1 && n <= max_state);
+                needed.sort_unstable();
+                needed.dedup();
+                let needed_idx: Vec<usize> = needed.iter().map(|&n| (n - 1) as usize).collect();
+                let req_states = state_nums.clone();
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let gargs = QueryArgs {
+                            svar: "eps",
+                            class: &entity_type,
+                            labels: labels_ref,
+                            states: &needed_idx,
+                            materials: materials_ref,
+                            ips: ips_ref,
+                            subrec: subrec_ref,
+                        };
+                        let gathered = match &self.backend {
+                            Backend::Single(db) => db.query_full(&gargs)?,
+                            Backend::Set(s) => s.query_full(&gargs)?,
+                        };
+                        let raw_times: Vec<f32> = match &self.backend {
+                            Backend::Single(db) => db.times(),
+                            Backend::Set(s) => s.times(),
+                        };
+                        mili_rs::compute_eps_rate(
+                            gathered,
+                            &needed,
+                            &req_states,
+                            &raw_times,
+                            max_state,
+                            svar,
+                            title,
+                        )
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((inv, title)) = mili_rs::stress_invariant_spec(svar) {
+                // Scalar stress invariants (pressure / eff_stress /
+                // triaxiality / norm_press): pure element-wise math
+                // over the 6 stress component primals on the requested
+                // element class (`derived.py.__compute_{pressure,
+                // effective_stress,triaxiality,normalized_pressure}`).
+                // Gather each primal with the request's own
+                // labels/states/ips, then the core does the
+                // parity-sensitive arithmetic. No eigvalsh — the
+                // principal-stress family is a later sub-slice.
+                let primal_names = mili_rs::stress_invariant_primals(inv);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_stress_invariant(inv, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((kind, title)) = mili_rs::principal_stress_spec(svar) {
+                // Eigenvalue-based stress invariants (prin_stress* /
+                // prin_dev_stress* / max_shear_stress): build the
+                // symmetric stress (or deviatoric) 3x3 from the 6
+                // component primals on the requested element class and
+                // read `eigvalsh` (a symmetric-3x3 Jacobi eigensolver
+                // in the core — bit-identical to numpy's f32 eigvalsh
+                // at every literal-checked point). Same gather as the
+                // scalar invariants.
+                let primal_names = mili_rs::principal_stress_primals();
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_principal_stress(kind, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((kind, title)) = mili_rs::principal_strain_spec(svar) {
+                // Strain invariants (vol_strain / prin_strain* /
+                // prin_dev_strain*): vol_strain is the trivial strain
+                // trace; the principal strains reuse the same
+                // symmetric-3x3 Jacobi eigensolver as the stress
+                // family on the 6 strain components (vol_strain reads
+                // only the 3 normals). Same gather pattern.
+                let primal_names = mili_rs::principal_strain_primals(kind);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_principal_strain(kind, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((kind, title)) = mili_rs::magnitude_spec(svar) {
+                // sqrt-of-sum-of-component-squares magnitudes
+                // (nodtangmag / shear_magnitude): same element-wise
+                // pattern as the scalar invariants, no connectivity.
+                let primal_names = mili_rs::magnitude_primals(kind);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_magnitude(kind, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else {
                 let args = QueryArgs {
                     svar,
@@ -1308,7 +1618,21 @@ impl PyMiliDatabase {
 
             let n_st = state_idx.len();
             let n_lab = res.labels.len();
-            let n_comp = res.components.len();
+            // Atom count comes from the flat `[state][label][atom]`
+            // length, not `components`. For primal / nodal-derived
+            // results the two agree; for the stress invariants the
+            // result keeps the primal's per-IP atom axis while
+            // `components` is the single derived name (upstream
+            // `__initialize_result_dictionary` sets
+            // `components = [result_name]` over `np.empty_like(primal)`
+            // — m4 derived layout). Falls back to `components` only
+            // when the entity/state axes are empty (no atoms to infer).
+            let denom = n_st * n_lab;
+            let n_comp = if denom == 0 {
+                res.components.len()
+            } else {
+                res.values.len() / denom
+            };
 
             let layout = PyDict::new_bound(py);
             layout.set_item(
