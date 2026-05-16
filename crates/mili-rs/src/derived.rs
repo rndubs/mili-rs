@@ -378,21 +378,26 @@ pub fn compute_contact_force(
     result_name: &str,
     title: &str,
 ) -> Result<QueryResult> {
-    let StateValues::F32(pv) = &primal.values else {
-        return Err(MiliError::Unsupported(
-            "contact force requires a float32 contact primal",
-        ));
-    };
-    let StateValues::F32(av) = &area.values else {
-        return Err(MiliError::Unsupported(
-            "contact force requires a float32 area",
-        ));
-    };
+    // `result = contact_primal * area` (numpy element-wise, area
+    // broadcast over the primal's atom axis, label-aligned). The
+    // result dtype follows numpy promotion: f32×f32→f32 (dyna
+    // `sn`/`s<d>`, d3samp6), f64×f64→f64 (diablo `nodpres`,
+    // dbl_nodtang — f64 contact primal × the f64 M_QUAD area). The f32
+    // path is bit-identical to the original.
+    let pv32 = as_f32_slice(&primal.values);
+    let av32 = as_f32_slice(&area.values);
+    let pv64 = as_f64_slice(&primal.values);
+    let av64 = as_f64_slice(&area.values);
+    let use_f64 = pv64.is_some() || av64.is_some();
     let np_lab = primal.labels.len();
     let na = area.labels.len();
     if np_lab == 0 || na == 0 {
         return Ok(QueryResult {
-            values: StateValues::F32(Vec::new()),
+            values: if use_f64 {
+                StateValues::F64(Vec::new())
+            } else {
+                StateValues::F32(Vec::new())
+            },
             labels: primal.labels,
             components: vec![result_name.to_owned()],
             title: title.to_owned(),
@@ -401,35 +406,81 @@ pub fn compute_contact_force(
     }
     // av.len() == n_state * na (area is one value per state/label);
     // pv.len() == n_state * np_lab * atoms.
-    let ns = av.len() / na;
-    let atoms = if ns == 0 { 0 } else { pv.len() / (ns * np_lab) };
+    let pv_len = primal.values.len();
+    let av_len = area.values.len();
+    let ns = av_len / na;
+    let atoms = if ns == 0 { 0 } else { pv_len / (ns * np_lab) };
     let mut area_col: std::collections::HashMap<i32, usize> =
         std::collections::HashMap::with_capacity(na);
     for (i, &l) in area.labels.iter().enumerate() {
         area_col.entry(l).or_insert(i);
     }
-    let mut out: Vec<f32> = Vec::with_capacity(pv.len());
-    for s in 0..ns {
-        for i in 0..np_lab {
-            let ac = *area_col
-                .get(&primal.labels[i])
-                .ok_or(MiliError::Unsupported(
-                    "contact force: primal label missing from the area derived",
-                ))?;
-            let a = av[s * na + ac];
-            let base = s * np_lab * atoms + i * atoms;
-            for c in 0..atoms {
-                out.push(pv[base + c] * a);
+    let primal_at =
+        |idx: usize| -> f64 { pv64.map_or_else(|| f64::from(pv32.unwrap()[idx]), |v| v[idx]) };
+    let area_at =
+        |idx: usize| -> f64 { av64.map_or_else(|| f64::from(av32.unwrap()[idx]), |v| v[idx]) };
+    let values = if use_f64 {
+        let mut out: Vec<f64> = Vec::with_capacity(pv_len);
+        for s in 0..ns {
+            for i in 0..np_lab {
+                let ac = *area_col
+                    .get(&primal.labels[i])
+                    .ok_or(MiliError::Unsupported(
+                        "contact force: primal label missing from the area derived",
+                    ))?;
+                let a = area_at(s * na + ac);
+                let base = s * np_lab * atoms + i * atoms;
+                for c in 0..atoms {
+                    out.push(primal_at(base + c) * a);
+                }
             }
         }
-    }
+        StateValues::F64(out)
+    } else {
+        let pv = pv32.ok_or(MiliError::Unsupported(
+            "contact force requires a float contact primal",
+        ))?;
+        let av = av32.ok_or(MiliError::Unsupported(
+            "contact force requires a float area",
+        ))?;
+        let mut out: Vec<f32> = Vec::with_capacity(pv_len);
+        for s in 0..ns {
+            for i in 0..np_lab {
+                let ac = *area_col
+                    .get(&primal.labels[i])
+                    .ok_or(MiliError::Unsupported(
+                        "contact force: primal label missing from the area derived",
+                    ))?;
+                let a = av[s * na + ac];
+                let base = s * np_lab * atoms + i * atoms;
+                for c in 0..atoms {
+                    out.push(pv[base + c] * a);
+                }
+            }
+        }
+        StateValues::F32(out)
+    };
     Ok(QueryResult {
-        values: StateValues::F32(out),
+        values,
         labels: primal.labels,
         components: vec![result_name.to_owned()],
         title: title.to_owned(),
         class_name: primal.class_name,
     })
+}
+
+fn as_f32_slice(sv: &StateValues) -> Option<&[f32]> {
+    match sv {
+        StateValues::F32(v) => Some(v),
+        _ => None,
+    }
+}
+
+fn as_f64_slice(sv: &StateValues) -> Option<&[f64]> {
+    match sv {
+        StateValues::F64(v) => Some(v),
+        _ => None,
+    }
 }
 
 /// `eps_rate` → its title; the single primal is always `eps`

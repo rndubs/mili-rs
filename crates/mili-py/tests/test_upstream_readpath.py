@@ -277,30 +277,22 @@ _DERIVED_SERIAL_PASSING = {
     # `1..=25`). `nodtangmag` is a pure sqrt-of-squares magnitude with
     # no internal geometry query, so it now passes outright.
     "test_nodetangmag",
-}
-# `test_hex_relative_volume` / `test_diablo_normal_force` hit a
-# *second, distinct* blocker once the label bug is fixed: the
-# geometry-derived path (`mili_rs::geometry`) is hardcoded f32 for its
-# internal `nodpos` query, but dbl_nodtang is double-precision (f64
-# nodpos). That is a separate, parity-sensitive "generalize
-# geometry-derived to f64" sub-slice (numpy op-order / NEP50 over the
-# volume / area / jacobian / centroid math), not the label-resolution
-# bug. They stay honest strict-xfail with the accurate reason.
-# test_surfstrain is *additionally* the `face=` projection layer
-# (deferred, task-flagged).
-_DERIVED_DBL_NODTANG_BLOCKED = {
+    # The geometry-derived path is now generic over the primal `nodpos`
+    # dtype (`mili_rs::geometry` GeomF kernels + `compute_contact_force`
+    # f64): dbl_nodtang is double-precision, so `relative_volume`
+    # (f64-internal jacobian, f32 result) and `normal_force` (f64
+    # nodpres × the f64 M_QUAD area) are now bit-exact vs the upstream
+    # oracle. The f32 path is unchanged (same ops / exact divisors).
     "test_hex_relative_volume",
     "test_diablo_normal_force",
 }
+# No remaining dbl_nodtang derived-value blockers; test_surfstrain is
+# the `face=` projection layer (deferred, task-flagged) — see the
+# surfstrain reason below.
+_DERIVED_DBL_NODTANG_BLOCKED: set[str] = set()
 _DERIVED_DBL_NODTANG_REASON = (
-    "geometry-derived path is hardcoded f32 but the dbl_nodtang "
-    "(diablo) corpus is double-precision (f64 nodpos): the internal "
-    "`mili_rs::geometry` nodpos query rejects the f64 buffer. The core "
-    "primal-query label-resolution bug that previously blocked these "
-    "is fixed; this is a separate parity-sensitive 'generalize "
-    "geometry-derived to f64' sub-slice (numpy op-order / NEP50 over "
-    "the volume / area / jacobian / centroid math), independent of the "
-    "label-resolution fix and the derived value engine."
+    "dbl_nodtang derived-value path is complete (label-resolution + "
+    "geometry-derived f64 both landed); no remaining blocker."
 )
 _DERIVED_SURFSTRAIN_REASON = (
     "surfstrain requires the `face=` projection layer (task-flagged "
