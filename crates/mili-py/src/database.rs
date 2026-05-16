@@ -1287,6 +1287,40 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if let Some((inv, title)) = mili_rs::stress_invariant_spec(svar) {
+                // Scalar stress invariants (pressure / eff_stress /
+                // triaxiality / norm_press): pure element-wise math
+                // over the 6 stress component primals on the requested
+                // element class (`derived.py.__compute_{pressure,
+                // effective_stress,triaxiality,normalized_pressure}`).
+                // Gather each primal with the request's own
+                // labels/states/ips, then the core does the
+                // parity-sensitive arithmetic. No eigvalsh — the
+                // principal-stress family is a later sub-slice.
+                let primal_names = mili_rs::stress_invariant_primals(inv);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_stress_invariant(inv, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else {
                 let args = QueryArgs {
                     svar,
@@ -1308,7 +1342,21 @@ impl PyMiliDatabase {
 
             let n_st = state_idx.len();
             let n_lab = res.labels.len();
-            let n_comp = res.components.len();
+            // Atom count comes from the flat `[state][label][atom]`
+            // length, not `components`. For primal / nodal-derived
+            // results the two agree; for the stress invariants the
+            // result keeps the primal's per-IP atom axis while
+            // `components` is the single derived name (upstream
+            // `__initialize_result_dictionary` sets
+            // `components = [result_name]` over `np.empty_like(primal)`
+            // — m4 derived layout). Falls back to `components` only
+            // when the entity/state axes are empty (no atoms to infer).
+            let denom = n_st * n_lab;
+            let n_comp = if denom == 0 {
+                res.components.len()
+            } else {
+                res.values.len() / denom
+            };
 
             let layout = PyDict::new_bound(py);
             layout.set_item(

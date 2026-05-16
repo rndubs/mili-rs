@@ -18,10 +18,15 @@
 //! `reference_state` it is the primal `u<dir>` value queried at that
 //! state, aligned to the primal-returned labels.
 //!
-//! Velocities / accelerations (finite-difference over states) and the
-//! stress/strain invariants are later sub-slices. The reduction
-//! (`ResultModifier`) math is a decision-18 Python-over-primal
-//! post-process and lives in `milox`, not here.
+//! Velocities / accelerations (finite-difference over states) landed
+//! in their own sub-slice; the scalar stress invariants (`pressure`,
+//! `eff_stress`, `triaxiality`, `norm_press`) are below. The
+//! eigenvalue-based principal-stress / principal-dev-stress /
+//! max-shear-stress family (and the strain analogues) are a later
+//! sub-slice — they need a symmetric-3x3 eigensolver, a distinct
+//! numerical unit. The reduction (`ResultModifier`) math is a
+//! decision-18 Python-over-primal post-process and lives in `milox`,
+//! not here.
 
 use std::collections::HashMap;
 
@@ -478,5 +483,189 @@ pub fn compute_node_acceleration(
         components: vec![result_name.to_owned()],
         title: title.to_owned(),
         class_name: gathered.class_name,
+    })
+}
+
+/// The scalar (non-eigenvalue) stress invariants
+/// (`derived.py.__compute_{pressure,effective_stress,triaxiality,
+/// normalized_pressure}` ~1467-1671). All are pure element-wise
+/// arithmetic over the 6 stress component primals on the requested
+/// element class (`sx/sy/sz/sxy/syz/szx`; `pressure` needs only the
+/// three normals) — no `np.linalg.eigvalsh`, so no eigensolver. The
+/// principal-stress / principal-dev-stress / max-shear-stress family
+/// (and the strain analogues) are a later sub-slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StressInvariant {
+    Pressure,
+    EffStress,
+    Triaxiality,
+    NormPress,
+}
+
+/// Resolve a stress-invariant derived name to `(kind, title)`
+/// (`derived.py` `__derived_expressions` table, ~339-419).
+pub fn stress_invariant_spec(name: &str) -> Option<(StressInvariant, &'static str)> {
+    match name {
+        "pressure" => Some((StressInvariant::Pressure, "Pressure")),
+        "eff_stress" => Some((StressInvariant::EffStress, "Effective Stress")),
+        "triaxiality" => Some((StressInvariant::Triaxiality, "Triaxiality")),
+        "norm_press" => Some((StressInvariant::NormPress, "Normalized Pressure")),
+        _ => None,
+    }
+}
+
+/// The primal component svars this invariant reads, in the order the
+/// compute kernel indexes them. `pressure` uses only the three normal
+/// stresses (`derived.py:1520-1523`); the rest use all six.
+pub fn stress_invariant_primals(inv: StressInvariant) -> &'static [&'static str] {
+    match inv {
+        StressInvariant::Pressure => &["sx", "sy", "sz"],
+        _ => &["sx", "sy", "sz", "sxy", "syz", "szx"],
+    }
+}
+
+// The invariant math is identical for f32 (single-precision plt) and
+// f64 (double-precision plt) primals except the dtype the element-wise
+// arithmetic runs in. Mirrors numpy NEP50 exactly: the Python-float
+// `-(1/3)` / `0.5` / int `3` are weak scalars, so the operation stays
+// in the array (primal) dtype with the scalar cast to that dtype —
+// e.g. `f32(-(1/3)) * f32_array` (the established f32-per-state-time
+// NEP50 lesson, here for pure component arithmetic). `x**2` is numpy's
+// `fast_scalar_power` short-circuit to `x*x` (exact). Op order is
+// left-associative exactly as the Python source evaluates it. This
+// macro generates the two concrete kernels.
+macro_rules! impl_stress_invariant {
+    ($fn:ident, $t:ty) => {
+        fn $fn(inv: StressInvariant, c: &[&[$t]]) -> Vec<$t> {
+            let n = c[0].len();
+            // numpy: the Python float `-(1/3)` is a weak scalar cast to
+            // the array dtype, so the constant is the array-dtype
+            // rounding of 1/3 — `-1.0/3.0` evaluated in `$t` is exactly
+            // that (f32: the correctly-rounded f32 reciprocal, same bit
+            // pattern as f64(-1/3) cast to f32; f64: -0.333…3 as in
+            // Python). No `as` cast → no precision-loss / truncation.
+            let third: $t = -1.0 / 3.0;
+            let half: $t = 0.5;
+            let three: $t = 3.0;
+            let (sx, sy, sz) = (c[0], c[1], c[2]);
+            if let StressInvariant::Pressure = inv {
+                // `(-1/3) * (sx + sy + sz)` (`derived.py:1523`).
+                return (0..n).map(|i| third * ((sx[i] + sy[i]) + sz[i])).collect();
+            }
+            let (sxy, syz, szx) = (c[3], c[4], c[5]);
+            // `eff_stress` only: if every sx==sy and sy==sz to within
+            // atol=1e-15 (rtol=0) over the *whole* queried array, the
+            // pressure collapses to `-sx` to kill the round-off in
+            // `-(1/3)*(sx+sy+sz)` for hydrostatic states
+            // (`derived.py:1491-1496`). `np.allclose` is a whole-array
+            // reduction; `and` short-circuits.
+            let hydro = matches!(inv, StressInvariant::EffStress) && {
+                let atol: $t = 1e-15;
+                (0..n).all(|i| (sx[i] - sy[i]).abs() <= atol)
+                    && (0..n).all(|i| (sy[i] - sz[i]).abs() <= atol)
+            };
+            (0..n)
+                .map(|i| {
+                    let p: $t = if hydro {
+                        -sx[i]
+                    } else {
+                        third * ((sx[i] + sy[i]) + sz[i])
+                    };
+                    let dx = sx[i] + p;
+                    let dy = sy[i] + p;
+                    let dz = sz[i] + p;
+                    // J2 = 0.5*(dx^2+dy^2+dz^2) + sxy^2 + syz^2 + szx^2,
+                    // left-associative exactly as Python evaluates it
+                    // (`derived.py:1503-1504` / 1631-1632 / 1663-1664).
+                    let j2 = half * (((dx * dx) + (dy * dy)) + (dz * dz))
+                        + sxy[i] * sxy[i]
+                        + syz[i] * syz[i]
+                        + szx[i] * szx[i];
+                    let seff = (three * j2).sqrt();
+                    match inv {
+                        StressInvariant::EffStress => seff,
+                        StressInvariant::Triaxiality => -p / seff,
+                        StressInvariant::NormPress => p / seff,
+                        StressInvariant::Pressure => unreachable!(),
+                    }
+                })
+                .collect()
+        }
+    };
+}
+
+impl_stress_invariant!(stress_invariant_f32, f32);
+impl_stress_invariant!(stress_invariant_f64, f64);
+
+/// Compute a scalar stress invariant from its component primals.
+///
+/// `primals` are the `stress_invariant_primals(inv)` queries (same
+/// class / labels / states / ips, so identical shape and flat
+/// `[state][label][atom]` length — upstream broadcasts them
+/// element-wise). The result keeps the primal's entity/atom axes; the
+/// `components` axis is the single derived name (upstream
+/// `__initialize_result_dictionary` sets `components = [result_name]`
+/// while `data` keeps `np.empty_like(primal)`'s shape — the binding
+/// derives the atom count from the flat length, not `components`).
+pub fn compute_stress_invariant(
+    inv: StressInvariant,
+    primals: &[QueryResult],
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let need = stress_invariant_primals(inv).len();
+    if primals.len() != need {
+        return Err(MiliError::Unsupported(
+            "stress invariant primal count mismatch",
+        ));
+    }
+    let first = &primals[0];
+    let n = first.values.len();
+    for p in primals {
+        if p.values.len() != n || p.labels.len() != first.labels.len() {
+            return Err(MiliError::Unsupported(
+                "stress invariant component primals disagree in shape",
+            ));
+        }
+    }
+
+    let values = match &first.values {
+        StateValues::F32(_) => {
+            let mut cols: Vec<&[f32]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F32(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "stress invariant component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F32(stress_invariant_f32(inv, &cols))
+        }
+        StateValues::F64(_) => {
+            let mut cols: Vec<&[f64]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F64(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "stress invariant component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F64(stress_invariant_f64(inv, &cols))
+        }
+        _ => {
+            return Err(MiliError::Unsupported(
+                "stress invariants require float stress primals",
+            ))
+        }
+    };
+
+    Ok(QueryResult {
+        values,
+        labels: first.labels.clone(),
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: first.class_name.clone(),
     })
 }

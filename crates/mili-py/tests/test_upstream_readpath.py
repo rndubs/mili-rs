@@ -202,9 +202,14 @@ _DERIVED_LISTING_METHODS = {
 # velocity/acceleration finite-difference family
 # (vel_*/acc_* — f32 single-prec d3samp6 for acc, f64 double-prec
 # solids014_dblplt for vel; f32 per-state-time arithmetic mirrors
-# numpy NEP50 promotion). The stress/strain invariants and the
-# remaining geometry-ish derived (centroid/element_volume/…) are
-# later sub-slices.
+# numpy NEP50 promotion). The scalar (non-eigenvalue) stress
+# invariants (pressure / eff_stress / triaxiality / norm_press) are
+# pure element-wise arithmetic over the 6 stress component primals
+# on the requested element class (f32/f64-generic, numpy NEP50 weak-
+# scalar promotion). The eigenvalue-based principal-stress /
+# principal-dev-stress / max-shear-stress family, the strain
+# invariants, and the remaining geometry-ish derived
+# (centroid/element_volume/…) are later sub-slices.
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
     "test_disp_y",
@@ -219,6 +224,11 @@ _DERIVED_SERIAL_PASSING = {
     "test_acc_x",
     "test_acc_y",
     "test_acc_z",
+    "test_pressure",
+    "test_eff_stress",
+    "test_triaxiality",
+    "test_normalized_pressure",
+    "test_query_multiple_variables",
 }
 
 
