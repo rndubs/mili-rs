@@ -16,8 +16,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use mili_rs::{
-    Database, DatabaseSet, MaterialArg, MeshId, NodesOfElems, ParamPy, QueryArgs, QueryResult,
-    StateValues,
+    Database, DatabaseSet, MaterialArg, MeshId, MiliError, NodesOfElems, ParamPy, QueryArgs,
+    QueryResult, StateValues,
 };
 
 use crate::errors::{to_pyerr, MiliPythonError};
@@ -973,6 +973,9 @@ impl PyMiliDatabase {
         // Hidden **kwargs: validate exactly per
         // `miliinternal.py:1159` and surface the typed hierarchy.
         let mut subrec_name: Option<String> = None;
+        // `reference_state` for the nodal-displacement derived family
+        // (`derived.py:982/948`); 0 = initial nodal coordinates.
+        let mut reference_state: i64 = 0;
         if let Some(kw) = kwargs {
             const ALLOWED: [&str; 5] = [
                 "output_object_labels",
@@ -1003,11 +1006,16 @@ impl PyMiliDatabase {
                     ));
                 }
             }
-            if kwargs_present(kw, "reference_state")? || kwargs_present(kw, "face")? {
+            if kwargs_present(kw, "face")? {
                 return Err(MiliPythonError::new_err(
-                    "the 'reference_state' / 'face' kwargs require the derived / \
-                     projection layer (Python-over-primal; M4-followup)",
+                    "the 'face' kwarg requires the projection layer \
+                     (Python-over-primal; M4-followup)",
                 ));
+            }
+            if let Some(v) = kw.get_item("reference_state")? {
+                if !v.is_none() {
+                    reference_state = v.extract()?;
+                }
             }
             if let Some(v) = kw.get_item("output_object_labels")? {
                 if !v.extract::<bool>().unwrap_or(true) {
@@ -1095,71 +1103,208 @@ impl PyMiliDatabase {
         let mesh = self.mesh;
         let out = PyDict::new_bound(py);
         for svar in &svars {
-            // Node-displacement derived (`disp_x`/`disp_y`/`disp_z`):
-            // not a primal svar, so upstream resolves the source to
-            // 'derived' and computes it from the primal `ux`/`uy`/`uz`
-            // query minus the initial nodal coordinate
-            // (`derived.py.__compute_node_displacement`,
-            // `reference_state=0`). The reduction (`ResultModifier`)
-            // post-process stays Python-over-primal in `milox`.
-            let (res, source): (QueryResult, &str) =
-                if let Some((dir, title)) = mili_rs::node_disp_spec(svar) {
-                    let primal_name = mili_rs::node_disp_primal(dir);
-                    let pargs = QueryArgs {
-                        svar: primal_name,
-                        class: &entity_type,
-                        labels: labels_ref,
-                        states: &state_idx,
-                        materials: materials_ref,
-                        ips: ips_ref,
-                        subrec: subrec_ref,
-                    };
-                    let computed = py
-                        .allow_threads(|| -> mili_rs::Result<QueryResult> {
-                            let primal = match &self.backend {
-                                Backend::Single(db) => db.query_full(&pargs)?,
-                                Backend::Set(s) => s.query_full(&pargs)?,
+            // Nodal-displacement derived family. Not primal svars, so
+            // upstream resolves the source to 'derived' and computes
+            // them from the primal `ux`/`uy`/`uz` query minus a
+            // per-node reference: at `reference_state == 0` the initial
+            // nodal coordinate (`db.nodes()`), otherwise the primal
+            // component queried at that state
+            // (`derived.py.__get_nodal_reference_positions`). The
+            // reduction (`ResultModifier`) post-process stays
+            // Python-over-primal in `milox`.
+            let disp_mag = mili_rs::node_disp_mag_spec(svar);
+            let disp_comp = mili_rs::node_disp_spec(svar);
+            let (res, source): (QueryResult, &str) = if disp_comp.is_some() || disp_mag.is_some() {
+                // Directions this derived needs: one for a
+                // component (`disp_x`), the magnitude set otherwise.
+                let dirs: Vec<usize> = match (disp_comp, disp_mag) {
+                    (Some((d, _)), _) => vec![d],
+                    (_, Some((ds, _))) => ds.to_vec(),
+                    _ => unreachable!(),
+                };
+                let title = disp_comp
+                    .map(|(_, t)| t)
+                    .or(disp_mag.map(|(_, t)| t))
+                    .unwrap();
+                let ref_state = reference_state;
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let q = |sv: &str, st: &[usize]| -> mili_rs::Result<QueryResult> {
+                            let a = QueryArgs {
+                                svar: sv,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: st,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
                             };
-                            let (coords, dims) = match &self.backend {
+                            match &self.backend {
+                                Backend::Single(db) => db.query_full(&a),
+                                Backend::Set(s) => s.query_full(&a),
+                            }
+                        };
+                        // Initial nodal coords (only needed for the
+                        // reference_state == 0 path).
+                        let (coords, dims) = if ref_state == 0 {
+                            match &self.backend {
                                 Backend::Single(db) => db.node_coords(mesh)?,
                                 Backend::Set(s) => s.node_coords(mesh)?,
                             }
-                            .unwrap_or_default();
-                            let node_labels = match &self.backend {
+                            .unwrap_or_default()
+                        } else {
+                            (Vec::new(), 0)
+                        };
+                        let node_labels = if ref_state == 0 {
+                            match &self.backend {
                                 Backend::Single(db) => db.labels(mesh, "node")?,
                                 Backend::Set(s) => s.labels(mesh, "node")?,
                             }
-                            .unwrap_or_default();
+                            .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        let ref_idx: Vec<usize> = if ref_state == 0 {
+                            Vec::new()
+                        } else {
+                            vec![usize::try_from(ref_state - 1).map_err(|_| {
+                                MiliError::Unsupported("reference_state out of range")
+                            })?]
+                        };
+
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(dirs.len());
+                        let mut refs: Vec<Vec<f32>> = Vec::with_capacity(dirs.len());
+                        for &d in &dirs {
+                            let pname = mili_rs::node_disp_primal(d);
+                            let primal = q(pname, &state_idx)?;
+                            let reference = if ref_state == 0 {
+                                mili_rs::nodal_reference_from_coords(
+                                    &primal.labels,
+                                    &node_labels,
+                                    &coords,
+                                    dims.max(1),
+                                    d,
+                                )?
+                            } else {
+                                let rq = q(pname, &ref_idx)?;
+                                mili_rs::nodal_reference_from_query(&primal.labels, &rq)?
+                            };
+                            primals.push(primal);
+                            refs.push(reference);
+                        }
+
+                        if disp_comp.is_some() {
                             mili_rs::compute_node_displacement(
-                                primal,
-                                &node_labels,
-                                &coords,
-                                dims.max(1),
-                                dir,
+                                primals.pop().unwrap(),
+                                &refs.pop().unwrap(),
                                 svar,
                                 title,
                             )
-                        })
-                        .map_err(|e| to_pyerr(&e))?;
-                    (computed, "derived")
-                } else {
-                    let args = QueryArgs {
-                        svar,
-                        class: &entity_type,
-                        labels: labels_ref,
-                        states: &state_idx,
-                        materials: materials_ref,
-                        ips: ips_ref,
-                        subrec: subrec_ref,
-                    };
-                    let primal = py
-                        .allow_threads(|| match &self.backend {
-                            Backend::Single(db) => db.query_full(&args),
-                            Backend::Set(s) => s.query_full(&args),
-                        })
-                        .map_err(|e| to_pyerr(&e))?;
-                    (primal, "primal")
+                        } else {
+                            mili_rs::compute_node_displacement_magnitude(
+                                &primals, &refs, svar, title,
+                            )
+                        }
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((dir, title)) = mili_rs::node_vel_spec(svar)
+                .map(|s| (s, false))
+                .or(mili_rs::node_acc_spec(svar).map(|s| (s, true)))
+                .map(|((d, t), is_acc)| (d, (t, is_acc)))
+            {
+                // Nodal velocity / acceleration: finite difference of
+                // the primal `u<dir>` over states + the f32 per-state
+                // times (`derived.py.__compute_node_{velocity,
+                // acceleration}`). Gather the primal at every state the
+                // stencil touches in one query, then the core does the
+                // parity-sensitive difference math.
+                let (title, is_acc) = title;
+                let primal_name = mili_rs::node_disp_primal(dir);
+                let max_state = n_states as i64;
+                // 1-based states the stencil needs across all requested.
+                let mut needed: Vec<i64> = Vec::new();
+                for &s in &state_nums {
+                    if is_acc {
+                        if s == 1 {
+                            needed.extend([1, 2, 3]);
+                        } else if s == max_state {
+                            needed.extend([max_state, max_state - 1, max_state - 2]);
+                        } else {
+                            needed.extend([s - 1, s, s + 1]);
+                        }
+                    } else {
+                        needed.push(s);
+                        if s != 1 {
+                            needed.push(s - 1);
+                        }
+                    }
+                }
+                needed.retain(|&n| n >= 1 && n <= max_state);
+                needed.sort_unstable();
+                needed.dedup();
+                let needed_idx: Vec<usize> = needed.iter().map(|&n| (n - 1) as usize).collect();
+                let req_states = state_nums.clone();
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let gargs = QueryArgs {
+                            svar: primal_name,
+                            class: &entity_type,
+                            labels: labels_ref,
+                            states: &needed_idx,
+                            materials: materials_ref,
+                            ips: ips_ref,
+                            subrec: subrec_ref,
+                        };
+                        let gathered = match &self.backend {
+                            Backend::Single(db) => db.query_full(&gargs)?,
+                            Backend::Set(s) => s.query_full(&gargs)?,
+                        };
+                        let raw_times: Vec<f32> = match &self.backend {
+                            Backend::Single(db) => db.times(),
+                            Backend::Set(s) => s.times(),
+                        };
+                        if is_acc {
+                            mili_rs::compute_node_acceleration(
+                                gathered,
+                                &needed,
+                                &req_states,
+                                &raw_times,
+                                max_state,
+                                svar,
+                                title,
+                            )
+                        } else {
+                            mili_rs::compute_node_velocity(
+                                gathered,
+                                &needed,
+                                &req_states,
+                                &raw_times,
+                                svar,
+                                title,
+                            )
+                        }
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else {
+                let args = QueryArgs {
+                    svar,
+                    class: &entity_type,
+                    labels: labels_ref,
+                    states: &state_idx,
+                    materials: materials_ref,
+                    ips: ips_ref,
+                    subrec: subrec_ref,
                 };
+                let primal = py
+                    .allow_threads(|| match &self.backend {
+                        Backend::Single(db) => db.query_full(&args),
+                        Backend::Set(s) => s.query_full(&args),
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (primal, "primal")
+            };
 
             let n_st = state_idx.len();
             let n_lab = res.labels.len();

@@ -52,11 +52,14 @@ __all__ = [
 # Upstream _MiliInternal read methods not yet on the Rust surface.
 # Phase G landed every primal-only reshape; the remainder is Phase H
 # (geometry / derived / adjacency — value-producing, fully parity-gated).
-_UNPORTED = {
-    "supported_derived_variables": "H",
-    "derived_variables_of_class": "H",
-    "classes_of_derived_variable": "H",
-}
+# Phase H landed the derived-variable *listing* surface
+# (supported_derived_variables / derived_variables_of_class /
+# classes_of_derived_variable — verbatim metadata over already-ported
+# core accessors). The derived *value* engine (stress/strain
+# invariants, velocities, accelerations, …) is the next sub-slice and
+# routes through milox.derived's explicit typed-error stub /
+# the Rust core (node displacement already landed there).
+_UNPORTED: Dict[str, str] = {}
 
 
 def _np_i32(values: Any) -> "np.ndarray":
@@ -91,6 +94,29 @@ class _MiliInternal:
                 self._db = PyMiliDatabase.open_single(os.path.join(dn, afiles[0]))
             else:
                 self._db = PyMiliDatabase.open_set(os.path.join(dn, bf))
+
+        # Derived-variable listing engine (Phase H listing sub-slice).
+        # Upstream holds `self.__derived = DerivedExpressions(self)`
+        # (miliinternal.py:286) and the three listing methods delegate.
+        from .derived import DerivedExpressions
+
+        self.__derived = DerivedExpressions(self)
+
+    # ---- Phase H: derived-variable listing (verbatim metadata) ----
+    def supported_derived_variables(self) -> List[str]:
+        return self.__derived.supported_variables()
+
+    def derived_variables_of_class(self, class_name: str) -> List[str]:
+        if class_name not in self.mesh_object_classes():
+            self._err(f"The class '{class_name}' does not exist.")
+            return []
+        return self.__derived.derived_variables_of_class(class_name)
+
+    def classes_of_derived_variable(self, var_name: str) -> List[str]:
+        if var_name not in self.__derived.supported_variables():
+            self._err(f"The derived variable '{var_name}' does not exist.")
+            return []
+        return self.__derived.classes_of_derived_variable(var_name)
 
     # ---- return-code plumbing (MiliDatabase.__postprocess) ----
     def returncode(self) -> Any:

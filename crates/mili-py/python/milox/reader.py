@@ -17,8 +17,9 @@ from .afileIO import MiliFileNotFoundError, afiles_by_base
 from .milidatabase import MiliDatabase
 from .miliinternal import _MiliInternal
 from .parallel import LoopWrapper, ServerWrapper
+from .reductions import combine
 
-__all__ = ["open_database"]
+__all__ = ["open_database", "combine"]
 
 
 def open_database(

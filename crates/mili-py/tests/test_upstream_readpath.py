@@ -51,11 +51,10 @@ _REDIRECT = {
 # passed, never deleted (planning/mili-py/m4.md decision 19). Strict:
 # if one starts passing, the harness fails so it gets promoted.
 # Keyed by ``module::Class::method``.
-_XFAIL = {
-    "test_miliinternal::TestMiliInternal::test_supported_variables": "Phase H: derived engine",
-    "test_miliinternal::TestMiliInternal::test_derived_variables_of_class": "Phase H: derived engine",
-    "test_miliinternal::TestMiliInternal::test_classes_of_derived_variable": "Phase H: derived engine",
-}
+# The derived-variable *listing* surface landed (Phase H listing
+# sub-slice): test_miliinternal's three listing tests now pass, so they
+# are no longer xfailed. Nothing else in this dict yet.
+_XFAIL: dict[str, str] = {}
 
 # test_milidatabase: milox collapses upstream's per-proc fan-out in the
 # Rust DatabaseSet, so the parallel handler classes' merge_results=False
@@ -72,7 +71,6 @@ _MDB_PARALLEL_CLASSES = (
 # (geometry / derived / projection / query result-modifiers — none of
 # which the Phase-G primal surface provides). Honest Phase-H xfail.
 _MDB_PHASE_H_METHODS = {
-    "test_derived_variables_of_class": "Phase H: derived engine (listing)",
     "test_query_project_to_nodes": "Phase H: projection engine",
 }
 # Parallel-class methods that legitimately *pass* now that the
@@ -171,18 +169,56 @@ _REDUCTIONS_MERGEDF_METHODS = {
     "test_vector",
     "test_vector_array",
 }
-# Serial methods that still route through a genuinely-unported engine:
-# the derived-variable *listing* (a later Phase-H sub-slice — the
-# node-displacement *value* engine is ported, the listing isn't) and
-# the Phase-3 write path. Honest strict-xfail, never silently passed.
-_REDUCTIONS_PHASE_H_METHODS = {
-    "test_supported_derived_variables": "Phase H: derived engine (listing)",
-    "test_derived_variables_of_class": "Phase H: derived engine (listing)",
-    "test_classes_of_derived_variable": "Phase H: derived engine (listing)",
-}
+# Serial methods that still route through a genuinely-unported engine.
+# The derived-variable *listing* surface landed (Phase H listing
+# sub-slice) so those promoted to green; only the Phase-3 write path
+# remains here. Honest strict-xfail, never silently passed.
+_REDUCTIONS_PHASE_H_METHODS: dict[str, str] = {}
 _REDUCTIONS_WRITE_METHODS = {
     "test_append_state": "Phase 3 write path",
     "test_copy_non_state_data": "Phase 3 write path",
+}
+
+
+# test_derived: the derived-variable *listing* surface landed (Phase H
+# listing sub-slice) — the three SerialDerivedExpressions listing tests
+# must pass. Every other test_derived method exercises the derived
+# *value* engine (stress/strain invariants, velocities, accelerations,
+# …) which is the next Phase-H sub-slice (parity-sensitive value math;
+# Rust core per decision 19 — node displacement already landed there).
+# Honest strict-xfail. ParallelDerivedExpressions additionally drives
+# the per-proc-unmerged parallel d3samp6 handlers (parallel scope, like
+# _MDB_PARALLEL_CLASSES). No listing tests on the parallel class.
+_DERIVED_LISTING_METHODS = {
+    "test_supported_variables",
+    "test_derived_variables_of_class",
+    "test_classes_of_derived_variable",
+}
+# Serial nodal-kinematics *value* tests in the Rust core
+# (mili_rs::derived), all routing through MiliDatabase.query -> Rust
+# (not milox.derived): disp_x/disp_y/disp_z (prior reductions
+# sub-slice), the displacement-magnitude + reference_state extension
+# (disp_mag/disp_rad_mag_xy/non-zero reference_state), and the
+# velocity/acceleration finite-difference family
+# (vel_*/acc_* — f32 single-prec d3samp6 for acc, f64 double-prec
+# solids014_dblplt for vel; f32 per-state-time arithmetic mirrors
+# numpy NEP50 promotion). The stress/strain invariants and the
+# remaining geometry-ish derived (centroid/element_volume/…) are
+# later sub-slices.
+_DERIVED_SERIAL_PASSING = {
+    "test_disp_x",
+    "test_disp_y",
+    "test_disp_z",
+    "test_disp_mag",
+    "test_disp_mag_ref",
+    "test_disp_rad_mag_xy",
+    "test_disp_y_reference_state",
+    "test_vel_x",
+    "test_vel_y",
+    "test_vel_z",
+    "test_acc_x",
+    "test_acc_y",
+    "test_acc_z",
 }
 
 
@@ -195,6 +231,19 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
             return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
         if meth in _MDB_PHASE_H_METHODS:
             return _MDB_PHASE_H_METHODS[meth]
+    if mod == "test_derived":
+        if cls == "SerialDerivedExpressions" and (
+            meth in _DERIVED_LISTING_METHODS
+            or meth in _DERIVED_SERIAL_PASSING
+        ):
+            return None
+        if cls == "ParallelDerivedExpressions":
+            return (
+                "parallel handler scope + derived value engine (Rust "
+                "DatabaseSet collapses the per-proc fan-out; Phase H "
+                "derived value sub-slice)"
+            )
+        return "Phase H: derived value engine (next sub-slice)"
     if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
         return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
     if mod == "test_reductions":
@@ -261,6 +310,7 @@ _REDIRECTED = [
     "test_milidatabase",
     "test_adjacency",
     "test_reductions",
+    "test_derived",
 ]
 
 
