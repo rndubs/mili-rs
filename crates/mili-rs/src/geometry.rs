@@ -107,6 +107,10 @@ pub enum Faces {
     Ok([[i32; 4]; 6]),
 }
 
+// surfstrain centroid shape-function derivatives (`derived.py` `Nd`,
+// `__compute_surface_strain` ~2149-2160).
+const SURF_ND: [[f32; 2]; 4] = [[-0.25, -0.25], [0.25, -0.25], [0.25, 0.25], [-0.25, 0.25]];
+
 // Trilinear 8-node shape-function natural derivatives for
 // `relative_volume` (`derived.py:2328-2330`).
 const DN1: [f64; 8] = [-0.125, -0.125, 0.125, 0.125, -0.125, -0.125, 0.125, 0.125];
@@ -695,6 +699,226 @@ impl Database {
             labels: elems,
             components: vec!["relative_volume".to_owned()],
             title: "Relative Volume".to_owned(),
+            class_name: class.to_owned(),
+        })
+    }
+
+    /// Derived `surfstrain{x,y,z,xy,yz,zx}` for one face of an M_HEX
+    /// element (`derived.py.__compute_surface_strain`). The nodal
+    /// positions (`ux`/`uy`/`uz` are the `nodpos` components) are read
+    /// at the primal dtype — f64 for `dbl_nodtang`, the only corpus
+    /// that exercises this — and the displacement `disp = pos - ref`
+    /// stays f64; every `np.empty(..., dtype=np.float32)` intermediate
+    /// (`dt1`, the reference tangents `t1O`/`t2O`, `nnO`, `dt1h`/
+    /// `dt2h`, `dispOL`, and the Jacobian / strain / rotation
+    /// matrices) is computed in f32 with the identical op order, so
+    /// the f64→f32 truncation points (tangent build, the `dispOL`
+    /// accumulation) land bit-identically vs the upstream oracle.
+    /// Reference positions are the initial node coordinates
+    /// (`reference_state == 0`; a non-zero reference_state is rejected
+    /// upstream of the core — extension scope, never a silent wrong
+    /// answer). Result `[state][elem]`, f32.
+    #[allow(
+        clippy::too_many_lines,
+        clippy::too_many_arguments,
+        clippy::many_single_char_names
+    )]
+    pub fn surface_strain_query(
+        &self,
+        mesh: MeshId,
+        class: &str,
+        req_labels: Option<&[i32]>,
+        state_idx: &[usize],
+        face: i64,
+        out_jr: usize,
+        out_ic: usize,
+        result_name: &str,
+        title: &str,
+    ) -> Result<QueryResult> {
+        let code = self
+            .superclass_code(mesh, class)
+            .ok_or_else(|| MiliError::UnknownClass(class.to_owned()))?;
+        let sclass = Superclass::from_code(i64::from(code))
+            .ok_or(MiliError::MalformedDirectory("surfstrain: bad superclass"))?;
+        if sclass != Superclass::Hex {
+            return Err(MiliError::Unsupported(
+                "surfstrain is only defined for M_HEX",
+            ));
+        }
+        // 1-based face → the element's 4 local hex node indices
+        // (`derived.py` face_to_nodes — identical to the `faces()`
+        // table). The binding validates `face ∈ 1..=6` and surfaces
+        // the upstream message; this guards the core directly too.
+        let face_nodes: [usize; 4] = usize::try_from(face)
+            .ok()
+            .filter(|&f| f >= 1)
+            .and_then(|f| FACE_TO_NODES.get(f - 1).copied())
+            .ok_or(MiliError::Unsupported("surfstrain: invalid face"))?;
+        let (np, dims, nr, k, em, elems, ret) =
+            self.elem_node_gather(mesh, class, req_labels, state_idx)?;
+
+        // Reference (state-0) node coordinates aligned to the gathered
+        // node rows: db.nodes()[ordinal-of-label], the f32 db.nodes()
+        // dtype (same alignment as relative_volume).
+        let (ncoords, ndims) = self.node_coords(mesh)?.unwrap_or_default();
+        let node_lbls = self.labels(mesh, "node")?.unwrap_or_default();
+        let mut ord_of: HashMap<i32, usize> = HashMap::with_capacity(node_lbls.len());
+        for (i, &l) in node_lbls.iter().enumerate() {
+            ord_of.entry(l).or_insert(i);
+        }
+        let mut ref_xyz: Vec<[f32; 3]> = Vec::with_capacity(nr);
+        for &lab in &ret {
+            let o = *ord_of.get(&lab).ok_or(MiliError::Unsupported(
+                "surfstrain: gathered node missing from nodes()",
+            ))?;
+            ref_xyz.push([
+                ncoords[o * ndims],
+                ncoords[o * ndims + 1],
+                ncoords[o * ndims + 2],
+            ]);
+        }
+
+        let ne = elems.len();
+        let ns = state_idx.len();
+        let mut out: Vec<f32> = vec![0.0; ns * ne];
+        // f32 += f32·f64 → f32, one rounding per accumulation step
+        // (numpy assigns the f64 product back into the f32 `dispOL`).
+        let acc = |a: f32, c: f32, dv: f64| -> f32 { (f64::from(a) + f64::from(c) * dv) as f32 };
+
+        for e in 0..ne {
+            let fr: [usize; 4] = std::array::from_fn(|m| em[e * k + face_nodes[m]]);
+            let rx: [f32; 4] = std::array::from_fn(|m| ref_xyz[fr[m]][0]);
+            let ry: [f32; 4] = std::array::from_fn(|m| ref_xyz[fr[m]][1]);
+            let rz: [f32; 4] = std::array::from_fn(|m| ref_xyz[fr[m]][2]);
+            for si in 0..ns {
+                let base = si * nr * dims;
+                let ux: [f64; 4] = std::array::from_fn(|m| nodpos_f64(&np, base + fr[m] * dims));
+                let uy: [f64; 4] =
+                    std::array::from_fn(|m| nodpos_f64(&np, base + fr[m] * dims + 1));
+                let uz: [f64; 4] =
+                    std::array::from_fn(|m| nodpos_f64(&np, base + fr[m] * dims + 2));
+                let dx: [f64; 4] = std::array::from_fn(|m| ux[m] - f64::from(rx[m]));
+                let dy: [f64; 4] = std::array::from_fn(|m| uy[m] - f64::from(ry[m]));
+                let dz: [f64; 4] = std::array::from_fn(|m| uz[m] - f64::from(rz[m]));
+                // Input local direction 1 (f64 diff → f32 array).
+                let dt1 = [
+                    (ux[1] - ux[0]) as f32,
+                    (uy[1] - uy[0]) as f32,
+                    (uz[1] - uz[0]) as f32,
+                ];
+                // Reference tangents at the centroid (f64 → f32).
+                let t1o = [
+                    (0.25 * (ux[1] + ux[2] - ux[0] - ux[3])) as f32,
+                    (0.25 * (uy[1] + uy[2] - uy[0] - uy[3])) as f32,
+                    (0.25 * (uz[1] + uz[2] - uz[0] - uz[3])) as f32,
+                ];
+                let t2o = [
+                    (0.25 * (ux[3] + ux[2] - ux[0] - ux[1])) as f32,
+                    (0.25 * (uy[3] + uy[2] - uy[0] - uy[1])) as f32,
+                    (0.25 * (uz[3] + uz[2] - uz[0] - uz[1])) as f32,
+                ];
+                // Normal at the centroid (f32 cross), normalized.
+                let mut nno = [
+                    t1o[1] * t2o[2] - t1o[2] * t2o[1],
+                    t1o[2] * t2o[0] - t1o[0] * t2o[2],
+                    t1o[0] * t2o[1] - t1o[1] * t2o[0],
+                ];
+                let inv = 1.0f32 / (nno[0] * nno[0] + nno[1] * nno[1] + nno[2] * nno[2]).sqrt();
+                nno = [inv * nno[0], inv * nno[1], inv * nno[2]];
+                // (upstream's t1Oh / t2Oh are computed but never read
+                // — dead in `derived.py`, so not reproduced here.)
+                // dt1 made orthogonal to nnO, then normalized.
+                let d = dt1[0] * nno[0] + dt1[1] * nno[1] + dt1[2] * nno[2];
+                let mut dt1h = [
+                    dt1[0] - nno[0] * d,
+                    dt1[1] - nno[1] * d,
+                    dt1[2] - nno[2] * d,
+                ];
+                let inv =
+                    1.0f32 / (dt1h[0] * dt1h[0] + dt1h[1] * dt1h[1] + dt1h[2] * dt1h[2]).sqrt();
+                dt1h = [inv * dt1h[0], inv * dt1h[1], inv * dt1h[2]];
+                let dt2h = [
+                    nno[1] * dt1h[2] - nno[2] * dt1h[1],
+                    nno[2] * dt1h[0] - nno[0] * dt1h[2],
+                    nno[0] * dt1h[1] - nno[1] * dt1h[0],
+                ];
+                // Local-frame nodal displacements.
+                let mut dispol = [[0.0f32; 3]; 4];
+                for j in 0..4 {
+                    let mut a0 = 0.0f32;
+                    a0 = acc(a0, dt1h[0], dx[j]);
+                    a0 = acc(a0, dt1h[1], dy[j]);
+                    a0 = acc(a0, dt1h[2], dz[j]);
+                    let mut a1 = 0.0f32;
+                    a1 = acc(a1, dt2h[0], dx[j]);
+                    a1 = acc(a1, dt2h[1], dy[j]);
+                    a1 = acc(a1, dt2h[2], dz[j]);
+                    let mut a2 = 0.0f32;
+                    a2 = acc(a2, nno[0], dx[j]);
+                    a2 = acc(a2, nno[1], dy[j]);
+                    a2 = acc(a2, nno[2], dz[j]);
+                    dispol[j] = [a0, a1, a2];
+                }
+                // Reference Jacobian (only the in-plane 2x2 is used).
+                let dxdxi00 = dt1h[0] * t1o[0] + dt1h[1] * t1o[1] + dt1h[2] * t1o[2];
+                let dxdxi01 = dt1h[0] * t2o[0] + dt1h[1] * t2o[1] + dt1h[2] * t2o[2];
+                let dxdxi10 = dt2h[0] * t1o[0] + dt2h[1] * t1o[1] + dt2h[2] * t1o[2];
+                let dxdxi11 = dt2h[0] * t2o[0] + dt2h[1] * t2o[1] + dt2h[2] * t2o[2];
+                let onedet = 1.0f32 / (dxdxi00 * dxdxi11 - dxdxi01 * dxdxi10);
+                let dxidx00 = onedet * dxdxi11;
+                let dxidx01 = -onedet * dxdxi01;
+                let dxidx10 = -onedet * dxdxi10;
+                let dxidx11 = onedet * dxdxi00;
+                // du/dxi then du/dx (f32 sequential accumulation; the
+                // third spatial column is zero — dxidx[*][2] == 0).
+                let mut dudx = [[0.0f32; 3]; 3]; // [spatial c][col]
+                for c in 0..3 {
+                    let mut g0 = 0.0f32;
+                    let mut g1 = 0.0f32;
+                    for j in 0..4 {
+                        g0 += dispol[j][c] * SURF_ND[j][0];
+                        g1 += dispol[j][c] * SURF_ND[j][1];
+                    }
+                    let mut x0 = 0.0f32;
+                    x0 += g0 * dxidx00;
+                    x0 += g1 * dxidx10;
+                    let mut x1 = 0.0f32;
+                    x1 += g0 * dxidx01;
+                    x1 += g1 * dxidx11;
+                    dudx[c] = [x0, x1, 0.0];
+                }
+                // Local 3x3 strain.
+                let e3dl = [
+                    [dudx[0][0], 0.5f32 * (dudx[0][1] + dudx[1][0]), 0.0],
+                    [0.5f32 * (dudx[0][1] + dudx[1][0]), dudx[1][1], 0.0],
+                    [0.0f32, 0.0, 0.0],
+                ];
+                // Rotation R = columns [dt1h | dt2h | nnO].
+                let r3d = [
+                    [dt1h[0], dt2h[0], nno[0]],
+                    [dt1h[1], dt2h[1], nno[1]],
+                    [dt1h[2], dt2h[2], nno[2]],
+                ];
+                // e3dg = R · e3dl · Rᵀ, accumulated in upstream's
+                // p-major q-minor order (f32).
+                let mut e3dg = [[0.0f32; 3]; 3];
+                for (jj, e_row) in e3dg.iter_mut().enumerate() {
+                    for p in 0..3 {
+                        for q in 0..3 {
+                            for (ii, e) in e_row.iter_mut().enumerate() {
+                                *e += r3d[jj][p] * r3d[ii][q] * e3dl[p][q];
+                            }
+                        }
+                    }
+                }
+                out[si * ne + e] = e3dg[out_jr][out_ic];
+            }
+        }
+        Ok(QueryResult {
+            values: StateValues::F32(out),
+            labels: elems,
+            components: vec![result_name.to_owned()],
+            title: title.to_owned(),
             class_name: class.to_owned(),
         })
     }

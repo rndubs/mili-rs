@@ -285,19 +285,31 @@ _DERIVED_SERIAL_PASSING = {
     # oracle. The f32 path is unchanged (same ops / exact divisors).
     "test_hex_relative_volume",
     "test_diablo_normal_force",
+    # The per-face Hex `surfstrain{x,y,z,xy,yz,zx}` derived + the
+    # `face=` query kwarg landed (core `surface_strain_query`). It is
+    # bit-exact vs the upstream oracle on dbl_nodtang for every
+    # component/face the test exercises (faces 1 & 3 asserted, all 6
+    # checked), mirroring numpy's mixed precision exactly: the
+    # `ux/uy/uz` = `nodpos` positions are f64 (double-precision
+    # corpus) and `disp = pos - ref` stays f64, while every
+    # `np.empty(..., dtype=np.float32)` intermediate is f32 with the
+    # same op order, so the f64→f32 truncation points land
+    # identically. Missing / out-of-range `face` raises
+    # MiliPythonError (mirrors upstream's ValueError surface).
+    "test_surfstrain",
 }
-# No remaining dbl_nodtang derived-value blockers; test_surfstrain is
-# the `face=` projection layer (deferred, task-flagged) — see the
-# surfstrain reason below.
+# No remaining dbl_nodtang derived-value blockers; surfstrain + the
+# `face=` kwarg landed (bit-exact vs the oracle), so the entire
+# serial derived value engine is green. The only remaining Phase-H
+# derived item is the `project_to_nodes` projection layer — a
+# distinct architectural slice (a Python `mili.projection` module +
+# the parallel-handler `grizinterface`), tracked by its own
+# honest-xfail set / module gates below, not here.
 _DERIVED_DBL_NODTANG_BLOCKED: set[str] = set()
 _DERIVED_DBL_NODTANG_REASON = (
     "dbl_nodtang derived-value path is complete (label-resolution + "
-    "geometry-derived f64 both landed); no remaining blocker."
-)
-_DERIVED_SURFSTRAIN_REASON = (
-    "surfstrain requires the `face=` projection layer (task-flagged "
-    "projection scope) AND runs on the dbl_nodtang corpus (core "
-    "primal-query bug above) — deferred."
+    "geometry-derived f64 + surfstrain all landed); no remaining "
+    "blocker."
 )
 
 
@@ -325,8 +337,6 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
         if cls == "SerialDerivedExpressions":
             if meth in _DERIVED_DBL_NODTANG_BLOCKED:
                 return _DERIVED_DBL_NODTANG_REASON
-            if meth == "test_surfstrain":
-                return _DERIVED_SURFSTRAIN_REASON
         return "Phase H: derived value engine (next sub-slice)"
     if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
         return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
