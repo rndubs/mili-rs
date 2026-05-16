@@ -264,20 +264,39 @@ _DERIVED_SERIAL_PASSING = {
     "test_hex_element_volume",
     "test_tet_element_volume",
     "test_quad_area",
+    "test_tet_relative_volume",
+    "test_dyna_normal_force",
+    "test_force_x",
+    "test_force_y",
+    "test_force_z",
+    "test_mat_cog_disp",
 }
-# test_nodetangmag's magnitude math is implemented and verified
-# bit-exact vs the oracle (sqrt(nx^2+ny^2+nz^2), f64 dbl_nodtang), but
-# the test stays honest strict-xfail: the core primal query rejects
-# `label 95 on class cbs1_particle` (which upstream mili accepts) — a
-# pre-existing core label/class-membership divergence on the
-# dbl_nodtang corpus, surfaced (not caused) by this cut. It is a
-# settled-core-query-semantics investigation, independent of the
-# derived value engine.
-_DERIVED_NODTANGMAG_BLOCKED = (
-    "core label-resolution divergence on the dbl_nodtang corpus "
-    "(primal query rejects label 95 on cbs1_particle; upstream mili "
-    "accepts it) — independent of the derived magnitude math, which "
-    "is implemented + oracle-verified; separate core-query investigation"
+# The dbl_nodtang (diablo) corpus has a systematic *core primal-query*
+# bug independent of the derived engine: every svar on `cbs1_particle`
+# (and the diablo brick) rejects non-first labels (e.g. 95/115 on
+# cbs1_particle) which upstream mili returns. The derived math for
+# these is implemented + oracle-verified, but the primal gather fails
+# first. These stay honest strict-xfail with a precise reason; it is a
+# settled-core-query-semantics investigation, separate from the derived
+# value engine. test_surfstrain is *additionally* the `face=`
+# projection layer (deferred, task-flagged).
+_DERIVED_DBL_NODTANG_BLOCKED = {
+    "test_nodetangmag",
+    "test_hex_relative_volume",
+    "test_diablo_normal_force",
+}
+_DERIVED_DBL_NODTANG_REASON = (
+    "core primal-query label-resolution divergence on the dbl_nodtang "
+    "(diablo) corpus: every svar on cbs1_particle / diablo brick "
+    "rejects non-first labels (e.g. 95/115) that upstream mili returns. "
+    "The derived math is implemented + oracle-verified; the primal "
+    "gather fails first — a separate settled-core-query investigation, "
+    "independent of the derived value engine."
+)
+_DERIVED_SURFSTRAIN_REASON = (
+    "surfstrain requires the `face=` projection layer (task-flagged "
+    "projection scope) AND runs on the dbl_nodtang corpus (core "
+    "primal-query bug above) — deferred."
 )
 
 
@@ -302,8 +321,11 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
                 "DatabaseSet collapses the per-proc fan-out; Phase H "
                 "derived value sub-slice)"
             )
-        if cls == "SerialDerivedExpressions" and meth == "test_nodetangmag":
-            return _DERIVED_NODTANGMAG_BLOCKED
+        if cls == "SerialDerivedExpressions":
+            if meth in _DERIVED_DBL_NODTANG_BLOCKED:
+                return _DERIVED_DBL_NODTANG_REASON
+            if meth == "test_surfstrain":
+                return _DERIVED_SURFSTRAIN_REASON
         return "Phase H: derived value engine (next sub-slice)"
     if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
         return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"

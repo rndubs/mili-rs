@@ -976,6 +976,9 @@ impl PyMiliDatabase {
         // `reference_state` for the nodal-displacement derived family
         // (`derived.py:982/948`); 0 = initial nodal coordinates.
         let mut reference_state: i64 = 0;
+        // Whether the caller explicitly passed `reference_state`
+        // (mat_cog_disp's default is state 1, not 0).
+        let mut reference_state_set = false;
         if let Some(kw) = kwargs {
             const ALLOWED: [&str; 5] = [
                 "output_object_labels",
@@ -1015,6 +1018,7 @@ impl PyMiliDatabase {
             if let Some(v) = kw.get_item("reference_state")? {
                 if !v.is_none() {
                     reference_state = v.extract()?;
+                    reference_state_set = true;
                 }
             }
             if let Some(v) = kw.get_item("output_object_labels")? {
@@ -1311,6 +1315,27 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if svar == "relative_volume" {
+                // relative_volume: det F (deformation-gradient
+                // determinant) over the internal elem→node→nodpos
+                // gather + the state-0 reference node coordinates
+                // (`derived.py.__compute_relative_volume`). Only
+                // reference_state == 0 is exercised by the corpus; a
+                // non-zero reference_state is a typed error (extension
+                // scope), never a silent wrong answer.
+                if reference_state != 0 {
+                    return Err(MiliPythonError::new_err(
+                        "relative_volume with a non-zero reference_state \
+                         is not yet supported (M4-followup extension)",
+                    ));
+                }
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        self.db0()
+                            .relative_volume_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else if svar == "area" {
                 // area: M_QUAD surface area over the internal
                 // elem→node→nodpos gather (`derived.py.
@@ -1319,6 +1344,78 @@ impl PyMiliDatabase {
                     .allow_threads(|| -> mili_rs::Result<QueryResult> {
                         self.db0()
                             .quad_area_query(mesh, &entity_type, labels_ref, &state_idx)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((pname, title)) = mili_rs::mat_cog_disp_spec(svar) {
+                // mat_cog_disp_<d> = matcg<d>(s) - matcg<d>(ref);
+                // upstream's reference_state default is **state 1**
+                // (not 0) unless the caller overrides it
+                // (`derived.py.__compute_material_cog_displacement`).
+                let ref_state = if reference_state_set {
+                    reference_state
+                } else {
+                    1
+                };
+                let ref_idx = usize::try_from(ref_state - 1).map_err(|_| {
+                    MiliPythonError::new_err("mat_cog_disp: reference_state out of range")
+                })?;
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mk = |st: &[usize]| -> mili_rs::Result<QueryResult> {
+                            let a = QueryArgs {
+                                svar: pname,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: st,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            match &self.backend {
+                                Backend::Single(db) => db.query_full(&a),
+                                Backend::Set(s) => s.query_full(&a),
+                            }
+                        };
+                        let primal = mk(&state_idx)?;
+                        let reference = mk(&[ref_idx])?;
+                        mili_rs::compute_mat_cog_disp(primal, &reference, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
+            } else if let Some((title, primal_candidates)) = mili_rs::contact_force_spec(svar) {
+                // normal_force / force_<d> = contact primal * the
+                // M_QUAD `area` derived (`derived.py.
+                // __compute_{normal_force,force}`). Cross-derived:
+                // gather the primal, compute `area` over the same
+                // labels/states in core, multiply (label-aligned).
+                let pname = primal_candidates
+                    .iter()
+                    .copied()
+                    .find(|p| self.db0_has_svar(p))
+                    .unwrap_or(primal_candidates[0]);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let pa = QueryArgs {
+                            svar: pname,
+                            class: &entity_type,
+                            labels: labels_ref,
+                            states: &state_idx,
+                            materials: materials_ref,
+                            ips: ips_ref,
+                            subrec: subrec_ref,
+                        };
+                        let primal = match &self.backend {
+                            Backend::Single(db) => db.query_full(&pa)?,
+                            Backend::Set(s) => s.query_full(&pa)?,
+                        };
+                        let area = self.db0().quad_area_query(
+                            mesh,
+                            &entity_type,
+                            labels_ref,
+                            &state_idx,
+                        )?;
+                        mili_rs::compute_contact_force(primal, &area, svar, title)
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")

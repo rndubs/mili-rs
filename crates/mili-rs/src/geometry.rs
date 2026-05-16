@@ -57,6 +57,12 @@ pub enum Faces {
     Ok([[i32; 4]; 6]),
 }
 
+// Trilinear 8-node shape-function natural derivatives for
+// `relative_volume` (`derived.py:2328-2330`).
+const DN1: [f64; 8] = [-0.125, -0.125, 0.125, 0.125, -0.125, -0.125, 0.125, 0.125];
+const DN2: [f64; 8] = [-0.125, -0.125, -0.125, -0.125, 0.125, 0.125, 0.125, 0.125];
+const DN3: [f64; 8] = [-0.125, 0.125, 0.125, -0.125, -0.125, 0.125, 0.125, -0.125];
+
 // Upstream `face_to_nodes` (`miliinternal.py:675-682`): zero-based
 // indices into the hex element's 8-node connectivity row.
 const FACE_TO_NODES: [[usize; 4]; 6] = [
@@ -362,7 +368,15 @@ impl Database {
         class: &str,
         req_labels: Option<&[i32]>,
         state_idx: &[usize],
-    ) -> Result<(Vec<f32>, usize, usize, usize, Vec<usize>, Vec<i32>)> {
+    ) -> Result<(
+        Vec<f32>,
+        usize,
+        usize,
+        usize,
+        Vec<usize>,
+        Vec<i32>,
+        Vec<i32>,
+    )> {
         let req_owned: Vec<i32> = match req_labels {
             Some(r) => r.to_vec(),
             None => self.labels(mesh, class)?.unwrap_or_default(),
@@ -396,7 +410,7 @@ impl Database {
             ))?);
         }
         let n_rows = ret.len();
-        Ok((data, dims, n_rows, k, elem_node_map, elems))
+        Ok((data, dims, n_rows, k, elem_node_map, elems, ret))
     }
 
     /// Derived `element_volume` (`derived.py.__compute_element_volume`)
@@ -415,7 +429,7 @@ impl Database {
         let sclass = Superclass::from_code(i64::from(code)).ok_or(
             MiliError::MalformedDirectory("element_volume: bad superclass"),
         )?;
-        let (np, dims, nr, k, em, elems) =
+        let (np, dims, nr, k, em, elems, _ret) =
             self.elem_node_gather(mesh, class, req_labels, state_idx)?;
         let ne = elems.len();
         // nodpos accessor: state s, element e, local node j, comp c.
@@ -455,7 +469,7 @@ impl Database {
         req_labels: Option<&[i32]>,
         state_idx: &[usize],
     ) -> Result<QueryResult> {
-        let (np, dims, nr, k, em, elems) =
+        let (np, dims, nr, k, em, elems, _ret) =
             self.elem_node_gather(mesh, class, req_labels, state_idx)?;
         let ne = elems.len();
         let at = |s: usize, e: usize, j: usize, c: usize| -> f32 {
@@ -483,6 +497,136 @@ impl Database {
             labels: elems,
             components: vec!["area".to_owned()],
             title: "Quad Area".to_owned(),
+            class_name: class.to_owned(),
+        })
+    }
+
+    /// Derived `relative_volume` (`derived.py.__compute_relative_volume`)
+    /// — `det F`, the deformation-gradient determinant of the trilinear
+    /// 8-node map: build the reference Jacobian from the initial node
+    /// coordinates (`reference_state == 0`), invert it, form the
+    /// current-config gradient `F`, take `det F`. M_TET expands its 4
+    /// nodes via `[0,1,2,2,3,3,3,3]`. All intermediate math is f64
+    /// (upstream's `np.float64` jacob/invJacob/F arrays), result f32.
+    #[allow(clippy::too_many_lines)]
+    pub fn relative_volume_query(
+        &self,
+        mesh: MeshId,
+        class: &str,
+        req_labels: Option<&[i32]>,
+        state_idx: &[usize],
+    ) -> Result<QueryResult> {
+        let code = self
+            .superclass_code(mesh, class)
+            .ok_or_else(|| MiliError::UnknownClass(class.to_owned()))?;
+        let sclass = Superclass::from_code(i64::from(code)).ok_or(
+            MiliError::MalformedDirectory("relative_volume: bad superclass"),
+        )?;
+        // Local-node → 8-node-hex expansion.
+        let map: [usize; 8] = match sclass {
+            Superclass::Hex => [0, 1, 2, 3, 4, 5, 6, 7],
+            Superclass::Tet => [0, 1, 2, 2, 3, 3, 3, 3],
+            _ => {
+                return Err(MiliError::Unsupported(
+                    "relative_volume is only defined for M_HEX / M_TET",
+                ))
+            }
+        };
+        let (np, dims, nr, k, em, elems, ret) =
+            self.elem_node_gather(mesh, class, req_labels, state_idx)?;
+
+        // Reference (state-0) node coordinates aligned to the gathered
+        // node rows: db.nodes()[ordinal-of-label].
+        let (ncoords, ndims) = self.node_coords(mesh)?.unwrap_or_default();
+        let node_lbls = self.labels(mesh, "node")?.unwrap_or_default();
+        let mut ord_of: HashMap<i32, usize> = HashMap::with_capacity(node_lbls.len());
+        for (i, &l) in node_lbls.iter().enumerate() {
+            ord_of.entry(l).or_insert(i);
+        }
+        let mut ref_xyz: Vec<[f64; 3]> = Vec::with_capacity(nr);
+        for &lab in &ret {
+            let o = *ord_of.get(&lab).ok_or(MiliError::Unsupported(
+                "relative_volume: gathered node missing from nodes()",
+            ))?;
+            ref_xyz.push([
+                f64::from(ncoords[o * ndims]),
+                f64::from(ncoords[o * ndims + 1]),
+                f64::from(ncoords[o * ndims + 2]),
+            ]);
+        }
+
+        let ne = elems.len();
+        let ns = state_idx.len();
+        let mut out: Vec<f32> = vec![0.0; ns * ne];
+        for e in 0..ne {
+            // The element's 8 hex-equivalent node rows.
+            let idx8: [usize; 8] = std::array::from_fn(|j| em[e * k + map[j]]);
+            let rx: [f64; 8] = std::array::from_fn(|j| ref_xyz[idx8[j]][0]);
+            let ry: [f64; 8] = std::array::from_fn(|j| ref_xyz[idx8[j]][1]);
+            let rz: [f64; 8] = std::array::from_fn(|j| ref_xyz[idx8[j]][2]);
+            let dot = |a: &[f64; 8], b: &[f64; 8]| -> f64 {
+                let mut s = 0.0;
+                for j in 0..8 {
+                    s += a[j] * b[j];
+                }
+                s
+            };
+            // Reference Jacobian (row-major 3x3 as [0..9]).
+            let j0 = dot(&DN1, &rx);
+            let j1 = dot(&DN1, &ry);
+            let j2 = dot(&DN1, &rz);
+            let j3 = dot(&DN2, &rx);
+            let j4 = dot(&DN2, &ry);
+            let j5 = dot(&DN2, &rz);
+            let j6 = dot(&DN3, &rx);
+            let j7 = dot(&DN3, &ry);
+            let j8 = dot(&DN3, &rz);
+            let det = j0 * j4 * j8 + j1 * j5 * j6 + j2 * j3 * j7
+                - j2 * j4 * j6
+                - j1 * j3 * j8
+                - j0 * j5 * j7;
+            let dj = 1.0 / det;
+            let i0 = dj * (j4 * j8 - j5 * j7);
+            let i1 = dj * (-j1 * j8 + j2 * j7);
+            let i2 = dj * (j1 * j5 - j2 * j4);
+            let i3 = dj * (-j3 * j8 + j5 * j6);
+            let i4 = dj * (j0 * j8 - j2 * j6);
+            let i5 = dj * (-j0 * j5 + j2 * j3);
+            let i6 = dj * (j3 * j7 - j4 * j6);
+            let i7 = dj * (-j0 * j7 + j1 * j6);
+            let i8 = dj * (j0 * j4 - j1 * j3);
+            // Spatial shape-function gradients.
+            let dnx: [f64; 8] = std::array::from_fn(|j| i0 * DN1[j] + i1 * DN2[j] + i2 * DN3[j]);
+            let dny: [f64; 8] = std::array::from_fn(|j| i3 * DN1[j] + i4 * DN2[j] + i5 * DN3[j]);
+            let dnz: [f64; 8] = std::array::from_fn(|j| i6 * DN1[j] + i7 * DN2[j] + i8 * DN3[j]);
+            for (s, _) in state_idx.iter().enumerate() {
+                let cx: [f64; 8] =
+                    std::array::from_fn(|j| f64::from(np[s * nr * dims + idx8[j] * dims]));
+                let cy: [f64; 8] =
+                    std::array::from_fn(|j| f64::from(np[s * nr * dims + idx8[j] * dims + 1]));
+                let cz: [f64; 8] =
+                    std::array::from_fn(|j| f64::from(np[s * nr * dims + idx8[j] * dims + 2]));
+                let f0 = dot(&dnx, &cx);
+                let f1 = dot(&dny, &cx);
+                let f2 = dot(&dnz, &cx);
+                let f3 = dot(&dnx, &cy);
+                let f4 = dot(&dny, &cy);
+                let f5 = dot(&dnz, &cy);
+                let f6 = dot(&dnx, &cz);
+                let f7 = dot(&dny, &cz);
+                let f8 = dot(&dnz, &cz);
+                let detf = f0 * f4 * f8 + f1 * f5 * f6 + f2 * f3 * f7
+                    - f2 * f4 * f6
+                    - f1 * f3 * f8
+                    - f0 * f5 * f7;
+                out[s * ne + e] = detf as f32;
+            }
+        }
+        Ok(QueryResult {
+            values: StateValues::F32(out),
+            labels: elems,
+            components: vec!["relative_volume".to_owned()],
+            title: "Relative Volume".to_owned(),
             class_name: class.to_owned(),
         })
     }

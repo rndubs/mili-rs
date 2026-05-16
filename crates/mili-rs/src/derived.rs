@@ -278,6 +278,160 @@ pub fn node_acc_spec(name: &str) -> Option<(usize, &'static str)> {
     }
 }
 
+/// Resolve a `mat_cog_disp_<d>` name to `(primal, title)`
+/// (`derived.py.__compute_material_cog_displacement` ~1760,
+/// `__derived_expressions` ~436-455). The reference is the primal at
+/// `reference_state` (upstream default **state 1**).
+pub fn mat_cog_disp_spec(name: &str) -> Option<(&'static str, &'static str)> {
+    match name {
+        "mat_cog_disp_x" => Some(("matcgx", "Material Center of Gravity X Displacement")),
+        "mat_cog_disp_y" => Some(("matcgy", "Material Center of Gravity Y Displacement")),
+        "mat_cog_disp_z" => Some(("matcgz", "Material Center of Gravity Z Displacement")),
+        _ => None,
+    }
+}
+
+/// `mat_cog_disp_<d> = matcg<d>(s) - matcg<d>(reference_state)`,
+/// the reference row subtracted from every state (numpy broadcast),
+/// aligned to the per-state entity axis by label id.
+pub fn compute_mat_cog_disp(
+    primal: QueryResult,
+    reference: &QueryResult,
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let StateValues::F32(pv) = &primal.values else {
+        return Err(MiliError::Unsupported(
+            "mat_cog_disp requires a float32 matcg primal",
+        ));
+    };
+    let StateValues::F32(rv) = &reference.values else {
+        return Err(MiliError::Unsupported(
+            "mat_cog_disp requires a float32 matcg reference",
+        ));
+    };
+    let n_lab = primal.labels.len();
+    let nr = reference.labels.len();
+    if n_lab == 0 {
+        return Ok(QueryResult {
+            values: StateValues::F32(Vec::new()),
+            labels: primal.labels,
+            components: vec![result_name.to_owned()],
+            title: title.to_owned(),
+            class_name: primal.class_name,
+        });
+    }
+    let atoms = if nr == 0 { 0 } else { rv.len() / nr };
+    let mut ref_row: HashMap<i32, usize> = HashMap::with_capacity(nr);
+    for (i, &l) in reference.labels.iter().enumerate() {
+        ref_row.entry(l).or_insert(i);
+    }
+    let n_state = pv.len() / (n_lab * atoms).max(1);
+    let mut out: Vec<f32> = Vec::with_capacity(pv.len());
+    for s in 0..n_state {
+        for i in 0..n_lab {
+            let rr = *ref_row
+                .get(&primal.labels[i])
+                .ok_or(MiliError::Unsupported(
+                    "mat_cog_disp: primal label missing from the reference state",
+                ))?;
+            let pbase = s * n_lab * atoms + i * atoms;
+            let rbase = rr * atoms;
+            for c in 0..atoms {
+                out.push(pv[pbase + c] - rv[rbase + c]);
+            }
+        }
+    }
+    Ok(QueryResult {
+        values: StateValues::F32(out),
+        labels: primal.labels,
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: primal.class_name,
+    })
+}
+
+/// Resolve a contact-force derived name to `(title, primal-candidate
+/// names)`. `normal_force` is `pressure * area` (dyna `sn`, else
+/// diablo `nodpres`); `force_<d>` is `s<d> * area`
+/// (`derived.py.__compute_{normal_force,force}` ~2382/2403,
+/// `__derived_expressions` ~560-592).
+pub fn contact_force_spec(name: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match name {
+        "normal_force" => Some(("Normal Force", &["sn", "nodpres"])),
+        "force_x" => Some(("X Force", &["s1"])),
+        "force_y" => Some(("Y Force", &["s2"])),
+        "force_z" => Some(("Z Force", &["s3"])),
+        _ => None,
+    }
+}
+
+/// `normal_force` / `force_<d>` = `primal * area`, the contact
+/// `primal` (pressure or traction) scaled by the M_QUAD `area`
+/// derived. `area` carries one value per `(state, label)`; it is
+/// broadcast over the primal's atom axis and aligned to the primal's
+/// entity axis **by label id** (order-independent — upstream relies on
+/// the two queries returning the same order; we don't need to).
+pub fn compute_contact_force(
+    primal: QueryResult,
+    area: &QueryResult,
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let StateValues::F32(pv) = &primal.values else {
+        return Err(MiliError::Unsupported(
+            "contact force requires a float32 contact primal",
+        ));
+    };
+    let StateValues::F32(av) = &area.values else {
+        return Err(MiliError::Unsupported(
+            "contact force requires a float32 area",
+        ));
+    };
+    let np_lab = primal.labels.len();
+    let na = area.labels.len();
+    if np_lab == 0 || na == 0 {
+        return Ok(QueryResult {
+            values: StateValues::F32(Vec::new()),
+            labels: primal.labels,
+            components: vec![result_name.to_owned()],
+            title: title.to_owned(),
+            class_name: primal.class_name,
+        });
+    }
+    // av.len() == n_state * na (area is one value per state/label);
+    // pv.len() == n_state * np_lab * atoms.
+    let ns = av.len() / na;
+    let atoms = if ns == 0 { 0 } else { pv.len() / (ns * np_lab) };
+    let mut area_col: std::collections::HashMap<i32, usize> =
+        std::collections::HashMap::with_capacity(na);
+    for (i, &l) in area.labels.iter().enumerate() {
+        area_col.entry(l).or_insert(i);
+    }
+    let mut out: Vec<f32> = Vec::with_capacity(pv.len());
+    for s in 0..ns {
+        for i in 0..np_lab {
+            let ac = *area_col
+                .get(&primal.labels[i])
+                .ok_or(MiliError::Unsupported(
+                    "contact force: primal label missing from the area derived",
+                ))?;
+            let a = av[s * na + ac];
+            let base = s * np_lab * atoms + i * atoms;
+            for c in 0..atoms {
+                out.push(pv[base + c] * a);
+            }
+        }
+    }
+    Ok(QueryResult {
+        values: StateValues::F32(out),
+        labels: primal.labels,
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: primal.class_name,
+    })
+}
+
 /// `eps_rate` → its title; the single primal is always `eps`
 /// (`derived.py:420-425`).
 pub fn eps_rate_spec(name: &str) -> Option<&'static str> {
