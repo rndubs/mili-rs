@@ -22,6 +22,7 @@
 
 mod adjacency;
 pub(crate) mod buffer;
+pub mod derived;
 mod directory;
 pub(crate) mod endian;
 mod error;
@@ -39,6 +40,7 @@ mod svar;
 mod ti;
 
 pub use adjacency::NeighborElems;
+pub use derived::{compute_node_displacement, node_disp_primal, node_disp_spec};
 #[doc(hidden)]
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};
 pub use error::{MiliError, Result};

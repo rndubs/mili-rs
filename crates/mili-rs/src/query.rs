@@ -327,11 +327,72 @@ pub(crate) fn plan_state_svar_ip(
         filter.subrec,
     )?;
 
+    // Bare component-of-VEC_ARRAY substitution (Slice B). When the
+    // component is not carried directly and not a plain VECTOR member,
+    // it may live inside a VEC_ARRAY parent (`es_<n>a`). Resolve via the
+    // `int_points` linkage, mapping user `ips=` *labels* → positional
+    // IP indices and naming components `f"{comp} ipt. {label}"`
+    // (`miliinternal.py:1251-1270,1362-1378`). Each substituted subrec
+    // gets its own `AtomPicker::Specific` (component-outer, IP-inner) so
+    // the data axis matches the component-name order.
+    let try_substitution = |base_name: &str| -> Result<Option<ReadPlan>> {
+        let Some(sub) = try_vec_array_substitution(
+            srec,
+            svars,
+            base_name,
+            class_name,
+            state_data_start,
+            filter,
+            int_points,
+        )?
+        else {
+            return Ok(None);
+        };
+        let width = sub.num_type.width();
+        let (slabs, labels) = match filter.labels {
+            None => gather_all(&sub.matches, width, &AtomPicker::AllAtoms),
+            Some(labels) => (
+                gather_by_labels(
+                    &sub.matches,
+                    width,
+                    &AtomPicker::AllAtoms,
+                    labels,
+                    class_name,
+                )?,
+                labels.to_vec(),
+            ),
+        };
+        Ok(Some(ReadPlan {
+            num_type: sub.num_type,
+            slabs,
+            state_data_start,
+            labels,
+            components: Some(sub.components),
+        }))
+    };
+
+    // When `ips` is given the user explicitly wants the element-set
+    // integration point, so the VEC_ARRAY substitution takes precedence
+    // over the VECTOR-parent fallback (Slice B `basic1` `sx`/`brick`
+    // `ips=4`). `ips` is meaningless for a plain VECTOR — for a
+    // component that has *only* a VECTOR parent (`sx`/`brick` on
+    // d3samp6) the substitution finds nothing and the fallback below
+    // resolves it with `ips` silently ignored, matching the oracle.
+    if matches.is_empty() && !is_subscript && filter.ips.is_some() {
+        if let Some(plan) = try_substitution(&resolved.base_name)? {
+            return Ok(plan);
+        }
+    }
+
     // Bare component-name fallback: if no subrec carries the named svar
     // directly, see whether it is a component of a VECTOR parent
     // (`reference/mili-python/src/mili/miliinternal.py:990-996`) and
-    // retry against that parent.
-    if matches.is_empty() && filter.ips.is_none() && !is_subscript {
+    // retry against that parent. `ips` does *not* gate this: upstream
+    // only consumes `ips` for VEC_ARRAY svars and silently ignores it
+    // for everything else (scalar / VECTOR / ARRAY) — verified vs the
+    // `_MiliInternal` oracle (`sx`/`brick`+`ips` on d3samp6,
+    // `sand`/`brick`+`ips` on basic1).
+    if matches.is_empty() && !is_subscript {
         // A component can belong to several VECTOR parents (e.g.
         // `sx` ∈ `stress`, `stress_mid`, `stress_in`, `stress_out`).
         // Upstream disambiguates by subrecord membership for the
@@ -361,46 +422,11 @@ pub(crate) fn plan_state_svar_ip(
         }
     }
 
-    // Bare component-of-VEC_ARRAY substitution (Slice B). When the
-    // component is not carried directly and not a plain VECTOR member,
-    // it may live inside a VEC_ARRAY parent (`es_<n>a`). Resolve via the
-    // `int_points` linkage, mapping user `ips=` *labels* → positional
-    // IP indices and naming components `f"{comp} ipt. {label}"`
-    // (`miliinternal.py:1251-1270,1362-1378`). This composes the
-    // existing per-object slab gather: each substituted subrec gets its
-    // own `AtomPicker::Specific` (component-outer, IP-inner) so the data
-    // axis matches the component-name order.
+    // VEC_ARRAY substitution for the no-`ips` case (or when the VECTOR
+    // fallback above found nothing) — unchanged Slice B behavior.
     if matches.is_empty() && !is_subscript {
-        if let Some(sub) = try_vec_array_substitution(
-            srec,
-            svars,
-            &resolved.base_name,
-            class_name,
-            state_data_start,
-            filter,
-            int_points,
-        )? {
-            let width = sub.num_type.width();
-            let (slabs, labels) = match filter.labels {
-                None => gather_all(&sub.matches, width, &AtomPicker::AllAtoms),
-                Some(labels) => (
-                    gather_by_labels(
-                        &sub.matches,
-                        width,
-                        &AtomPicker::AllAtoms,
-                        labels,
-                        class_name,
-                    )?,
-                    labels.to_vec(),
-                ),
-            };
-            return Ok(ReadPlan {
-                num_type: sub.num_type,
-                slabs,
-                state_data_start,
-                labels,
-                components: Some(sub.components),
-            });
+        if let Some(plan) = try_substitution(&resolved.base_name)? {
+            return Ok(plan);
         }
     }
 
@@ -411,22 +437,16 @@ pub(crate) fn plan_state_svar_ip(
         });
     }
 
-    // `ips` was requested against a svar that resolved directly (no
-    // VEC_ARRAY substitution) and is not itself a vec_array — upstream
-    // ignores it silently, but mili-rs keeps the stricter typed error
-    // it has always surfaced here (`query_fixtures.rs::
-    // basic1_ips_filter_on_scalar_svar_errors`). Subscript + ips is
-    // rejected earlier in `resolve_target`.
-    if filter.ips.is_some() {
-        if let Some(s) = svars.get(&resolved.base_name) {
-            if !matches!(s.agg, SvarAgg::VecArray { .. }) {
-                return Err(MiliError::IpFilterNotApplicable {
-                    svar: resolved.base_name.clone(),
-                    agg: agg_label(&s.agg),
-                });
-            }
-        }
-    }
+    // `ips` against a svar that resolved directly (no VEC_ARRAY
+    // substitution) and is not itself a vec_array is **silently
+    // ignored**, exactly matching the upstream `_MiliInternal` oracle
+    // (`miliinternal.py:1246-1270` only builds `matching_int_points`
+    // for `__int_points`-linked svars; a scalar / VECTOR component /
+    // ARRAY never consumes `ips`). Cross-validated:
+    // `query("sx","brick",ips=[1])` on d3samp6 and
+    // `query("sand","brick",ips=[1])` on basic1 both succeed upstream
+    // with `ips` ignored. A direct VEC_ARRAY keeps its `ips` filter via
+    // the picker built in `resolve_target` (`resolve_atom_picker`).
 
     // Inconsistent integration-point counts across subrecords on the
     // same class produce ragged output. mili-python raises
@@ -789,12 +809,12 @@ fn resolve_target(
             let s = svars
                 .get(base)
                 .ok_or_else(|| MiliError::UnknownSvar(base.to_owned()))?;
-            if ips.is_some() {
-                return Err(MiliError::IpFilterNotApplicable {
-                    svar: base.to_owned(),
-                    agg: agg_label(&s.agg),
-                });
-            }
+            // `ips` is silently ignored for an ARRAY subscript — upstream
+            // only consumes `ips` for VEC_ARRAY. Verified vs the oracle:
+            // `query("hx[1]","brick",ips=[1])` / `query("hx","brick",
+            // ips=[1])` on the th/serial corpus both succeed with `ips`
+            // ignored (identical to the no-`ips` result).
+            let _ = ips;
             let dims = match &s.agg {
                 SvarAgg::Array { dims } => dims.clone(),
                 _ => {
@@ -1745,7 +1765,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_ip_filter_rejects_non_vec_array_svar() {
+    fn plan_ip_filter_ignored_for_non_vec_array_svar() {
+        // Upstream silently ignores `ips` for a non-VEC_ARRAY svar — the
+        // result is identical to the no-`ips` query (cross-validated vs
+        // the `_MiliInternal` oracle on the serial corpus). The earlier
+        // `IpFilterNotApplicable` here was stricter than upstream with
+        // no oracle basis.
         let svars = make_svars(&[("svA", NumType::Float4, 1)]);
         let srec = Srec {
             srec_id: 0,
@@ -1763,8 +1788,9 @@ mod tests {
             ips: Some(&[0]),
             subrec: None,
         };
-        let err = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap_err();
-        assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
+        let with_ips = plan_state_svar(&srec, &svars, "svA", "node", 0, f).unwrap();
+        let no_ips = plan_state_svar(&srec, &svars, "svA", "node", 0, no_filter()).unwrap();
+        assert_eq!(with_ips, no_ips);
     }
 
     #[test]
@@ -2202,7 +2228,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_array_subscript_with_ips_filter_errors() {
+    fn plan_array_subscript_with_ips_filter_is_ignored() {
+        // `ips` is silently ignored for an ARRAY subscript too —
+        // upstream only consumes `ips` for VEC_ARRAY. Verified vs the
+        // oracle on the th/serial corpus (`hx[1]`/`hx`+`ips`).
         let svars = make_svars(&[("hx", NumType::Float4, 8)]);
         let srec = Srec {
             srec_id: 0,
@@ -2220,8 +2249,9 @@ mod tests {
             ips: Some(&[0]),
             subrec: None,
         };
-        let err = plan_state_svar(&srec, &svars, "hx[1]", "brick", 0, f).unwrap_err();
-        assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
+        let with_ips = plan_state_svar(&srec, &svars, "hx[1]", "brick", 0, f).unwrap();
+        let no_ips = plan_state_svar(&srec, &svars, "hx[1]", "brick", 0, no_filter()).unwrap();
+        assert_eq!(with_ips, no_ips);
     }
 
     // ---------------------------- bare component lookup --------------------

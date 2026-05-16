@@ -11,11 +11,11 @@ core owns A-file parsing). Keeping them byte-identical means
 from __future__ import annotations
 
 from enum import Enum, IntEnum
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
-from typing_extensions import TypeAlias, TypedDict
+from typing_extensions import NotRequired, TypeAlias, TypedDict
 
 
 class Superclass(IntEnum):
@@ -77,6 +77,29 @@ class Superclass(IntEnum):
                 "Please reach out to the mili-python developers."
             )
         return node_connections[self]
+
+
+class QueryLayout(TypedDict):
+    """Verbatim port of upstream ``mili.datatypes.QueryLayout`` — the
+    layout sub-dict of a ``query()`` result. Pure data, zero parity
+    risk; the parity-correct values are produced by the Rust core."""
+
+    states: NDArray[np.int32]
+    labels: NDArray[np.int32]
+    components: List[str]
+    times: NDArray[np.floating]
+
+
+class QueryDict(TypedDict):
+    """Verbatim port of upstream ``mili.datatypes.QueryDict`` — the
+    per-svar ``query()`` result shape."""
+
+    class_name: str
+    source: str
+    title: str
+    data: NDArray[np.floating]
+    layout: QueryLayout
+    modifier: NotRequired[str]
 
 
 class ReturnCode(Enum):

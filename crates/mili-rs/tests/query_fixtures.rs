@@ -518,26 +518,39 @@ fn basic1_material_filter_selects_matching_brick_labels() {
 }
 
 #[test]
-fn basic1_ips_filter_on_scalar_svar_errors() {
+fn basic1_ips_filter_on_scalar_svar_is_ignored() {
+    // Upstream `_MiliInternal` silently ignores `ips` for any
+    // non-VEC_ARRAY svar (it only ever builds `matching_int_points` for
+    // `__int_points`-linked svars). Verified vs the oracle:
+    // `query("sand","brick",ips=[1])` on basic1 returns the same result
+    // as without `ips`. mili-rs previously surfaced a stricter
+    // `IpFilterNotApplicable` here with no oracle basis — corrected to
+    // match the corpus (planning/mili-py/m4.md Phase H reductions
+    // sub-slice; the strict variant diverged from upstream).
     let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
     if !path.exists() {
         return;
     }
     let db = Database::open(&path).unwrap();
-    let ips = [0_usize];
     let states = [0_usize];
-    let err = db
-        .query(&QueryArgs {
+    let base = |ips: Option<&[usize]>| {
+        db.query_full(&QueryArgs {
             svar: "sand",
             class: "brick",
             labels: None,
             states: &states,
             materials: None,
-            ips: Some(&ips),
+            ips,
             subrec: None,
         })
-        .unwrap_err();
-    assert!(matches!(err, MiliError::IpFilterNotApplicable { .. }));
+        .unwrap()
+    };
+    let no_ips = base(None);
+    let ips = [0_usize];
+    let with_ips = base(Some(&ips));
+    assert_eq!(with_ips.values, no_ips.values);
+    assert_eq!(with_ips.labels, no_ips.labels);
+    assert_eq!(with_ips.components, no_ips.components);
 }
 
 #[test]

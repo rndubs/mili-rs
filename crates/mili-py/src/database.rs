@@ -1092,23 +1092,74 @@ impl PyMiliDatabase {
         let subrec_ref = subrec_name.as_deref();
 
         let times = self.times(); // f64, one per state
+        let mesh = self.mesh;
         let out = PyDict::new_bound(py);
         for svar in &svars {
-            let args = QueryArgs {
-                svar,
-                class: &entity_type,
-                labels: labels_ref,
-                states: &state_idx,
-                materials: materials_ref,
-                ips: ips_ref,
-                subrec: subrec_ref,
-            };
-            let res: QueryResult = py
-                .allow_threads(|| match &self.backend {
-                    Backend::Single(db) => db.query_full(&args),
-                    Backend::Set(s) => s.query_full(&args),
-                })
-                .map_err(|e| to_pyerr(&e))?;
+            // Node-displacement derived (`disp_x`/`disp_y`/`disp_z`):
+            // not a primal svar, so upstream resolves the source to
+            // 'derived' and computes it from the primal `ux`/`uy`/`uz`
+            // query minus the initial nodal coordinate
+            // (`derived.py.__compute_node_displacement`,
+            // `reference_state=0`). The reduction (`ResultModifier`)
+            // post-process stays Python-over-primal in `milox`.
+            let (res, source): (QueryResult, &str) =
+                if let Some((dir, title)) = mili_rs::node_disp_spec(svar) {
+                    let primal_name = mili_rs::node_disp_primal(dir);
+                    let pargs = QueryArgs {
+                        svar: primal_name,
+                        class: &entity_type,
+                        labels: labels_ref,
+                        states: &state_idx,
+                        materials: materials_ref,
+                        ips: ips_ref,
+                        subrec: subrec_ref,
+                    };
+                    let computed = py
+                        .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                            let primal = match &self.backend {
+                                Backend::Single(db) => db.query_full(&pargs)?,
+                                Backend::Set(s) => s.query_full(&pargs)?,
+                            };
+                            let (coords, dims) = match &self.backend {
+                                Backend::Single(db) => db.node_coords(mesh)?,
+                                Backend::Set(s) => s.node_coords(mesh)?,
+                            }
+                            .unwrap_or_default();
+                            let node_labels = match &self.backend {
+                                Backend::Single(db) => db.labels(mesh, "node")?,
+                                Backend::Set(s) => s.labels(mesh, "node")?,
+                            }
+                            .unwrap_or_default();
+                            mili_rs::compute_node_displacement(
+                                primal,
+                                &node_labels,
+                                &coords,
+                                dims.max(1),
+                                dir,
+                                svar,
+                                title,
+                            )
+                        })
+                        .map_err(|e| to_pyerr(&e))?;
+                    (computed, "derived")
+                } else {
+                    let args = QueryArgs {
+                        svar,
+                        class: &entity_type,
+                        labels: labels_ref,
+                        states: &state_idx,
+                        materials: materials_ref,
+                        ips: ips_ref,
+                        subrec: subrec_ref,
+                    };
+                    let primal = py
+                        .allow_threads(|| match &self.backend {
+                            Backend::Single(db) => db.query_full(&args),
+                            Backend::Set(s) => s.query_full(&args),
+                        })
+                        .map_err(|e| to_pyerr(&e))?;
+                    (primal, "primal")
+                };
 
             let n_st = state_idx.len();
             let n_lab = res.labels.len();
@@ -1136,7 +1187,7 @@ impl PyMiliDatabase {
 
             let entry = PyDict::new_bound(py);
             entry.set_item("class_name", &res.class_name)?;
-            entry.set_item("source", "primal")?;
+            entry.set_item("source", source)?;
             entry.set_item("title", &res.title)?;
             entry.set_item(
                 "data",
