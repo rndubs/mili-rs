@@ -194,16 +194,21 @@ _DERIVED_LISTING_METHODS = {
     "test_derived_variables_of_class",
     "test_classes_of_derived_variable",
 }
-# Serial node-displacement *value* tests that already pass: the
-# disp_x/disp_y/disp_z family landed in the Rust core
-# (mili_rs::derived, reference_state=0) in the prior reductions
-# sub-slice and routes through MiliDatabase.query -> Rust (not
-# milox.derived). disp_y_reference_state uses a non-zero
-# reference_state (not yet in core) so it stays in the value xfail.
+# Serial nodal-displacement *value* tests in the Rust core
+# (mili_rs::derived). disp_x/disp_y/disp_z landed in the prior
+# reductions sub-slice; the displacement-magnitude + reference_state
+# extension (disp_mag, disp_rad_mag_xy, non-zero reference_state)
+# landed in this sub-slice. All route through MiliDatabase.query ->
+# Rust (not milox.derived). Velocities/accelerations (finite-difference
+# over states) and the stress/strain invariants are later sub-slices.
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
     "test_disp_y",
     "test_disp_z",
+    "test_disp_mag",
+    "test_disp_mag_ref",
+    "test_disp_rad_mag_xy",
+    "test_disp_y_reference_state",
 }
 
 
