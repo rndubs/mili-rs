@@ -413,6 +413,39 @@ impl MeshTopology {
             });
         }
 
+        // Derived: the `*_alt` griz closed-form trig principal-strain
+        // variants (`prin_strain[1-3]_alt` / `prin_dev_strain[1-3]_alt`).
+        // The IDENTICAL element nodal-average scatter seam as the
+        // non-alt strain branch above — only the `*_spec`/`*_primals`/
+        // `compute_*` calls differ — routed through the now
+        // parity-gated `mili_rs::compute_principal_strain_alt`
+        // (planning/mili-viz/phase-4-m5d.md Decisions 32–34; closes
+        // phase-4-m5c.md Decision 28). No proto/blob change.
+        if let Some((kind, title)) = mili_rs::principal_strain_alt_spec(svar) {
+            let primal_names = mili_rs::principal_strain_alt_primals(kind);
+            let classes = db.classes_of_state_variable(primal_names[0])?;
+            if classes.is_empty() {
+                return None;
+            }
+            return self.scatter_elements(&classes, |class| {
+                let mut primals = Vec::with_capacity(primal_names.len());
+                for pn in primal_names {
+                    let args = QueryArgs {
+                        svar: pn,
+                        class,
+                        labels: None,
+                        states: &[state_idx],
+                        materials: None,
+                        ips: None,
+                        subrec: None,
+                    };
+                    primals.push(db.query_full(&args).ok()?);
+                }
+                let qr = mili_rs::compute_principal_strain_alt(kind, &primals, svar, title).ok()?;
+                component0_map(qr.values, &qr.labels)
+            });
+        }
+
         // Derived: nodal time-derived families (displacement /
         // velocity / acceleration). A node-direct gather through the
         // parity-exact `mili-rs` kernels, mirroring the

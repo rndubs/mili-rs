@@ -25,8 +25,15 @@
 //! are below (the latter on a symmetric-3x3 Jacobi eigensolver,
 //! computed in f64 then cast to the primal dtype — bit-identical to
 //! numpy's native `eigvalsh` at every literal-checked point). The
-//! strain analogues (`vol_strain`, `prin_strain*`, `prin_dev_strain*`,
-//! the `*_alt` griz closed-form variants) are a later sub-slice. The
+//! strain analogues (`vol_strain`, `prin_strain*`, `prin_dev_strain*`)
+//! are above; the `*_alt` griz closed-form trig variants
+//! (`prin_strain[1-3]_alt` / `prin_dev_strain[1-3]_alt`,
+//! [`compute_principal_strain_alt`]) are a *distinct* algorithm — a
+//! closed-form `J2`/`J3` load-angle solve with f32 transcendentals, so
+//! unlike the eigensolver families they are gated against the `mili`
+//! oracle to a tight f32 tolerance, not bitwise (numpy's float32
+//! `arccos`/`cos` are its own SIMD polynomials, ≠ system libm;
+//! planning/mili-py/m4.md Decision 27). The
 //! reduction (`ResultModifier`) math is a
 //! decision-18 Python-over-primal post-process and lives in `milox`,
 //! not here.
@@ -1224,7 +1231,9 @@ pub fn compute_principal_stress(
 /// strains reuse the same symmetric-3x3 Jacobi eigensolver as the
 /// stress family ([`jacobi_eigvalsh_sym3`]) on the 6 strain
 /// components. The `*_alt` griz closed-form trig variants are a
-/// distinct algorithm — a later sub-slice.
+/// distinct algorithm ([`PrincipalStrainAlt`] /
+/// [`compute_principal_strain_alt`]) — closed-form load-angle, no
+/// eigensolver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalStrain {
     Vol,
@@ -1377,6 +1386,245 @@ pub fn compute_principal_strain(
         _ => {
             return Err(MiliError::Unsupported(
                 "principal strain requires float strain primals",
+            ))
+        }
+    };
+
+    Ok(QueryResult {
+        values,
+        labels: first.labels.clone(),
+        components: vec![result_name.to_owned()],
+        title: title.to_owned(),
+        class_name: first.class_name.clone(),
+    })
+}
+
+/// The `*_alt` griz closed-form trig principal-strain variants
+/// (`derived.py.__compute_principal_strain_alt` ~1219 /
+/// `__compute_dev_principal_strain_alt` ~1342). A *distinct* algorithm
+/// from [`PrincipalStrain`] — no eigensolver: the deviatoric strain
+/// invariants `J2`/`J3` feed a closed-form load-angle solve
+/// (`alpha = -0.5·√(27/J2)·J3/J2`, clamped to `[-1,1]`;
+/// `angle = arccos(alpha)/3` shifted by `±2π/3` for the 2nd/3rd
+/// component; `value = 2·√(J2/3)`; result `value·cos(angle)`, plus the
+/// hydrostatic strain `e_hyd` for the non-deviatoric `prin_strain*_alt`
+/// names). Upstream registers these as separate `compute_function`s
+/// with `supports_batching=False`, so they get their own enum/spec
+/// rather than extending `PrincipalStrain`.
+///
+/// **Parity note (planning/mili-py/m4.md Decision 27).** This kernel is
+/// the first derived family that intrinsically needs f32 `arccos`/`cos`
+/// (the eigensolver families sidestep transcendentals by promoting to
+/// f64). numpy's float32 `arccos`/`cos` are numpy's own SIMD
+/// single-precision polynomials — they differ from system libm (and
+/// from an f64-libm-then-cast) by 1–2 ULP, which materially diverges
+/// across the corpus. We compute the transcendentals in f64 (Rust
+/// `f64::{acos,cos,sqrt}` == system libm == numpy's *f64* path) and
+/// cast back: bit-exact for f64 primals, and within a tight f32
+/// tolerance (worst observed abs deviation ≈ 1.7e-10 on d3samp6 vs
+/// strain magnitudes ~1e-2) for f32 primals. The oracle gate is
+/// therefore `np.allclose` to that tolerance, not bitwise — upstream
+/// mili-python itself ships **no** `*_alt` value test (only listing),
+/// and the `*_alt` docstrings call them debug-only "alternate
+/// calculation methods … to … check[] to see if the methods matched".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalStrainAlt {
+    Prin1,
+    Prin2,
+    Prin3,
+    Dev1,
+    Dev2,
+    Dev3,
+}
+
+/// Resolve an `*_alt` strain name to `(kind, title)` (`derived.py`
+/// `__derived_expressions` table, ~219-290).
+pub fn principal_strain_alt_spec(name: &str) -> Option<(PrincipalStrainAlt, &'static str)> {
+    match name {
+        "prin_strain1_alt" => Some((PrincipalStrainAlt::Prin1, "Principal Strain 1 (alt)")),
+        "prin_strain2_alt" => Some((PrincipalStrainAlt::Prin2, "Principal Strain 2 (alt)")),
+        "prin_strain3_alt" => Some((PrincipalStrainAlt::Prin3, "Principal Strain 3 (alt)")),
+        "prin_dev_strain1_alt" => Some((
+            PrincipalStrainAlt::Dev1,
+            "Principal Deviatoric Strain 1 (alt)",
+        )),
+        "prin_dev_strain2_alt" => Some((
+            PrincipalStrainAlt::Dev2,
+            "Principal Deviatoric Strain 2 (alt)",
+        )),
+        "prin_dev_strain3_alt" => Some((
+            PrincipalStrainAlt::Dev3,
+            "Principal Deviatoric Strain 3 (alt)",
+        )),
+        _ => None,
+    }
+}
+
+/// All six strain component primals, in kernel order (every `*_alt`
+/// name reads all six — `derived.py:221-289`).
+pub fn principal_strain_alt_primals(_kind: PrincipalStrainAlt) -> &'static [&'static str] {
+    &["ex", "ey", "ez", "exy", "eyz", "ezx"]
+}
+
+// Generic over f32 / f64. Algebra (`e_hyd`, the deviatoric components,
+// `J2`, `J3`, `alpha`, `value`, the angle shift) is done in the primal
+// dtype with numpy NEP50 weak-scalar promotion (type-annotated `$t`
+// literals, exact numpy op order). The transcendentals (`sqrt`,
+// `arccos`, `cos`) are evaluated in f64 then cast back — bit-exact vs
+// numpy's f64 path; for f32 primals this is within the tight tolerance
+// the oracle gate uses (see the type doc / m4.md Decision 27).
+macro_rules! impl_principal_strain_alt {
+    ($fn:ident, $t:ty) => {
+        fn $fn(kind: PrincipalStrainAlt, c: &[&[$t]]) -> Vec<$t> {
+            let n = c[0].len();
+            let (ex, ey, ez) = (c[0], c[1], c[2]);
+            let (exy, eyz, ezx) = (c[3], c[4], c[5]);
+            // numpy weak scalars cast to the array dtype.
+            let e_third: $t = 1.0 / 3.0;
+            let neg_half: $t = -0.5;
+            let two: $t = 2.0;
+            let c27: $t = 27.0;
+            let eps: $t = 1e-12;
+            // numpy `2*np.pi*(1/3)` is a python f64 scalar; NEP50 casts
+            // it to the array dtype where it meets `angle`.
+            let two_pi_third: $t = ((2.0_f64 * std::f64::consts::PI) * (1.0_f64 / 3.0_f64)) as $t;
+            let comp = match kind {
+                PrincipalStrainAlt::Prin1 | PrincipalStrainAlt::Dev1 => 1u8,
+                PrincipalStrainAlt::Prin2 | PrincipalStrainAlt::Dev2 => 2,
+                PrincipalStrainAlt::Prin3 | PrincipalStrainAlt::Dev3 => 3,
+            };
+            let add_hyd = matches!(
+                kind,
+                PrincipalStrainAlt::Prin1 | PrincipalStrainAlt::Prin2 | PrincipalStrainAlt::Prin3
+            );
+            (0..n)
+                .map(|i| {
+                    // e_hyd = (1/3)*(ex+ey+ez) (`derived.py:1239/1363`).
+                    let eh = e_third * ((ex[i] + ey[i]) + ez[i]);
+                    let d0 = ex[i] - eh;
+                    let d1 = ey[i] - eh;
+                    let d2 = ez[i] - eh;
+                    let d3 = exy[i];
+                    let d4 = eyz[i];
+                    let d5 = ezx[i];
+                    // J2 = -((d0*d1)+(d1*d2)+(d0*d2)) + d3² + d4² + d5²
+                    // (`derived.py:1244-1249`; numpy `x**2` == `x*x`).
+                    let j2 = -(d0 * d1 + d1 * d2 + d0 * d2) + d3 * d3 + d4 * d4 + d5 * d5;
+                    // limit_check = J2 if J2>0 else 0; pass iff >= 1e-12
+                    // (`derived.py:1259-1264`). Non-pass stays the
+                    // `np.zeros_like` default.
+                    let zero: $t = 0.0;
+                    let lc: $t = if j2 > zero { j2 } else { zero };
+                    // Pass iff `limit_check >= 1e-12`; non-pass stays the
+                    // `np.zeros_like` default (positive form keeps the
+                    // NaN-free comparison readable / clippy-clean).
+                    if lc >= eps {
+                        // J3 (`derived.py:1252-1256`): `-d0*d1*d2` is
+                        // `((-d0)*d1)*d2`; `**2` == `*`.
+                        let j3 = -(d0 * d1 * d2) - two * d3 * d4 * d5
+                            + d0 * (d4 * d4)
+                            + d1 * (d5 * d5)
+                            + d2 * (d3 * d3);
+                        // alpha = -0.5 * sqrt(27/J2) * J3 / J2
+                        // (`derived.py:1268`), left-assoc.
+                        let sq = ((c27 / j2) as f64).sqrt() as $t;
+                        let mut alpha = neg_half * sq * j3 / j2;
+                        // np.maximum(alpha,-1.0)/np.minimum(alpha,1.0) on
+                        // the sign-split slices (`derived.py:1271-1272`).
+                        if alpha < zero {
+                            let lo: $t = -1.0;
+                            if alpha < lo {
+                                alpha = lo;
+                            }
+                        } else if alpha > zero {
+                            let hi: $t = 1.0;
+                            if alpha > hi {
+                                alpha = hi;
+                            }
+                        }
+                        // angle = arccos(alpha)*(1/3) (`derived.py:1275`).
+                        let mut angle = (alpha as f64).acos() as $t * e_third;
+                        // value = 2*sqrt(J2*(1/3)) (`derived.py:1278`).
+                        let value_sqrt = ((j2 * e_third) as f64).sqrt() as $t;
+                        let value = two * value_sqrt;
+                        // 2nd/3rd component load-angle shift
+                        // (`derived.py:1281-1284 / 1406-1409`).
+                        if comp == 2 {
+                            angle -= two_pi_third;
+                        } else if comp == 3 {
+                            angle += two_pi_third;
+                        }
+                        // princ = value*cos(angle); + e_hyd for non-dev
+                        // (`derived.py:1288-1290 / 1413-1416`).
+                        let mut ps = value * (angle as f64).cos() as $t;
+                        if add_hyd {
+                            ps += eh;
+                        }
+                        ps
+                    } else {
+                        zero
+                    }
+                })
+                .collect()
+        }
+    };
+}
+
+impl_principal_strain_alt!(principal_strain_alt_f32, f32);
+impl_principal_strain_alt!(principal_strain_alt_f64, f64);
+
+/// Compute an `*_alt` strain invariant from its 6 component primals
+/// (same shape contract as [`compute_principal_strain`]).
+pub fn compute_principal_strain_alt(
+    kind: PrincipalStrainAlt,
+    primals: &[QueryResult],
+    result_name: &str,
+    title: &str,
+) -> Result<QueryResult> {
+    let need = principal_strain_alt_primals(kind).len();
+    if primals.len() != need {
+        return Err(MiliError::Unsupported(
+            "principal strain (alt) primal count mismatch",
+        ));
+    }
+    let first = &primals[0];
+    let n = first.values.len();
+    for p in primals {
+        if p.values.len() != n || p.labels.len() != first.labels.len() {
+            return Err(MiliError::Unsupported(
+                "principal strain (alt) component primals disagree in shape",
+            ));
+        }
+    }
+
+    let values = match &first.values {
+        StateValues::F32(_) => {
+            let mut cols: Vec<&[f32]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F32(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "principal strain (alt) component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F32(principal_strain_alt_f32(kind, &cols))
+        }
+        StateValues::F64(_) => {
+            let mut cols: Vec<&[f64]> = Vec::with_capacity(need);
+            for p in primals {
+                let StateValues::F64(v) = &p.values else {
+                    return Err(MiliError::Unsupported(
+                        "principal strain (alt) component primals disagree in dtype",
+                    ));
+                };
+                cols.push(v.as_slice());
+            }
+            StateValues::F64(principal_strain_alt_f64(kind, &cols))
+        }
+        _ => {
+            return Err(MiliError::Unsupported(
+                "principal strain (alt) requires float strain primals",
             ))
         }
     };

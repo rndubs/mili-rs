@@ -129,12 +129,18 @@ _DERIVED_LISTING_METHODS = {
 # eigensolver on the 6 strain components. nodtangmag /
 # shear_magnitude are the sqrt-of-sum-of-component-squares pattern
 # (like disp_mag, generic f32/f64, no connectivity). The *_alt griz
-# closed-form trig variants have no value-test (listing-only) and the
-# connectivity-coupled geometry derived
-# (centroid/element_volume/area/force/surfstrain) + projection are
-# later sub-slices (an architectural decision point — they thread
-# connectivity / cross-derived deps / projection into the derived
-# query routing).
+# closed-form trig variants have no UPSTREAM value-test (this redirect
+# harness, listing-only for them, is unaffected) — but the *_alt value
+# kernel did land in the Rust core
+# (mili_rs::compute_principal_strain_alt) and is gated vs the `mili`
+# oracle by the dedicated f32-tolerance test
+# crates/mili-py/tests/test_alt_strain_parity.py (it intrinsically
+# needs f32 arccos/cos, which numpy computes with its own SIMD
+# polynomials — not cross-language bit-reproducible, so an
+# np.allclose tolerance gate, not bitwise; m4.md Decision 27 /
+# ../mili-viz/phase-4-m5d.md). The connectivity-coupled geometry
+# derived (centroid/element_volume/area/force/surfstrain) + projection
+# landed in their own earlier sub-slices.
 _DERIVED_SERIAL_PASSING = {
     "test_disp_x",
     "test_disp_y",

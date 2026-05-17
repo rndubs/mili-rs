@@ -295,6 +295,30 @@ Typed errors today; not in Phase 2 scope.
 Brief pointers — each has a fix in the code and the byte-layout docs
 were updated to match. Read the linked source for the full story.
 
+- **numpy's float32 `arccos`/`cos` are numpy's own SIMD polynomials —
+  the one derived family that can't be bitwise cross-language**
+  (`../mili-py/m4.md` Decision 27; `../mili-viz/phase-4-m5d.md`). The
+  six `*_alt` griz closed-form trig principal-strain variants
+  (`mili_rs::compute_principal_strain_alt`,
+  `PrincipalStrainAlt`/`principal_strain_alt_spec`/`_primals`, new
+  public symbols in `lib.rs`; wired through `crates/mili-py`) landed,
+  discharging `phase-4-m5c.md` Decision 28. Unlike every prior derived
+  family, `*_alt` intrinsically needs f32 `arccos`/`cos` (the
+  eigensolver families sidestep transcendentals via f64). Empirically
+  (numpy 2.4.4) numpy's float32 `arccos`/`cos` ≠ system libm `acosf`/
+  `cosf` *and* ≠ f64-libm-then-cast (1–2 ULP, material across the
+  corpus) — they are numpy's own SIMD single-precision polynomials,
+  SIMD-dispatch-stable but not cross-language bit-reproducible without
+  re-porting numpy's exact polynomials (numpy-version-coupled,
+  rejected). The kernel does the transcendentals in f64 then casts
+  back (bit-exact for f64 primals; ≈1.7e-10 worst abs vs strain
+  magnitudes ~1e-2 for f32), so its oracle gate
+  (`crates/mili-py/tests/test_alt_strain_parity.py`) is structural-
+  exact + `np.allclose(rtol=1e-5, atol=1e-6)`, **not** `np.array_equal`
+  — the contract matching what `*_alt` is (upstream ships no `*_alt`
+  value test; debug-only "do the methods match" variants). Strict
+  0-xfail harness still green (950 passed). Every other derived family
+  remains bitwise-parity.
 - **Duplicate snames within a directory type — the last un-exercised
   writer edge, now ported bit-exact** (`m4.md` decision 26). The
   Phase-3 raw-copy serializer was bit-exact *only because* d3samp6 has
