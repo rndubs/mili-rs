@@ -8,7 +8,7 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families), M6 ✅ (remote transport) landed.** (Only the `*_alt` trig principal-strain variants remain deferred — they have **no** parity-exact `mili-rs` kernel, so they belong in a future `mili-rs` **core** derived sub-slice, not a viz producer slice; `phase-4-m5c.md` Decision 28.)
+- **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families; + M5d ✅: the `*_alt` trig principal-strain variants — core kernel + viz routing), M6 ✅ (remote transport) landed.** The derived family is now **fully complete**: the last deferral (`*_alt`, `phase-4-m5c.md` Decision 28) is discharged — the parity-gated `mili_rs::compute_principal_strain_alt` core kernel + its trivial viz seam landed (`phase-4-m5d.md`; `../mili-py/m4.md` Decision 27).
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
@@ -164,6 +164,7 @@
 | [`phase-4-m5.md`](phase-4-m5.md) | **The buildable Phase 4 M5 scope (first slice).** Scalar stress invariants behind the frozen contract; Decisions 19–21 (the derived oracle exists — `mili-rs::derived`, bit-exact vs `mili` Python — so reuse `compute_stress_invariant`, no formula port, no griz golden, **supersedes `phase-4-m1.md` Decision 5**; resolve → per-class `query_full` → kernel → M3 nodal scatter, eigensolver/per-face/time families deferred; gating test uses the linear-pressure identity, no `parity` feature in `mili-viz-server`). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5b.md`](phase-4-m5b.md) | **The buildable Phase 4 M5 follow-up scope (eigenvalue families).** Principal stress/strain, deviatoric, max-shear, volumetric strain behind the frozen contract; Decisions 22–24 (family set = the 14 eigensolver-on-already-prepped-element-class names, `surfstrain*`/`*_alt`/time deferred; routing reuses the M5 seam verbatim — two branches before the primal lookup, only `*_spec`/`*_primals`/`compute_*` swapped, M5/M3 paths byte-stable; gating test uses only single-shared-gather invariants — ordering + relative tracelessness + max-shear — cross-cardinality "trace" checks rejected for an IP-sampling skew). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5c.md`](phase-4-m5c.md) | **The buildable Phase 4 M5 third-slice scope (`surfstrain*` + nodal-time families).** Surface strain + nodal displacement/velocity/acceleration behind the frozen contract; Decisions 28–31 (family set = nodal-time + `surfstrain{x,y,z,xy,yz,zx}`, `*_alt` re-deferred — no parity-exact `mili-rs` kernel, belongs in a core sub-slice, also corrects Decision 22's "nodal-time already M3-reachable" imprecision; nodal-time via a node-direct branch group + a factored M3 node→vertex helper, element scatter untouched; `surfstrain*` via a separate `scatter_hex_faces` per-face Hex gather over the parity-exact `surface_strain_query` + a viz-local canonical face table, M5/M5b/M3 byte-stable; gating test = the exact displacement-magnitude norm identity + structural/state-tracking, no cross-cardinality checks). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-4-m5d.md`](phase-4-m5d.md) | **The buildable Phase 4 M5d scope (the `*_alt` griz closed-form trig principal-strain variants) — discharges `phase-4-m5c.md` Decision 28.** Two-part: Part A is a `mili-rs` **core** derived sub-slice (`compute_principal_strain_alt` + `PrincipalStrainAlt`/`*_alt_spec`/`_primals`, wired through `crates/mili-py`, gated vs the `mili` oracle to a tight **f32 tolerance** — not bitwise — because numpy's float32 `arccos`/`cos` are numpy's own SIMD polynomials, ≠ libm, not cross-language bit-reproducible; recorded in `../mili-py/m4.md` Decision 27); Part B is the trivial viz routing (Decisions 32–34: own `PrincipalStrainAlt` enum mirroring upstream's separate `compute_function`s, the verbatim M5b element-scatter branch with only `*_spec`/`*_primals`/`compute_*` swapped; gating test = single-shared-gather invariants only — structural + the per-vertex principal-ordering `1≥2≥3` identity + state-tracking + totality/Decision-28 closure; M5c's `*_alt`→bare-hull assertion intentionally removed, superseded). No proto change, no `parity` feature in `mili-viz-server`; M5/M5b/M5c/M3/M6 byte-stable | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m6.md`](phase-4-m6.md) | **The buildable Phase 4 M6 scope (remote transport).** gRPC + Arrow Flight over TCP behind the frozen contract; Decisions 25–27 (real Flight + gRPC TCP transport redeems `phase-4-m2.md` Decision 10 — its tonic-version premise is now factually false but the deferral was still correct; ticket/blob/layout byte-stable; in-process seam kept. Flight via the canonical vendored `Flight.proto` on the existing protoc-free `protox` path — zero change to the frozen `mili_viz.proto`; only `DoGet` implemented, other Flight RPCs `UNIMPLEMENTED`; verbatim opaque blob in `FlightData.data_body`; heavy `arrow-flight` crate rejected for dependency surface. `serve_tcp(addr)` pre-binds a `TcpListener`, co-serves both services on one port; gating test binds a real ephemeral `127.0.0.1:0`). No `mili_viz.proto`/blob/ticket change | ✅ pinned + landed (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
@@ -298,6 +299,32 @@ expanded by `scripting.md` / `client.md`. None started.
         structural/state-tracking + the `vel_*`-at-state-1-zero kernel
         fact); M1's six + M2 + M3 + M4 + M5 + M5b + M6 tests unchanged
         and green.
+  - [x] **M5d — the `*_alt` griz closed-form trig principal-strain
+        variants.** ✅ **Landed.** Two parts. **Part A (`mili-rs`
+        core):** `mili_rs::compute_principal_strain_alt` +
+        `PrincipalStrainAlt`/`principal_strain_alt_spec`/`_primals`
+        (re-exported from `lib.rs`), wired through
+        `crates/mili-py/src/database.rs`, gated vs the `mili` oracle by
+        `crates/mili-py/tests/test_alt_strain_parity.py` — **f32
+        tolerance** (`np.allclose`, not bitwise: numpy's float32
+        `arccos`/`cos` are its own SIMD polynomials, ≠ libm, not
+        cross-language bit-reproducible; ≈1.7e-10 worst abs vs strain
+        ~1e-2; `../mili-py/m4.md` Decision 27). Strict 0-xfail harness
+        still green (950 passed). **Part B (viz routing):**
+        `show prin_strain{1,2,3}_alt`/`prin_dev_strain{1,2,3}_alt`
+        routes through that kernel via the **identical** M5b
+        element-scatter branch (only `*_spec`/`*_primals`/`compute_*`
+        swapped). No proto change, no `parity` feature; M5/M5b/M5c/M3/
+        M6 paths byte-stable. **Discharges `phase-4-m5c.md`
+        Decision 28.** Scope/decisions:
+        [`phase-4-m5d.md`](phase-4-m5d.md) (32–34). Gating test:
+        `crates/mili-viz-server/tests/m5d_alt_strain.rs`
+        `derived_alt_principal_strain` (single-shared-gather: structural
+        + `ResultState` bracketing + the per-vertex principal-ordering
+        `1≥2≥3` identity + state-tracking + totality/Decision-28
+        closure); M5c's `*_alt`→bare-hull assertion intentionally
+        removed (superseded — Decision 34); all prior gating tests
+        (M1×6 + m2 + m3 + m4 + m5 + m5b + m5c + m6) unchanged and green.
 - [x] **M6 — remote transport.** ✅ **Landed.** A real **gRPC +
       Arrow Flight over TCP** transport joins the in-process one:
       `serve_tcp(svc, addr)` co-serves `MiliVizServer` + a real
@@ -417,15 +444,25 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     `mili-rs` kernel — a future `mili-rs` core derived sub-slice).
     Scope/decisions in [`phase-4-m5c.md`](phase-4-m5c.md) (28–31).
     Gating test `m5c_derived.rs::derived_surfstrain_and_nodal_time`.
-    **Phase 4 derived story is complete (modulo the `*_alt` core
-    follow-up).**
-13. ⏭️ **NEXT:** Phase 5 (`mili-viz` client — `wgpu`/`egui`
-    renderer; M1 was its only gate and is long landed), and/or a
-    future `mili-rs` **core** derived sub-slice porting +
-    parity-validating `__compute_principal_strain_alt` (the only
-    remaining deferred derived family; once it has a parity-exact
-    kernel, routing it into viz is a trivial follow-up through the
-    M5/M5b seam).
+13. ✅ **DONE (coding M5d — the `*_alt` core sub-slice + viz routing):**
+    `compute_principal_strain_alt` +
+    `PrincipalStrainAlt`/`principal_strain_alt_spec`/`_primals` in the
+    `mili-rs` core (re-exported from `lib.rs`), wired through
+    `crates/mili-py/src/database.rs`, gated vs the `mili` oracle by
+    `crates/mili-py/tests/test_alt_strain_parity.py` to a tight **f32
+    tolerance** (not bitwise — numpy's float32 `arccos`/`cos` are
+    numpy's own SIMD polynomials, not cross-language bit-reproducible;
+    `../mili-py/m4.md` Decision 27); then the trivial viz seam (the
+    verbatim M5b element-scatter branch). **`phase-4-m5c.md`
+    Decision 28 discharged; the Phase 4 derived story is now fully
+    complete.** Scope/decisions in
+    [`phase-4-m5d.md`](phase-4-m5d.md) (32–34). Gating test
+    `m5d_alt_strain.rs::derived_alt_principal_strain`. **Phase 4
+    (`mili-viz` server) is complete with no deferred derived
+    families.**
+14. ⏭️ **NEXT:** Phase 5 (`mili-viz` client — `wgpu`/`egui`
+    renderer; M1 was its only gate and is long landed). No `mili-rs`/
+    `mili-py` derived work remains.
 
 ## Update protocol
 

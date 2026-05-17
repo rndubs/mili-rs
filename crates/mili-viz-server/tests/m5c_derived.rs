@@ -178,15 +178,16 @@ async fn derived_surfstrain_and_nodal_time() {
         .into_inner();
     let _snap = sub.message().await.unwrap().unwrap();
 
-    // ── totality: unknown, empty, and a re-deferred `*_alt` name all
-    //    fall back to the M3 bare hull (phase-4-m5c.md Decision 28 —
-    //    `*_alt` has no parity-exact kernel and must not error) ───────
-    for name in [
-        "not_a_derived",
-        "",
-        "prin_strain1_alt",
-        "prin_dev_strain2_alt",
-    ] {
+    // ── totality: an unknown name and the empty result fall back to
+    //    the M3 bare hull (`show` never errors). NOTE: `*_alt` names
+    //    (`prin_strain1_alt`, …) USED to be re-deferred-and-bare-hull
+    //    here under phase-4-m5c.md Decision 28; that decision is now
+    //    discharged — the parity-gated `mili-rs` kernel + viz seam
+    //    landed (phase-4-m5d.md Decisions 32–34), so `*_alt` now
+    //    resolves to an `MVG2` scalar and its routing coverage moved to
+    //    `m5d_alt_strain.rs`. They are deliberately no longer in this
+    //    bare-hull list. ──────────────────────────────────────────────
+    for name in ["not_a_derived", ""] {
         let g = show(&mut client, &mut sub, &svc, name).await.0;
         assert!(
             g.layout.starts_with("MVG1") && g.scalar.is_empty(),

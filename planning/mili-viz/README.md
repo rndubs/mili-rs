@@ -165,7 +165,14 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
   (`mili_rs::compute_stress_invariant` &c.) — no formula re-port, no
   committed griz golden, no `parity` feature in `mili-viz-server`; the
   gating test validates the *viz routing* via the linear-pressure
-  identity (`phase-4-m5.md` Decisions 19–21).
+  identity (`phase-4-m5.md` Decisions 19–21). The boundary held
+  through M5b/M5c/M5d — including the final `*_alt` family, whose core
+  kernel is gated vs the oracle to a tight **f32 tolerance** (not
+  bitwise: numpy's float32 `arccos`/`cos` are its own SIMD
+  polynomials, not cross-language bit-reproducible; `../mili-py/m4.md`
+  Decision 27) while viz still merely *reuses* it (no formula re-port,
+  no `parity` feature; `phase-4-m5d.md`). **No `mili_viz.proto`
+  change** at any M5 sub-slice.
 - **Server-hosted agent on the critical path.** ✅ Resolved —
   `phase-4-m1.md` Decision 6. The agent **wire contract** is frozen
   in M1 (so the `protocol_version` handshake never breaks); the
