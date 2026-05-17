@@ -117,21 +117,22 @@ impl Session {
         let topo = self.topo.as_ref()?;
         let db = self.db.as_ref()?;
         let scalar = topo.vertex_scalar(db, svar, self.state);
-        let (blob, layout, min, max) = match &scalar {
+        let materials = &self.materials;
+        let ((blob, num_indices), layout, min, max) = match &scalar {
             Some((s, lo, hi)) => (
-                topo.encode(db, self.state, Some(s)),
+                topo.encode(db, self.state, Some(s), materials),
                 geometry::LAYOUT_SCALAR,
                 *lo,
                 *hi,
             ),
             None => (
-                topo.encode(db, self.state, None),
+                topo.encode(db, self.state, None, materials),
                 geometry::LAYOUT,
                 0.0,
                 0.0,
             ),
         };
-        let (num_vertices, num_indices) = (topo.num_vertices(), topo.num_indices());
+        let num_vertices = topo.num_vertices();
         self.geom_seq += 1;
         let ticket = format!("geom:{}", self.geom_seq).into_bytes();
         self.geom.insert(ticket.clone(), blob);
@@ -389,7 +390,15 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             (D::DeltaSelection, P::Selection(selection_state(s)))
         }
         Cmd::Clrsel(c) => {
-            s.selection.remove(&c.class_name);
+            // griz `clrsel`/`poof` with no class clears the whole
+            // selection; a named class clears just that class
+            // (phase-4-m4.md Decision 17;
+            // reference/griz/Src/interpret.c:1450).
+            if c.class_name.is_empty() {
+                s.selection.clear();
+            } else {
+                s.selection.remove(&c.class_name);
+            }
             (D::DeltaSelection, P::Selection(selection_state(s)))
         }
         Cmd::Show(show) => {
@@ -470,8 +479,10 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             (D::DeltaIsosurface, P::Isosurface(st))
         }
         Cmd::Material(m) => {
-            // M1: track per-material visibility. `class_name` scoping
-            // and the geometry effect are M4.
+            // Track per-material visibility; the geometry filter runs
+            // on the next `show` (phase-4-m4.md Decision 16). A `None`
+            // material and `class_name` scoping stay no-ops for the
+            // filter (Decision 16 trade-off).
             if let Some(mat) = m.material {
                 s.materials.insert(mat, m.enable);
             }

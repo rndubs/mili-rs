@@ -8,7 +8,7 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅ landed.**
+- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ landed.**
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
@@ -52,8 +52,46 @@
   [`phase-4-m3.md`](phase-4-m3.md). Gating test:
   `crates/mili-viz-server/tests/m3_primal.rs`
   `primal_result_colors_the_mesh`; M1's six + the M2 test still pass
-  unchanged. Next coding milestone: M4 (selection + enable/disable —
-  mesh filtering, material visibility).
+  unchanged.
+- **✅ Phase 4 M4 is implemented.** `enable`/`disable`
+  (`MaterialVisibility`) now filters the emitted geometry — triangles
+  of a disabled material are excluded from the blob on the next `show`,
+  a single pass over the M2 per-triangle material that composes
+  identically with the `MVG1` bare hull and the `MVG2` scalar hull (the
+  per-vertex scalar array and `ResultState.{min,max}` are byte-stable;
+  only `num_indices` shrinks). No material disabled → byte-identical
+  blob, so the frozen M2/M3 tests are untouched. `select`/`clrsel` stay
+  metadata-only — broadcast via the existing `DELTA_SELECTION`
+  `SelectionState` + the late-joiner `Snapshot` (griz's non-destructive
+  overlay; mirrors M1 Decision 2); `clrsel` with an empty class now
+  clears the whole selection (griz `clrsel`/`poof`). One delta per
+  `Execute` preserved; no proto/blob-format change. Scope + Decisions
+  16–18 in [`phase-4-m4.md`](phase-4-m4.md). Gating test:
+  `crates/mili-viz-server/tests/m4_visibility.rs`
+  `material_visibility_and_selection`; M1's six + the M2 + M3 tests
+  still pass unchanged.
+- **✅ Phase 4 M5 is implemented (first slice: scalar stress
+  invariants).** `show pressure`/`eff_stress`/`triaxiality`/
+  `norm_press` resolves via `mili_rs::stress_invariant_spec`, queries
+  the component stress primals per element class with
+  `Database::query_full` at the current state, computes the invariant
+  with the **already-parity-exact** `mili_rs::compute_stress_invariant`
+  kernel (the same one `crates/mili-py` drives), and feeds the
+  per-element values into M3's **unchanged** nodal-average scatter
+  (same `MVG2` blob, same `ResultState.{min,max}` autoscale). Unknown
+  derived → M3 bare hull (never errors). **No formula re-port, no griz
+  golden, no `parity` feature in `mili-viz-server`** — `phase-4-m1.md`
+  Decision 5's "no oracle" premise was false (the kernel is bit-exact
+  vs the `mili` Python package via the frozen Phase-1–3 parity suite),
+  so Decision 5 is **superseded** by `phase-4-m5.md` Decision 19. The
+  eigensolver / `surfstrain` / time-derived families are explicitly
+  deferred sub-slices (Decision 20). No proto change. Scope +
+  Decisions 19–21 in [`phase-4-m5.md`](phase-4-m5.md). Gating test:
+  `crates/mili-viz-server/tests/m5_derived.rs`
+  `derived_stress_invariants` (validates the viz routing via the
+  linear-pressure identity); M1's six + M2 + M3 + M4 tests still pass
+  unchanged. Next coding milestone: M6 (remote transport — gRPC +
+  Arrow Flight over TCP).
 - **✅ The Phase 4 M1 surface is pinned.**
   [`phase-4-m1.md`](phase-4-m1.md) is the consolidated, buildable M1
   scope doc (the analogue of `mili-py/m1.md`): it reconciles the
@@ -73,6 +111,8 @@
 | [`phase-4-m1.md`](phase-4-m1.md) | **The consolidated buildable Phase 4 M1 scope.** Frozen M1 wire contract = union of base vocab + scripting + agent; every delta from the proto draft enumerated (Decision 1 Δ1–Δ9); M1 acceptance gate (no oracle → conformance + Layer-0≡raw + fan-out); Decisions 1–7 resolving open Q3–Q8 | ✅ pinned (2026-05-17) |
 | [`phase-4-m2.md`](phase-4-m2.md) | **The buildable Phase 4 M2 scope.** `mili-rs`-backed `load`/state-nav/geometry behind the frozen contract; Decisions 10–12 (in-process geometry store keyed by the frozen `flight_ticket`, real Flight wire deferred to M6; self-describing `MVG1` blob + per-superclass corner triangulation; per-state `nodpos`, state clamping, one-delta invariant). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m3.md`](phase-4-m3.md) | **The buildable Phase 4 M3 scope.** Primal result display behind the frozen contract; Decisions 13–15 (leaf-svar resolution via `classes_of_state_variable`, unresolvable → bare hull; optional per-vertex `scalar_f32`, `MVG2` layout, element→nodal-averaged / nodal→direct / vector→comp 0; `ResultState.{min,max}` = autoscale data range, `legend` stays a client clamp). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-4-m4.md`](phase-4-m4.md) | **The buildable Phase 4 M4 scope.** Selection + enable/disable behind the frozen contract; Decisions 16–18 (`enable`/`disable` filters the emitted triangle list by per-triangle material, default-visible, scalar/range byte-stable, composes with `MVG1`/`MVG2`; selection stays metadata-only via the existing `DELTA_SELECTION` + `Snapshot`, `clrsel` empty-class clears all; effects on next `show`, one delta per `Execute`). No proto/format change | ✅ pinned + landed (2026-05-17) |
+| [`phase-4-m5.md`](phase-4-m5.md) | **The buildable Phase 4 M5 scope (first slice).** Scalar stress invariants behind the frozen contract; Decisions 19–21 (the derived oracle exists — `mili-rs::derived`, bit-exact vs `mili` Python — so reuse `compute_stress_invariant`, no formula port, no griz golden, **supersedes `phase-4-m1.md` Decision 5**; resolve → per-class `query_full` → kernel → M3 nodal scatter, eigensolver/per-face/time families deferred; gating test uses the linear-pressure identity, no `parity` feature in `mili-viz-server`). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -96,7 +136,7 @@ with a reason** in [`phase-4-m1.md`](phase-4-m1.md). "✅" = decided;
 | 5 | **Time-history plots** — client vs. server | ✅ resolved: client-side `egui_plot` (Ph5 M3.5) fed by existing `Query`; no M1 proto | `phase-4-m1.md` Decision 3 |
 | 6 | **Backwards-compatible CLI** — griz flags | ✅ resolved: portable subset only (`-i`/`-b`/`-V`/`-w`); rest dropped; client-only, no proto | `phase-4-m1.md` Decision 4 |
 | 7 | **Local-LLM agent**: model / post-training / host-runtime | ⏸️ deferred (non-blocking): agent *contract* in M1; *impl* + model choice **off the M1–M5 critical path** (Ph4/5 M6), capability-gated | `phase-4-m1.md` Decision 6; research in `agent-local-llm*.md` |
-| 8 | Derived-result port + validation (no Python oracle) | ✅ resolved: formulas-as-spec + committed golden + tolerance, **no live griz in CI**; detail at M5 | `phase-4-m1.md` Decision 5 |
+| 8 | Derived-result port + validation (no Python oracle) | ✅ resolved, then **superseded at M5**: the premise was false — `mili-rs::derived` is bit-exact vs the `mili` Python package (frozen parity suite), so M5-viz reuses that kernel (no formula port, no griz golden, no `parity` feature in `mili-viz-server`) | `phase-4-m1.md` Decision 5 → **`phase-4-m5.md` Decision 19** |
 
 ## Phase 4 — `mili-viz` server (NOT STARTED)
 
@@ -139,11 +179,35 @@ expanded by `scripting.md` / `client.md`. None started.
       `crates/mili-viz-server/tests/m3_primal.rs`
       `primal_result_colors_the_mesh`; M1's six + the M2 test
       unchanged and green.
-- [ ] **M4 — selection + enable/disable.** Mesh filtering, material
-      visibility (griz command set is the spec).
-- [ ] **M5 — derived results.** Port stress invariants, then strain,
-      from griz `Src/*.c`; `rayon` per-element loops. (See open Q8 —
-      needs a validation strategy.)
+- [x] **M4 — selection + enable/disable.** ✅ **Landed.**
+      `enable`/`disable` (`MaterialVisibility`) filters the emitted
+      geometry — disabled-material triangles are dropped from the blob
+      on the next `show`, a single pass over the M2 per-triangle
+      material that composes identically with `MVG1`/`MVG2` (scalar +
+      `ResultState.{min,max}` byte-stable; only `num_indices` shrinks;
+      no material disabled → byte-identical blob). `select`/`clrsel`
+      stay metadata-only via the existing `DELTA_SELECTION`
+      `SelectionState` + `Snapshot` (griz non-destructive overlay;
+      `clrsel` empty-class clears all). One delta per `Execute`; no
+      proto/format change. Scope/decisions:
+      [`phase-4-m4.md`](phase-4-m4.md) (16–18). Gating test:
+      `crates/mili-viz-server/tests/m4_visibility.rs`
+      `material_visibility_and_selection`; M1's six + the M2 + M3
+      tests unchanged and green.
+- [x] **M5 — derived results.** ✅ **Landed (first slice: scalar
+      stress invariants).** `show pressure`/`eff_stress`/
+      `triaxiality`/`norm_press` routes through the already-parity-
+      exact `mili_rs::compute_stress_invariant` kernel (resolve →
+      per-class `query_full` → kernel → M3's unchanged nodal scatter;
+      same `MVG2` blob/range). No formula re-port, no griz golden, no
+      `parity` feature in `mili-viz-server` — `phase-4-m1.md`
+      Decision 5's "no oracle" premise was false, so it is superseded
+      by `phase-4-m5.md` Decision 19. Eigensolver/`surfstrain`/time
+      families are deferred sub-slices (Decision 20). No proto change.
+      Scope/decisions: [`phase-4-m5.md`](phase-4-m5.md) (19–21).
+      Gating test: `crates/mili-viz-server/tests/m5_derived.rs`
+      `derived_stress_invariants` (linear-pressure identity); M1's six
+      + M2 + M3 + M4 tests unchanged and green.
 - [ ] **M6 — remote transport.** Same proto over gRPC + Arrow Flight
       on TCP; validate over a real network mount.
 
@@ -199,10 +263,28 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
    `ResultState`. Scope/decisions in
    [`phase-4-m3.md`](phase-4-m3.md) (13–15). Gating test
    `m3_primal.rs::primal_result_colors_the_mesh`.
-8. ⏭️ **NEXT (coding M4):** selection + enable/disable — `select`/
-   `clrsel` mesh filtering and material visibility actually drive
-   the emitted geometry (the griz command set is the spec). See
-   Phase 4 M4.
+8. ✅ **DONE (coding M4):** selection + enable/disable —
+   `enable`/`disable` filters the emitted triangle list by
+   per-triangle material (composes with `MVG1`/`MVG2`, scalar/range
+   byte-stable); `select`/`clrsel` stay metadata-only via the existing
+   `DELTA_SELECTION` + `Snapshot` (`clrsel` empty-class clears all).
+   One delta per `Execute`; no proto/format change. Scope/decisions in
+   [`phase-4-m4.md`](phase-4-m4.md) (16–18). Gating test
+   `m4_visibility.rs::material_visibility_and_selection`.
+9. ✅ **DONE (coding M5, first slice):** derived results — scalar
+   stress invariants (`pressure`/`eff_stress`/`triaxiality`/
+   `norm_press`) route through the already-parity-exact
+   `mili_rs::compute_stress_invariant` into M3's nodal scatter; no
+   formula re-port / no griz golden (`phase-4-m1.md` Decision 5
+   superseded by `phase-4-m5.md` Decision 19). Eigensolver/`surfstrain`/
+   time families deferred (Decision 20). Gating test
+   `m5_derived.rs::derived_stress_invariants`.
+10. ⏭️ **NEXT:** either the **M5 follow-up sub-slice** (principal
+    stress/strain + `surfstrain` via the same routing seam — only the
+    `compute_*` call changes) or **coding M6** (remote transport — the
+    same proto over gRPC + Arrow Flight on TCP; Decision 10 swaps the
+    in-process geometry store for a real Flight `DoGet`, format/ticket
+    frozen at M2).
 
 ## Update protocol
 

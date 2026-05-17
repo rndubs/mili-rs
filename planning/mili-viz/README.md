@@ -155,12 +155,17 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
   **existing** `Query` over a state range (`time_hist.c`
   (`reference/griz/Src/time_hist.c`) is just a rendering of that
   data). No server plot RPC; **no M1 proto change**.
-- **Derived-result validation (no oracle).** ✅ Resolved —
-  `phase-4-m1.md` Decision 5. There is no `mili`-style oracle for
-  viz: griz `Src/{stress,strain,iso_surface,contour}.c` formulas are
-  the written spec; correctness is gated by a **committed golden
-  fixture + numeric tolerance**, with **zero live-griz dependency in
-  CI**. Detailed at Phase 4 M5; approach pinned now.
+- **Derived-result validation (no oracle).** ✅ Resolved, then
+  **superseded** at M5 — `phase-4-m1.md` Decision 5 →
+  `phase-4-m5.md` Decision 19. Decision 5's premise ("no `mili`-style
+  oracle for viz") proved false: Phases 1–3 already ported every
+  derived expression into `crates/mili-rs/src/derived.rs`, **bit-exact
+  validated against the `mili` Python package** by the frozen
+  parity suite. M5-viz therefore reuses that kernel
+  (`mili_rs::compute_stress_invariant` &c.) — no formula re-port, no
+  committed griz golden, no `parity` feature in `mili-viz-server`; the
+  gating test validates the *viz routing* via the linear-pressure
+  identity (`phase-4-m5.md` Decisions 19–21).
 - **Server-hosted agent on the critical path.** ✅ Resolved —
   `phase-4-m1.md` Decision 6. The agent **wire contract** is frozen
   in M1 (so the `protocol_version` handshake never breaks); the

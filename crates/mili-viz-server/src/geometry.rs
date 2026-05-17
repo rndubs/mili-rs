@@ -8,7 +8,7 @@
 //! the parity-exact primal `nodpos` query. The encoded blob layout is
 //! frozen by `planning/mili-viz/phase-4-m2.md` Decision 11.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use mili_rs::{Database, MeshId, QueryArgs, StateValues, Superclass};
 
@@ -98,6 +98,33 @@ fn triangulation(sc: Superclass) -> &'static [[usize; 3]] {
         // are a Phase-5 renderer concern).
         _ => &[],
     }
+}
+
+/// Component-0 `label → value` map from a flat `[label][atom]` query
+/// result (phase-4-m3.md Decision 14 — vectors color by component 0).
+/// `None` on an empty/degenerate result so `show` falls back to the
+/// bare hull (M3 Decision 13).
+fn component0_map(vals: StateValues, labels: &[i32]) -> Option<HashMap<i32, f64>> {
+    if labels.is_empty() {
+        return None;
+    }
+    let v: Vec<f64> = match vals {
+        StateValues::F32(v) => v.into_iter().map(f64::from).collect(),
+        StateValues::F64(v) => v,
+        StateValues::I32(v) => v.into_iter().map(f64::from).collect(),
+        StateValues::I64(v) => v.into_iter().map(|x| x as f64).collect(),
+    };
+    let comps = v.len() / labels.len();
+    if comps == 0 {
+        return None;
+    }
+    Some(
+        labels
+            .iter()
+            .enumerate()
+            .map(|(i, &lab)| (lab, v[i * comps]))
+            .collect(),
+    )
 }
 
 impl MeshTopology {
@@ -258,7 +285,8 @@ impl MeshTopology {
     }
 
     /// Per-vertex scalar for `svar` at 1-based `state`, plus the finite
-    /// data range `(min, max)` (phase-4-m3.md Decisions 13–15).
+    /// data range `(min, max)` (phase-4-m3.md Decisions 13–15;
+    /// phase-4-m5.md Decisions 19–20 add scalar stress invariants).
     /// `None` when the svar resolves to no prepped class or the query
     /// fails — the caller then falls back to the M2 bare hull.
     ///
@@ -277,6 +305,37 @@ impl MeshTopology {
             return None;
         }
         let state_idx = (state as usize - 1).min(n - 1);
+
+        // Derived: scalar stress invariants. `show pressure` etc. is
+        // not a primal svar, so it must be resolved before the primal
+        // `classes_of_state_variable` lookup (phase-4-m5.md Decisions
+        // 19–20 — reuse the parity-exact `mili-rs` kernel; element-only
+        // by construction, fed through M3's nodal scatter).
+        if let Some((inv, title)) = mili_rs::stress_invariant_spec(svar) {
+            let primal_names = mili_rs::stress_invariant_primals(inv);
+            let classes = db.classes_of_state_variable(primal_names[0])?;
+            if classes.is_empty() {
+                return None;
+            }
+            return self.scatter_elements(&classes, |class| {
+                let mut primals = Vec::with_capacity(primal_names.len());
+                for pn in primal_names {
+                    let args = QueryArgs {
+                        svar: pn,
+                        class,
+                        labels: None,
+                        states: &[state_idx],
+                        materials: None,
+                        ips: None,
+                        subrec: None,
+                    };
+                    primals.push(db.query_full(&args).ok()?);
+                }
+                let qr = mili_rs::compute_stress_invariant(inv, &primals, svar, title).ok()?;
+                component0_map(qr.values, &qr.labels)
+            });
+        }
+
         let classes = db.classes_of_state_variable(svar)?;
         if classes.is_empty() {
             return None;
@@ -293,30 +352,8 @@ impl MeshTopology {
                 subrec: None,
             };
             let (vals, labels) = db.query_with_labels(&args).ok()?;
-            if labels.is_empty() {
-                return None;
-            }
-            let v: Vec<f64> = match vals {
-                StateValues::F32(v) => v.into_iter().map(f64::from).collect(),
-                StateValues::F64(v) => v,
-                StateValues::I32(v) => v.into_iter().map(f64::from).collect(),
-                StateValues::I64(v) => v.into_iter().map(|x| x as f64).collect(),
-            };
-            let comps = v.len() / labels.len();
-            if comps == 0 {
-                return None;
-            }
-            // Component 0 of each object (phase-4-m3.md Decision 14).
-            Some(
-                labels
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &lab)| (lab, v[i * comps]))
-                    .collect(),
-            )
+            component0_map(vals, &labels)
         };
-
-        let mut scalar = vec![f32::NAN; self.node_count];
 
         if classes.iter().any(|c| c == "node") {
             // Nodal field: map node label → vertex directly.
@@ -324,47 +361,69 @@ impl MeshTopology {
                 return None;
             }
             let by_label = query("node")?;
+            let mut scalar = vec![f32::NAN; self.node_count];
             for (i, &lab) in self.node_labels.iter().enumerate() {
                 if let Some(&val) = by_label.get(&lab) {
                     scalar[i] = val as f32;
                 }
             }
+            Self::finite_range(scalar)
         } else {
-            // Element field: nodal-average onto vertices.
-            let mut sum = vec![0.0f64; self.node_count];
-            let mut cnt = vec![0u32; self.node_count];
-            let mut any = false;
-            for ec in &self.elem_classes {
-                if !classes.iter().any(|c| c == &ec.name) {
-                    continue;
-                }
-                let Some(by_label) = query(&ec.name) else {
+            self.scatter_elements(&classes, query)
+        }
+    }
+
+    /// Nodal-average a per-element `label → value` map onto the mesh
+    /// vertices (mean of incident elements, griz smooth shading;
+    /// phase-4-m3.md Decision 14). `value_for_class` yields the
+    /// per-element values for one element class (the M3 primal closure
+    /// or the M5 derived kernel — Decision 20). Untouched vertices stay
+    /// `f32::NAN`. The accumulation order is unchanged from M3 so the
+    /// primal path is byte-identical.
+    fn scatter_elements(
+        &self,
+        classes: &[String],
+        value_for_class: impl Fn(&str) -> Option<HashMap<i32, f64>>,
+    ) -> Option<(Vec<f32>, f64, f64)> {
+        let mut scalar = vec![f32::NAN; self.node_count];
+        let mut sum = vec![0.0f64; self.node_count];
+        let mut cnt = vec![0u32; self.node_count];
+        let mut any = false;
+        for ec in &self.elem_classes {
+            if !classes.iter().any(|c| c == &ec.name) {
+                continue;
+            }
+            let Some(by_label) = value_for_class(&ec.name) else {
+                continue;
+            };
+            any = true;
+            for (e, &lab) in ec.labels.iter().enumerate() {
+                let Some(&val) = by_label.get(&lab) else {
                     continue;
                 };
-                any = true;
-                for (e, &lab) in ec.labels.iter().enumerate() {
-                    let Some(&val) = by_label.get(&lab) else {
-                        continue;
-                    };
-                    for &nid in &ec.conns[e * ec.n_nodes..(e + 1) * ec.n_nodes] {
-                        let nid = nid as usize;
-                        if nid < self.node_count {
-                            sum[nid] += val;
-                            cnt[nid] += 1;
-                        }
+                for &nid in &ec.conns[e * ec.n_nodes..(e + 1) * ec.n_nodes] {
+                    let nid = nid as usize;
+                    if nid < self.node_count {
+                        sum[nid] += val;
+                        cnt[nid] += 1;
                     }
                 }
             }
-            if !any {
-                return None;
-            }
-            for i in 0..self.node_count {
-                if cnt[i] > 0 {
-                    scalar[i] = (sum[i] / f64::from(cnt[i])) as f32;
-                }
+        }
+        if !any {
+            return None;
+        }
+        for i in 0..self.node_count {
+            if cnt[i] > 0 {
+                scalar[i] = (sum[i] / f64::from(cnt[i])) as f32;
             }
         }
+        Self::finite_range(scalar)
+    }
 
+    /// Finite `(min, max)` of a per-vertex scalar (griz autoscale,
+    /// phase-4-m3.md Decision 15). `None` when no sample is finite.
+    fn finite_range(scalar: Vec<f32>) -> Option<(Vec<f32>, f64, f64)> {
         let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
         for &s in &scalar {
             if s.is_finite() {
@@ -378,19 +437,52 @@ impl MeshTopology {
         Some((scalar, lo, hi))
     }
 
-    /// Encode the current-state hull. `scalar` (per-vertex, phase-4-m3
-    /// Decision 14) yields the `MVG2` layout; `None` is the M2 `MVG1`
-    /// bare hull, byte-identical to before.
-    pub fn encode(&self, db: &Database, state: u32, scalar: Option<&[f32]>) -> Vec<u8> {
+    /// A material is visible unless `materials` maps it to `false`
+    /// (phase-4-m4.md Decision 16 — never-named materials stay
+    /// visible; `disable` sets `false`).
+    fn material_visible(materials: &BTreeMap<u32, bool>, mat: u32) -> bool {
+        materials.get(&mat) != Some(&false)
+    }
+
+    /// Triangle list filtered to visible-material triangles, in the
+    /// original order (phase-4-m4.md Decision 16). With nothing
+    /// disabled this is the full list in the M2/M3 order, so the
+    /// encoded blob stays byte-identical for the frozen tests.
+    fn visible_triangles(&self, materials: &BTreeMap<u32, bool>) -> (Vec<u32>, Vec<u32>) {
+        let mut idx = Vec::with_capacity(self.indices.len());
+        let mut mat = Vec::with_capacity(self.tri_material.len());
+        for (t, &m) in self.tri_material.iter().enumerate() {
+            if Self::material_visible(materials, m) {
+                idx.extend_from_slice(&self.indices[t * 3..t * 3 + 3]);
+                mat.push(m);
+            }
+        }
+        (idx, mat)
+    }
+
+    /// Encode the current-state hull, dropping triangles of disabled
+    /// materials (phase-4-m4.md Decision 16). `scalar` (per-vertex,
+    /// phase-4-m3 Decision 14) yields the `MVG2` layout; `None` is the
+    /// M2 `MVG1` bare hull. With no material disabled the bytes are
+    /// identical to M2/M3. Returns the blob and the post-filter
+    /// `num_indices` for the `GeometryRef`.
+    pub fn encode(
+        &self,
+        db: &Database,
+        state: u32,
+        scalar: Option<&[f32]>,
+        materials: &BTreeMap<u32, bool>,
+    ) -> (Vec<u8>, u64) {
         let verts = self.coords_at_state(db, state);
         let n_verts = (verts.len() / 3) as u64;
-        let n_idx = self.indices.len() as u64;
+        let (indices, tri_material) = self.visible_triangles(materials);
+        let n_idx = indices.len() as u64;
         let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
 
         let mut buf = Vec::with_capacity(
             24 + verts.len() * 4
-                + self.indices.len() * 4
-                + self.tri_material.len() * 4
+                + indices.len() * 4
+                + tri_material.len() * 4
                 + if with_scalar { verts.len() / 3 * 4 } else { 0 },
         );
         buf.extend_from_slice(if with_scalar { b"MVG2" } else { b"MVG1" });
@@ -400,10 +492,10 @@ impl MeshTopology {
         for f in &verts {
             buf.extend_from_slice(&f.to_le_bytes());
         }
-        for i in &self.indices {
+        for i in &indices {
             buf.extend_from_slice(&i.to_le_bytes());
         }
-        for m in &self.tri_material {
+        for m in &tri_material {
             buf.extend_from_slice(&m.to_le_bytes());
         }
         if with_scalar {
@@ -411,15 +503,11 @@ impl MeshTopology {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
         }
-        buf
+        (buf, n_idx)
     }
 
     pub fn num_vertices(&self) -> u64 {
         self.node_count as u64
-    }
-
-    pub fn num_indices(&self) -> u64 {
-        self.indices.len() as u64
     }
 
     pub fn mesh_id(&self) -> MeshId {
