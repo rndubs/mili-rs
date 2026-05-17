@@ -13,6 +13,16 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Python packages under python/ (pure-Python, not Cargo crates).
+# Generated gRPC stubs are build output regenerated from the canonical
+# crates/mili-viz-proto/proto/mili_viz.proto — never committed
+# (planning/mili-viz/phase-6-m1.md Decision 33).
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+python/**/src/griz/_proto/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

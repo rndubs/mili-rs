@@ -1,6 +1,6 @@
 # `mili-viz` status — live tracker (START HERE)
 
-> **This is the single source of truth for Phase 4/5 (`mili-viz`).**
+> **This is the single source of truth for Phase 4/5/6 (`mili-viz`).**
 > The `mili-rs` core and the `milox` Python bindings (Phases 1–3) are
 > **complete and frozen** — see [`../mili-rs/status.md`](../mili-rs/status.md)
 > and [`../mili-py/README.md`](../mili-py/README.md). All remaining
@@ -11,6 +11,10 @@
 - **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families), M6 ✅ (remote transport) landed.** (Only the `*_alt` trig principal-strain variants remain deferred — they have **no** parity-exact `mili-rs` kernel, so they belong in a future `mili-rs` **core** derived sub-slice, not a viz producer slice; `phase-4-m5c.md` Decision 28.)
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
+- **Phase 6 (`pygriz` scripting client): ⏳ NOT STARTED** — scaffold
+  landed (`python/pygriz/`, the new top-level `python/` tree); a third
+  pure-Python client of the frozen contract, gated only on Phase 4 M1,
+  independent of Phase 5. Scope: [`phase-6-m1.md`](phase-6-m1.md).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
   (protoc-free `protox`+`tonic` codegen of the frozen Δ1–Δ9
   contract) and `crates/mili-viz-server` (in-process `tokio::io::
@@ -165,8 +169,9 @@
 | [`phase-4-m5b.md`](phase-4-m5b.md) | **The buildable Phase 4 M5 follow-up scope (eigenvalue families).** Principal stress/strain, deviatoric, max-shear, volumetric strain behind the frozen contract; Decisions 22–24 (family set = the 14 eigensolver-on-already-prepped-element-class names, `surfstrain*`/`*_alt`/time deferred; routing reuses the M5 seam verbatim — two branches before the primal lookup, only `*_spec`/`*_primals`/`compute_*` swapped, M5/M3 paths byte-stable; gating test uses only single-shared-gather invariants — ordering + relative tracelessness + max-shear — cross-cardinality "trace" checks rejected for an IP-sampling skew). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5c.md`](phase-4-m5c.md) | **The buildable Phase 4 M5 third-slice scope (`surfstrain*` + nodal-time families).** Surface strain + nodal displacement/velocity/acceleration behind the frozen contract; Decisions 28–31 (family set = nodal-time + `surfstrain{x,y,z,xy,yz,zx}`, `*_alt` re-deferred — no parity-exact `mili-rs` kernel, belongs in a core sub-slice, also corrects Decision 22's "nodal-time already M3-reachable" imprecision; nodal-time via a node-direct branch group + a factored M3 node→vertex helper, element scatter untouched; `surfstrain*` via a separate `scatter_hex_faces` per-face Hex gather over the parity-exact `surface_strain_query` + a viz-local canonical face table, M5/M5b/M3 byte-stable; gating test = the exact displacement-magnitude norm identity + structural/state-tracking, no cross-cardinality checks). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m6.md`](phase-4-m6.md) | **The buildable Phase 4 M6 scope (remote transport).** gRPC + Arrow Flight over TCP behind the frozen contract; Decisions 25–27 (real Flight + gRPC TCP transport redeems `phase-4-m2.md` Decision 10 — its tonic-version premise is now factually false but the deferral was still correct; ticket/blob/layout byte-stable; in-process seam kept. Flight via the canonical vendored `Flight.proto` on the existing protoc-free `protox` path — zero change to the frozen `mili_viz.proto`; only `DoGet` implemented, other Flight RPCs `UNIMPLEMENTED`; verbatim opaque blob in `FlightData.data_body`; heavy `arrow-flight` crate rejected for dependency surface. `serve_tcp(addr)` pre-binds a `TcpListener`, co-serves both services on one port; gating test binds a real ephemeral `127.0.0.1:0`). No `mili_viz.proto`/blob/ticket change | ✅ pinned + landed (2026-05-17) |
-| [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
-| [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
+| [`phase-6-m1.md`](phase-6-m1.md) | **The buildable Phase 6 M1 scope (`pygriz` scaffold + stubs + connect/handshake).** The scripting client gets an implementation home: a third pure-Python client of the frozen contract, gated only on Phase 4 M1 (independent of the Phase 5 renderer). Decisions 32–34 (top-level `python/` tree, dist `pygriz` / import `griz`, pure-Python no-pyo3; stubs are gitignored build output from the one canonical proto; M1 is Layer-0-only — reuse the server's `parse_raw`, Layer-1 + the Layer-0≡Layer-1 test is M3). No proto change | ✅ pinned (2026-05-17) |
+| [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` is authoritative) |
+| [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake. **Implementation home: Phase 6** ([`phase-6-m1.md`](phase-6-m1.md)) | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
 | [`agent-local-llm.md`](agent-local-llm.md), [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md), [`posttraining-dataset.md`](posttraining-dataset.md) | Local-LLM agent investigation (model choice / post-training) + the ordered dataset-construction build plan | 🔎 research notes + build plan — not yet a binding decision |
 
@@ -330,6 +335,38 @@ expanded by `scripting.md` / `client.md`. None started.
       for HPC latency).
 - [ ] **M6 — agent integration polish** (`client.md`).
 
+## Phase 6 — `pygriz` scripting client (NOT STARTED, gated on Phase 4 M1 only)
+
+The pip-installable pure-Python client from
+[`scripting.md`](scripting.md) — a **third client** of the frozen
+`mili-viz-proto`. Independent of the Phase 5 renderer; gated only on
+Phase 4 M1 (long landed). Distribution `pygriz`, import namespace
+`griz`, under the new top-level `python/` tree (the non-crate
+parallel of `crates/`). Milestone breakdown + M1 detail:
+[`phase-6-m1.md`](phase-6-m1.md).
+
+- [ ] **M1 — `pygriz` scaffold + stubs + connect/handshake.**
+      `griz.connect(host, port, token=...)`, the `Hello`
+      version/capability handshake (mismatch warns, never crashes),
+      Layer-0 `session.command()` / `run_script()` → `Command.raw`
+      (reuse the server's `parse_raw`; no Python griz parser).
+      Decisions 32–34. Gate:
+      `python/pygriz/tests/test_m1_connect.py`. _Scaffold landed
+      (`python/pygriz/`, `pyproject.toml`, `src/griz/`); stubs +
+      handshake + Layer-0 path are the coding work._
+- [ ] **M2 — connection model.** `attach()` (priority: newest
+      `~/.griz/sessions/<id>.json`), `attach(id=...)`, `launch()`,
+      `list_sessions()`.
+- [ ] **M3 — Layer-1 object API** + the **Layer-0 ≡ Layer-1**
+      equivalence test (`show()`→`Result`, `view.*`
+      server-authoritative, typed handles).
+- [ ] **M4 — live sync** (`Subscribe` → `@s.on(...)`; GUI/script
+      stay in sync).
+- [ ] **M5 — query payoff** (`query`/`to_dataframe`, same
+      numpy/pandas types as milox; Arrow Flight for large results).
+- [ ] **M6 — output + remote tuning** (`render`/`save_animation`/
+      `snapshot` via `CaptureFrame`; HPC-latency buffers).
+
 ## Immediate next steps (pick up here)
 
 The planning gate is **cleared**. Items 1–4 below are **done**
@@ -419,13 +456,19 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     Gating test `m5c_derived.rs::derived_surfstrain_and_nodal_time`.
     **Phase 4 derived story is complete (modulo the `*_alt` core
     follow-up).**
-13. ⏭️ **NEXT:** Phase 5 (`mili-viz` client — `wgpu`/`egui`
-    renderer; M1 was its only gate and is long landed), and/or a
-    future `mili-rs` **core** derived sub-slice porting +
-    parity-validating `__compute_principal_strain_alt` (the only
-    remaining deferred derived family; once it has a parity-exact
-    kernel, routing it into viz is a trivial follow-up through the
-    M5/M5b seam).
+13. ⏭️ **NEXT:** three independent tracks, all gated only on the
+    long-landed Phase 4 M1 — pick any:
+    - **Phase 5** (`mili-viz` client — `wgpu`/`egui` renderer).
+    - **Phase 6** (`pygriz` scripting client). Scaffold landed
+      (`python/pygriz/`); the M1 coding work is stub generation +
+      `connect`/`Hello` handshake + the Layer-0 `command()`/
+      `run_script()` path. Scope: [`phase-6-m1.md`](phase-6-m1.md)
+      Decisions 32–34. Independent of Phase 5.
+    - A future `mili-rs` **core** derived sub-slice porting +
+      parity-validating `__compute_principal_strain_alt` (the only
+      remaining deferred derived family; once it has a parity-exact
+      kernel, routing it into viz is a trivial follow-up through the
+      M5/M5b seam).
 
 ## Update protocol
 
