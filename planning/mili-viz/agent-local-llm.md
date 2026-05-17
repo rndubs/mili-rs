@@ -88,10 +88,20 @@ signal and a clean SFT-data filter without human labeling.
 - **The `mili`/mili-rs test suite** — exercises the result/query API
   and pins expected values; a source of realistic "ask → expected
   data" anchors and of regression-grade verification.
-- **Note:** `reference/griz` is currently an empty submodule and the
-  xmilics files are binary databases, *not* command scripts — so there
-  is **no large natural corpus of NL↔command pairs**. The training set
-  must be *synthesized* and then *filtered by execution*, not scraped.
+- **Griz source (`reference/griz`, now checked out).**
+  `Src/interpret.c`'s `parse_command()` is the command vocabulary as a
+  `strcmp` dispatch — a mechanically-extractable grammar *and* a free
+  validity oracle; `Src/viewer.c` `usage_text[]` and
+  `Src/Doc/griz_manual.pdf` are a natural-language command corpus.
+  This **supersedes the earlier assumption of "no natural corpus"**:
+  the training set is still synthesized + execution-filtered, but it
+  is *grounded* in real command descriptions, not invented from
+  schema alone.
+
+> **Deep dive:** the full post-training design — graded verifier
+> tiers, grammar extraction from `interpret.c`, teacher-rollout loop,
+> SFT→DPO/GRPO, and a no-fine-tune pre-experiment — is in
+> `agent-local-llm-posttraining.md`. The sketch below is the summary.
 
 ### Minimal pipeline (sketch — revisit before building)
 
