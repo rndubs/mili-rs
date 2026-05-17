@@ -26,7 +26,7 @@ use rayon::prelude::*;
 
 use crate::directory::{DirEntry, DirEntryType, Directory};
 use crate::error::{MiliError, Result};
-use crate::header::Header;
+use crate::header::{Endianness, Header};
 use crate::mesh::{self, Connectivity, MaterialId, MeshId, MeshTable, Nodes};
 use crate::param::{DataType, ParamTable, ParamValue, ScalarValue};
 use crate::query::{plan_state_svar_ip, Filter, IntPoints, QueryResult, ReadPlan, StateValues};
@@ -102,6 +102,23 @@ impl Database {
             states,
             state_mmaps: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Re-open this database in place from its `.A` path, replacing
+    /// every parsed structure and dropping the cached state mmaps.
+    ///
+    /// Phase 3.2: after a write that changes the on-disk model
+    /// (`append_state` appends a state map, bumps `state_count`, grows
+    /// or adds a state file), the in-memory `directory` / `states` /
+    /// `a_mmap` are stale. Upstream `_MiliInternal.append_state`
+    /// mutates its in-memory `__smaps` so a subsequent `query` /
+    /// `state_maps` on the **same** object sees the new state; milox's
+    /// engine is the Rust core, so it re-derives that state from the
+    /// just-rewritten `.A` (which `append_state` already produces
+    /// byte-for-byte vs the upstream `AFileWriter`).
+    pub fn reload(&mut self) -> Result<()> {
+        *self = Self::open(self.a_path.clone())?;
+        Ok(())
     }
 
     pub fn header(&self) -> Header {
@@ -803,6 +820,222 @@ impl Database {
             title,
             class_name: args.class.to_owned(),
         })
+    }
+
+    /// Phase 3.2 (decision 23): the `query(write_data=)` write-half —
+    /// the **inverse** of [`Self::run_query`]'s byte gather. It builds
+    /// the *same* per-state [`ReadPlan`] a read of
+    /// `(svar, class, labels, states, ips, subrec)` would, then
+    /// scatters `write_data` into exactly those byte slabs in the
+    /// state files (`rb+`, each state at its smap data-start),
+    /// reproducing upstream `_MiliInternal.__query`'s
+    /// `srec.extract_ordinals(write_data=)` path
+    /// (`reference/mili-python/src/mili/miliinternal.py:1322-1416`):
+    /// `var_data[ordinals] = write_data` then write the buffer back.
+    ///
+    /// `wd_labels` is `write_data[svar]['layout']['labels']`; `values`
+    /// is `write_data[svar]['data']` flattened C-order
+    /// `[state][label][atom]`, its state axis **positionally** aligned
+    /// with `args.states` (upstream indexes it by the requested-state
+    /// position `sidx`, not a state-label lookup —
+    /// `miliinternal.py:1396/1409`). Per-label rows are realigned from
+    /// the `wd_labels` order to the result order via the same lookup
+    /// upstream spells `argsort`/`searchsorted`
+    /// (`miliinternal.py:1331-1334`). `values` is `f64`; numpy casts
+    /// `write_data` to the svar dtype on the `var_data[...] =`
+    /// assignment, so the cast to the plan's [`NumType`] reproduces
+    /// that bit-for-bit for the corpus (f32/f64/i32 svars).
+    // Filter resolution + plan build + the typed-encode/scatter loop
+    // are one linear flow mirroring `run_query`; splitting would only
+    // scatter it (same rationale as `run_query`'s allow).
+    #[allow(clippy::too_many_lines)]
+    pub fn scatter_query(
+        &self,
+        args: &QueryArgs<'_>,
+        wd_labels: &[i32],
+        values: &[f64],
+    ) -> Result<()> {
+        if args.states.is_empty() {
+            return Err(MiliError::MalformedDirectory(
+                "scatter: states must be non-empty",
+            ));
+        }
+        for &s in args.states {
+            if s >= self.states.len() {
+                return Err(MiliError::StateOutOfRange(s, self.states.len()));
+            }
+        }
+
+        // Filter resolution mirrors `run_query` exactly (the scatter
+        // must hit the identical byte slabs the read gather would).
+        let material_labels: Option<Vec<i32>> = match args.materials {
+            Some(mats) => Some(self.labels_for_materials(args.class, mats)?),
+            None => None,
+        };
+        let resolved_labels: Option<Vec<i32>> = match (args.labels, material_labels.as_deref()) {
+            (None, None) => None,
+            (None, Some(m)) => Some(m.to_vec()),
+            (Some(l), None) => Some(l.to_vec()),
+            (Some(l), Some(m)) => Some(l.iter().copied().filter(|x| m.contains(x)).collect()),
+        };
+        let mo_id_labels: Option<Vec<i32>> = match &resolved_labels {
+            Some(l) => {
+                let ids = self.labels_to_mo_ids(args.class, l)?;
+                if ids.is_empty() {
+                    return Err(MiliError::LabelNotFound {
+                        label: l.first().copied().unwrap_or_default(),
+                        class: args.class.to_owned(),
+                    });
+                }
+                Some(ids)
+            }
+            None => None,
+        };
+        let filter = Filter {
+            labels: mo_id_labels.as_deref(),
+            ips: args.ips,
+            subrec: args.subrec,
+        };
+
+        let first = self.states[args.states[0]];
+        let first_srec_format = first.srec_format;
+        for &s in &args.states[1..] {
+            if self.states[s].srec_format != first_srec_format {
+                return Err(MiliError::Unsupported(
+                    "scatter across states with differing srec formats",
+                ));
+            }
+        }
+        let srec = self
+            .srecs
+            .get(first_srec_format)
+            .ok_or(MiliError::MalformedDirectory(
+                "state references unknown srec_format",
+            ))?;
+        let first_data_start = state_data_start(first)?;
+        let int_points = self.build_int_points();
+        let plan = plan_state_svar_ip(
+            srec,
+            &self.svars,
+            args.svar,
+            args.class,
+            first_data_start,
+            filter,
+            &int_points,
+        )?;
+
+        let result_labels = self.map_mo_ids_to_labels(args.class, plan.labels.clone())?;
+        let n_lab = result_labels.len();
+        let width = plan.num_type.width();
+        let total_per_state = plan.total_bytes();
+        if n_lab == 0 || total_per_state == 0 {
+            return Ok(());
+        }
+        let atoms_total = total_per_state / width;
+        if atoms_total % n_lab != 0 {
+            return Err(MiliError::MalformedDirectory(
+                "scatter: gather plan size not divisible by the label count",
+            ));
+        }
+        let atoms = atoms_total / n_lab;
+
+        // `wd_labels` order → row index, mirroring upstream's
+        // `argsort`/`searchsorted` realignment to the result order
+        // (`miliinternal.py:1331-1334`). Labels are unique per query.
+        let n_wd = wd_labels.len();
+        let mut row_of: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        for (i, &l) in wd_labels.iter().enumerate() {
+            row_of.entry(l).or_insert(i);
+        }
+        let rows: Vec<usize> = result_labels
+            .iter()
+            .map(|l| {
+                row_of.get(l).copied().ok_or(MiliError::MalformedDirectory(
+                    "scatter: a result label is absent from write_data['layout']['labels']",
+                ))
+            })
+            .collect::<Result<_>>()?;
+
+        let n_states = args.states.len();
+        let expected = n_states
+            .checked_mul(n_wd)
+            .and_then(|x| x.checked_mul(atoms))
+            .ok_or(MiliError::MalformedDirectory("scatter: size overflow"))?;
+        if values.len() != expected {
+            return Err(MiliError::MalformedDirectory(
+                "scatter: write_data['data'] length does not match \
+                 states * labels * atoms",
+            ));
+        }
+
+        let end = self.header.endianness;
+        let encode = |v: f64, out: &mut Vec<u8>| match plan.num_type {
+            NumType::Float4 => {
+                let b = v as f32;
+                match end {
+                    Endianness::Big => out.extend_from_slice(&b.to_be_bytes()),
+                    Endianness::Little => out.extend_from_slice(&b.to_le_bytes()),
+                }
+            }
+            NumType::Float8 => match end {
+                Endianness::Big => out.extend_from_slice(&v.to_be_bytes()),
+                Endianness::Little => out.extend_from_slice(&v.to_le_bytes()),
+            },
+            NumType::Int4 => {
+                let b = v as i32;
+                match end {
+                    Endianness::Big => out.extend_from_slice(&b.to_be_bytes()),
+                    Endianness::Little => out.extend_from_slice(&b.to_le_bytes()),
+                }
+            }
+            NumType::Int8 => {
+                let b = v as i64;
+                match end {
+                    Endianness::Big => out.extend_from_slice(&b.to_be_bytes()),
+                    Endianness::Little => out.extend_from_slice(&b.to_le_bytes()),
+                }
+            }
+        };
+
+        for (p, &sidx) in args.states.iter().enumerate() {
+            let state = self.states[sidx];
+            let data_start = state_data_start(state)?;
+            let rebased = plan.rebased(data_start)?;
+            let path = state_file_path(&self.a_path, self.header.suffix_width, state.file).ok_or(
+                MiliError::MalformedDirectory("cannot derive state-file path from .A path"),
+            )?;
+
+            // Per-state payload in `[label][atom]` slab order.
+            let mut buf: Vec<u8> = Vec::with_capacity(total_per_state);
+            for &row in &rows {
+                for j in 0..atoms {
+                    let idx = (p * n_wd + row) * atoms + j;
+                    encode(values[idx], &mut buf);
+                }
+            }
+
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            let mut cursor = 0usize;
+            for slab in &rebased.slabs {
+                use std::io::{Seek, SeekFrom, Write};
+                f.seek(SeekFrom::Start(slab.start as u64))?;
+                f.write_all(&buf[cursor..cursor + slab.len])?;
+                cursor += slab.len;
+            }
+        }
+
+        // The read path mmaps state files MAP_SHARED read-only; a
+        // pre-existing mapping reflects these `write(2)`s via the page
+        // cache, but drop the cache so a re-read is unambiguous.
+        self.state_mmaps
+            .lock()
+            .expect("state_mmaps mutex not poisoned")
+            .clear();
+
+        Ok(())
     }
 
     /// Component-name list + title for the queried svar, mirroring

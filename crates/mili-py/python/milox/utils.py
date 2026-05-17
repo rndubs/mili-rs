@@ -37,6 +37,44 @@ def argument_to_ndarray(
     return as_array
 
 
+def results_by_element(result_dict):  # noqa: ANN001,ANN201
+  """Verbatim port of upstream ``mili.utils.results_by_element``
+  (decision 18/19 — pure non-parity result reshaping over the
+  already-parity-correct ``QueryDict``)."""
+  if not isinstance(result_dict, dict):
+    result_dict = combine(result_dict)
+
+  reorganized_data = {}
+  for svar in result_dict:
+    if svar not in reorganized_data:
+      reorganized_data[svar] = {}
+
+    if isinstance( result_dict[svar], pd.DataFrame ):
+      raise ValueError("The results_by_element function does not support Pandas Dataframes.")
+
+    for elem_idx, element in enumerate(result_dict[svar]['layout']['labels']):
+      if element not in reorganized_data:
+        reorganized_data[svar][element] = result_dict[svar]['data'][:,elem_idx,:]
+
+  return reorganized_data
+
+
+def writeable_from_results_by_element(results_dict, results_by_element):  # noqa: ANN001,ANN201
+  """Verbatim port of upstream
+  ``mili.utils.writeable_from_results_by_element`` (decision 18/19)."""
+  if not isinstance(results_dict, dict):
+    results_dict = combine(results_dict)
+  for result in results_by_element:
+    if result in results_dict and results_dict[result]['data'].size > 0:
+      result_shape = results_dict[result]['data'][:,0].shape
+      for idx, element in enumerate(list(results_by_element[result].keys())):
+          write_data = np.array(results_by_element[result][element])
+          if write_data.shape != result_shape:
+            write_data = np.reshape(write_data, result_shape)
+          results_dict[result]['data'][:,idx] = write_data
+  return results_dict
+
+
 def query_data_to_dataframe(
     data: NDArray[np.floating],
     states: NDArray[np.int32],

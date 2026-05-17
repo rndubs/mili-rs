@@ -435,9 +435,11 @@ impl PyMiliDatabase {
     }
 
     /// Per-state map. Upstream `StateMap` carries `file_number`,
-    /// `file_offset`, `time`; we expose the comparable fields as a list
-    /// of dicts. (`state_map_id` has no direct `mili-rs` analogue and
-    /// is not part of the decision-4 rank-0 parity contract.)
+    /// `file_offset`, `time`, `state_map_id` (the srec-format id the
+    /// state was written into). `state_map_id` is exposed for the
+    /// Phase-3.2 `append_state` tests, which assert the appended map's
+    /// `state_map_id == 0` (`test_append_states.py`); it is the parsed
+    /// `srec_format` word (`state.rs`).
     fn state_maps<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         let smaps = match &self.backend {
             Backend::Single(db) => db.states(),
@@ -449,6 +451,7 @@ impl PyMiliDatabase {
             d.set_item("file_number", sm.file)?;
             d.set_item("file_offset", sm.offset)?;
             d.set_item("time", f64::from(sm.time))?;
+            d.set_item("state_map_id", sm.srec_format)?;
             out.push(d);
         }
         Ok(out)
@@ -972,11 +975,16 @@ impl PyMiliDatabase {
             }
         }
 
-        if write_data.is_some_and(|w| !w.is_none()) {
-            return Err(MiliPythonError::new_err(
-                "write_data (the database write path) is deferred to Phase 3",
-            ));
-        }
+        // Phase 3.2 (decision 23): the `query(write_data=)` write-half.
+        // `write_data` is a `{svar: QueryDict}` whose `data` /
+        // `layout.labels` per svar drive an in-place state-file scatter
+        // (the inverse of the read byte-gather) before the read-back —
+        // upstream `_MiliInternal.__query` reads `'rb+'`, assigns
+        // `var_data[ordinals] = write_data`, writes the buffer back and
+        // returns the modified values (`miliinternal.py:1322-1416`). We
+        // scatter then fall through to the normal gather, which reads
+        // exactly the bytes just written (bit-identical return value).
+        let write_data = write_data.filter(|w| !w.is_none());
 
         // Hidden **kwargs: validate exactly per
         // `miliinternal.py:1159` and surface the typed hierarchy.
@@ -1661,6 +1669,28 @@ impl PyMiliDatabase {
                     ips: ips_ref,
                     subrec: subrec_ref,
                 };
+                // write_data scatter (decision 23): only for primal
+                // svars (upstream builds `filtered_write_data` solely in
+                // the primal loop), and only the Single backend — the
+                // parallel wrappers fan out per-proc `open_single`
+                // engines (decision 21), so a write always reaches a
+                // Single core.
+                if let Some(wd) = write_data {
+                    if let Some((wd_labels, wd_values)) = extract_write_data(py, wd, svar)? {
+                        match &self.backend {
+                            Backend::Single(db) => py
+                                .allow_threads(|| db.scatter_query(&args, &wd_labels, &wd_values))
+                                .map_err(|e| to_pyerr(&e))?,
+                            Backend::Set(_) => {
+                                return Err(MiliPythonError::new_err(
+                                    "query(write_data=) on a merged Set backend \
+                                     is unsupported; the parallel wrappers write \
+                                     per-fragment via open_single (decision 21)",
+                                ));
+                            }
+                        }
+                    }
+                }
                 let primal = py
                     .allow_threads(|| match &self.backend {
                         Backend::Single(db) => db.query_full(&args),
@@ -2189,24 +2219,33 @@ impl PyMiliDatabase {
     /// Phase 3.1 write path. Upstream `_MiliInternal.append_state`
     /// (`miliinternal.py:1433`): append one new state; returns the new
     /// state count.
+    ///
+    /// Phase 3.2: `&mut self` so the appended state is reflected
+    /// in-memory — upstream `_MiliInternal.append_state` mutates its
+    /// `__smaps` so a subsequent `query` / `state_maps` on the **same**
+    /// object sees the new state; the Rust core re-derives it by
+    /// reloading the just-rewritten `.A` (already byte-for-byte vs the
+    /// upstream `AFileWriter`, Phase 3.1).
     #[pyo3(signature = (new_state_time, zero_out=true, limit_states_per_file=None, limit_bytes_per_file=None))]
     fn append_state(
-        &self,
+        &mut self,
         py: Python<'_>,
         new_state_time: f64,
         zero_out: bool,
         limit_states_per_file: Option<i64>,
         limit_bytes_per_file: Option<i64>,
     ) -> PyResult<usize> {
-        match &self.backend {
+        match &mut self.backend {
             Backend::Single(db) => py
                 .allow_threads(|| {
-                    db.append_state(
+                    let n = db.append_state(
                         new_state_time,
                         zero_out,
                         limit_states_per_file,
                         limit_bytes_per_file,
-                    )
+                    )?;
+                    db.reload()?;
+                    mili_rs::Result::Ok(n)
                 })
                 .map_err(|e| to_pyerr(&e)),
             Backend::Set(_) => Err(MiliPythonError::new_err(
@@ -2438,6 +2477,42 @@ where
     Err(MiliPythonError::new_err(
         "expected an integer or a list of integers",
     ))
+}
+
+/// Pull `write_data[svar]` into `(layout.labels, data)` for the
+/// Phase-3.2 scatter. Returns `None` when the dict has no entry for
+/// this svar (upstream's `queried_name in write_data` guard,
+/// `miliinternal.py:1324`). `data` is flattened C-order to
+/// `[state][label][atom]` `f64`; `labels` to `i32` — the svar-dtype
+/// cast happens in the core (numpy's `var_data[...] =` cast).
+fn extract_write_data<'py>(
+    py: Python<'py>,
+    write_data: &Bound<'py, PyAny>,
+    svar: &str,
+) -> PyResult<Option<(Vec<i32>, Vec<f64>)>> {
+    let entry = match write_data.get_item(svar) {
+        Ok(e) => e,
+        Err(_) => return Ok(None),
+    };
+    if entry.is_none() {
+        return Ok(None);
+    }
+    let np = py.import_bound("numpy")?;
+    let data = entry.get_item("data")?;
+    let values: Vec<f64> = np
+        .call_method1("asarray", (data,))?
+        .call_method1("astype", ("float64",))?
+        .call_method0("flatten")?
+        .call_method0("tolist")?
+        .extract()?;
+    let labels_obj = entry.get_item("layout")?.get_item("labels")?;
+    let labels: Vec<i32> = np
+        .call_method1("asarray", (labels_obj,))?
+        .call_method1("astype", ("int32",))?
+        .call_method0("flatten")?
+        .call_method0("tolist")?
+        .extract()?;
+    Ok(Some((labels, values)))
 }
 
 /// A `material=` argument → [`MaterialArg`]. An int (or numpy
