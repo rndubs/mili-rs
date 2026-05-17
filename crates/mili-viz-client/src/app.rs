@@ -11,6 +11,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
 use crate::camera::Camera;
+use crate::mesh::Mesh;
 use crate::renderer::Renderer;
 
 struct WindowState {
@@ -23,6 +24,7 @@ struct WindowState {
 #[derive(Default)]
 struct App {
     camera: Camera,
+    mesh: Option<Mesh>,
     state: Option<WindowState>,
 }
 
@@ -69,7 +71,12 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        let renderer = Renderer::new(device, queue, format);
+        let mut renderer = Renderer::new(device, queue, format);
+        if let Some(mesh) = &self.mesh {
+            renderer.upload_mesh(mesh);
+            let (center, radius) = mesh.bounds();
+            self.camera = Camera::looking_at(center, radius);
+        }
         self.state = Some(WindowState {
             window,
             surface,
@@ -116,10 +123,17 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Open a window and render the skeleton scene until the window is
-/// closed. The Phase 5 M1 entrypoint.
-pub fn run() -> Result<(), winit::error::EventLoopError> {
+/// Open a window and render `mesh` (auto-framed) until the window is
+/// closed. `None` renders the empty (clear) scene — interactive
+/// `load` is Phase 5 M3. The Phase 5 entrypoint.
+///
+/// # Errors
+/// Returns the `winit` event-loop error if the loop fails to start.
+pub fn run(mesh: Option<Mesh>) -> Result<(), winit::error::EventLoopError> {
     let event_loop = EventLoop::new()?;
-    let mut app = App::default();
+    let mut app = App {
+        mesh,
+        ..App::default()
+    };
     event_loop.run_app(&mut app)
 }
