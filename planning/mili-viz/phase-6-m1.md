@@ -15,8 +15,10 @@
 > and [`phase-4-m1.md`](phase-4-m1.md) (the frozen contract this
 > consumes). The decision log is global and monotonic across
 > `mili-viz` (M1: 1–9; M2: 10–12; M3: 13–15; M4: 16–18; M5: 19–21;
-> M5b: 22–24; M6: 25–27; M5c: 28–31; M5d: 32–34). **Phase 6 starts
-> at 35.**
+> M5b: 22–24; M6: 25–27; M5c: 28–31; M5d: 32–34;
+> Phase 5 M3/M3.5: 44–52). **Phase 6 M1 scope = 35–37; the M1
+> implementation decisions continue the global log at 53–55**
+> (Phase 5 M3.5 ended at 52).
 
 ## Goal
 
@@ -120,28 +122,83 @@ migration aid) is **M3**. This keeps M1 a thin transport+handshake
 slice and preserves the single-parser invariant: griz-line parsing
 lives in the server, once.
 
+## Decision 53 — the stub generator: `grpc_tools.protoc` + a package-relative import rewrite, gitignore citation corrected
+
+Implementation detail of Decision 36. `scripts/gen-pygriz-stubs.sh`
+(the Python analogue of the Rust `protox` `build.rs`) is the single
+repeatable generator: it `rm -rf`s `python/pygriz/src/griz/_proto`,
+runs `python -m grpc_tools.protoc` (`--python_out`/`--grpc_python_out`/
+`--pyi_out`) on the **one** canonical
+`crates/mili-viz-proto/proto/mili_viz.proto`, and drops a generated
+`_proto/__init__.py`. `grpc_tools` emits a bare top-level
+`import mili_viz_pb2` in the `_grpc` module; the script rewrites that
+one line to `from griz._proto import mili_viz_pb2` so `griz._proto` is
+self-contained on `sys.path` without leaking a top-level module name.
+The root `.gitignore` Python block cited a stale "Decision 33"
+(that number is `phase-4-m5d.md`); corrected in passing to
+"Decisions 36 & 53". `griz._proto` stays gitignored build output;
+`griz._stubs()` raises an actionable error pointing at the script if
+it was never run, and the M1 gate's autouse fixture regenerates it
+(skip-on-absent when `grpcio-tools` is not installed).
+
+## Decision 54 — `run_script` sends the whole file as one verbatim `Command{raw}`; no Python line-splitting
+
+`scripting.md` says `session.run_script(path)` "streams the lines to
+the server's existing command dispatcher." Decision 37's single-parser
+invariant makes the literal reading (split lines in Python, send each)
+wrong — that *is* a second Python-side parser. The server's `parse_raw`
+(`crates/mili-viz-server/src/raw.rs`) already splits on `;`/newline and
+skips blank lines and `#`/`//` comments. Resolution: `run_script`
+reads the file and sends its **entire contents byte-verbatim** as a
+single `Command{raw}`; the grizinit splitting/comment-skipping is the
+server's, once. This is the M1 form of Layer-0 ≡ raw (Decision 37) and
+is pinned always-on by `test_run_script_is_one_verbatim_raw` (a fake
+stub asserts exactly one `Command`, `WhichOneof == "raw"`, `raw` ==
+the file byte-for-byte) — no server needed.
+
+## Decision 55 — the gate's connect leg spawns the real `mili-viz-server` TCP binary; the `load` assertion is corpus-independent
+
+The acceptance gate needs a live server on an ephemeral TCP port. The
+M6 `serve_tcp` is exposed by `mili-viz-server`'s `main` (`argv[1]`
+bind, `127.0.0.1:0` → an OS-assigned port printed as
+`tcp://127.0.0.1:<port>`). Resolution: the gate's connect/handshake/
+Layer-0 leg uses a prebuilt `target/{release,debug}/mili-viz-server`
+(or `cargo build -p mili-viz-server`), spawns it on `127.0.0.1:0`, and
+parses the bound port from stdout — **skip-on-absent** (never failed)
+when `cargo`/the binary is unavailable, exactly the CLAUDE.md corpus
+skip. The `load <fixture>` assertion relies only on the server's
+graceful never-error `load` (a non-openable root falls back to the
+stub `LoadedState`, still `ok == true` — `phase-4-m2.md` Decision 12),
+so it is corpus-independent; the real `serial/basic1/basic1.pltA`
+fixture is used when present so the realistic path is exercised too.
+No proto/server change — this only consumes the frozen M6 transport.
+
 ## M1 acceptance gate
 
 A single gating test (`python/pygriz/tests/test_m1_connect.py`,
 run by the `test-pygriz` job) against a `mili-viz-server` on an
 ephemeral TCP port (`serve_tcp(":0")`, the M6 transport):
 
-- [ ] `pip install -e python/pygriz[dev]` succeeds; `import griz`
+- [x] `pip install -e python/pygriz[dev]` succeeds; `import griz`
       works on CPython ≥ 3.11; stubs generate from the canonical
-      proto with zero edits.
-- [ ] `griz.connect(host, port, token=...)` completes the `Hello`
+      proto with zero edits (`scripts/gen-pygriz-stubs.sh`,
+      Decision 53; `test_import_and_proto_pinned`).
+- [x] `griz.connect(host, port, token=...)` completes the `Hello`
       handshake; a matching `protocol_version` → `compatible == True`;
       a deliberately bumped client version → `compatible == False`
       with a non-empty `mismatch_detail` and a Python **warning, not
-      an exception** (Decision 36 / Visit guarantee).
-- [ ] `session.command("load <fixture>; state 2; show sx")` returns
+      an exception** (Decision 36 / Visit guarantee;
+      `test_connect_handshake_and_layer0` +
+      `test_handshake_mismatch_warns_not_raises`).
+- [x] `session.command("load <fixture>; state 2; show sx")` returns
       `ok`, and `session.run_script(path)` streams a `grizinit`-style
       batch (comments/blank lines skipped) to the same dispatcher —
       both via `Command.raw`, no Python-side griz parser
-      (Decision 37).
-- [ ] The Phase 4 server acceptance suite + M2–M6 gating tests are
+      (Decisions 37 & 54).
+- [x] The Phase 4 server acceptance suite + M2–M6 gating tests are
       **unchanged and green** (Phase 6 adds a client; it does not
-      touch the frozen proto or the server).
+      touch the frozen proto or the server —
+      `cargo test --workspace --exclude mili-py` green).
 
 ## Out of scope for M1 (later Phase 6 milestones)
 

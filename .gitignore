@@ -16,7 +16,7 @@ target
 # Python packages under python/ (pure-Python, not Cargo crates).
 # Generated gRPC stubs are build output regenerated from the canonical
 # crates/mili-viz-proto/proto/mili_viz.proto — never committed
-# (planning/mili-viz/phase-6-m1.md Decision 33).
+# (planning/mili-viz/phase-6-m1.md Decisions 36 & 53).
 __pycache__/
 *.py[cod]
 *.egg-info/
