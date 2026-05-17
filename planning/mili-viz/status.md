@@ -9,11 +9,21 @@
 ## TL;DR — where we are
 
 - **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families; + M5d ✅: the `*_alt` trig principal-strain variants — core kernel + viz routing), M6 ✅ (remote transport) landed.** The derived family is now **fully complete**: the last deferral (`*_alt`, `phase-4-m5c.md` Decision 28) is discharged — the parity-gated `mili_rs::compute_principal_strain_alt` core kernel + its trivial viz seam landed (`phase-4-m5d.md`; `../mili-py/m4.md` Decision 27).
-- **Phase 5 (`mili-viz` client): 🟢 IN PROGRESS — M1 ✅ landed**
-  (`wgpu` renderer skeleton: `crates/mili-viz-client`, orbit camera +
-  hard-coded triangle, render-to-texture-first; gating test
-  `tests/m1_renderer.rs` — always-on camera math + skip-on-absent
-  headless GPU render). M2–M6 ⏳ not started.
+- **Phase 5 (`mili-viz` client): 🟢 IN PROGRESS — M1 ✅, M2 ✅
+  landed.** M1 = `wgpu` renderer skeleton (`crates/mili-viz-client`,
+  orbit camera + hard-coded triangle, render-to-texture-first). M2 =
+  render server output: the client now depends on `mili-viz-proto` +
+  `mili-viz-server`, drives `load`/`show` over the in-process
+  transport (`spawn_in_process`), resolves the frozen `GeometryRef`
+  via `VizService::fetch_geometry`, decodes the `MVG1`/`MVG2` blob to
+  a `Mesh` (CPU per-vertex normals; `MVG2` scalar ignored — color is
+  M3), and draws it through a depth-tested indexed pipeline
+  (triangle deleted) viewed by the auto-framed orbit `Camera`.
+  No proto change. Scope + Decisions 41–43:
+  [`phase-5-m2.md`](phase-5-m2.md). Gating test
+  `tests/m2_render_server_output.rs` (always-on `MVG1` decode +
+  skip-on-absent end-to-end render); M1's `m1_renderer.rs` unchanged
+  and green. M3–M6 ⏳ not started.
 - **Phase 6 (`pygriz` scripting client): ⏳ NOT STARTED** — scaffold
   landed (`python/pygriz/`, the new top-level `python/` tree); a third
   pure-Python client of the frozen contract, gated only on Phase 4 M1,
@@ -174,6 +184,7 @@
 | [`phase-4-m5d.md`](phase-4-m5d.md) | **The buildable Phase 4 M5d scope (the `*_alt` griz closed-form trig principal-strain variants) — discharges `phase-4-m5c.md` Decision 28.** Two-part: Part A is a `mili-rs` **core** derived sub-slice (`compute_principal_strain_alt` + `PrincipalStrainAlt`/`*_alt_spec`/`_primals`, wired through `crates/mili-py`, gated vs the `mili` oracle to a tight **f32 tolerance** — not bitwise — because numpy's float32 `arccos`/`cos` are numpy's own SIMD polynomials, ≠ libm, not cross-language bit-reproducible; recorded in `../mili-py/m4.md` Decision 27); Part B is the trivial viz routing (Decisions 32–34: own `PrincipalStrainAlt` enum mirroring upstream's separate `compute_function`s, the verbatim M5b element-scatter branch with only `*_spec`/`*_primals`/`compute_*` swapped; gating test = single-shared-gather invariants only — structural + the per-vertex principal-ordering `1≥2≥3` identity + state-tracking + totality/Decision-28 closure; M5c's `*_alt`→bare-hull assertion intentionally removed, superseded). No proto change, no `parity` feature in `mili-viz-server`; M5/M5b/M5c/M3/M6 byte-stable | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m6.md`](phase-4-m6.md) | **The buildable Phase 4 M6 scope (remote transport).** gRPC + Arrow Flight over TCP behind the frozen contract; Decisions 25–27 (real Flight + gRPC TCP transport redeems `phase-4-m2.md` Decision 10 — its tonic-version premise is now factually false but the deferral was still correct; ticket/blob/layout byte-stable; in-process seam kept. Flight via the canonical vendored `Flight.proto` on the existing protoc-free `protox` path — zero change to the frozen `mili_viz.proto`; only `DoGet` implemented, other Flight RPCs `UNIMPLEMENTED`; verbatim opaque blob in `FlightData.data_body`; heavy `arrow-flight` crate rejected for dependency surface. `serve_tcp(addr)` pre-binds a `TcpListener`, co-serves both services on one port; gating test binds a real ephemeral `127.0.0.1:0`). No `mili_viz.proto`/blob/ticket change | ✅ pinned + landed (2026-05-17) |
 | [`phase-5-m1.md`](phase-5-m1.md) | **The buildable Phase 5 M1 scope (`wgpu` renderer skeleton).** First client-side milestone: a standalone `crates/mili-viz-client` (`wgpu`/`winit`/`glam`, **no** mili/proto/server dep — README "No mili involvement"). Decisions 38–40 (standalone crate, transport attaches at M2; render-to-texture-first so the gating test is a real headless GPU render with skip-on-absent, always-on camera-math half; orbit `Camera` is the reusable tested core with field shape aligned 1:1 to the frozen proto `CameraState`, triangle is throwaway scaffolding). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-5-m2.md`](phase-5-m2.md) | **The buildable Phase 5 M2 scope (render server output).** First client milestone to wire the transport: `mili-viz-client` depends on `mili-viz-proto` + `mili-viz-server`, drives `Subscribe`/`load`/`show` over `spawn_in_process`, resolves the frozen `GeometryRef` via the in-process `VizService::fetch_geometry` seam (Flight/remote is M5), decodes the `MVG1`/`MVG2` blob to a `Mesh`. Decisions 41–43 (in-process transport + frozen `fetch_geometry` seam; `MVG1`/`MVG2`→`Mesh` with CPU normals, triangle deleted, depth-tested indexed pipeline, `MVG2` scalar ignored until M3, auto-framing camera; gating test = always-on decode unit + skip-on-absent end-to-end render, M1 camera gate + triangle smoke kept). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m1.md`](phase-6-m1.md) | **The buildable Phase 6 M1 scope (`pygriz` scaffold + stubs + connect/handshake).** The scripting client gets an implementation home: a third pure-Python client of the frozen contract, gated only on Phase 4 M1 (independent of the Phase 5 renderer). Decisions 35–37 (top-level `python/` tree, dist `pygriz` / import `griz`, pure-Python no-pyo3; stubs are gitignored build output from the one canonical proto; M1 is Layer-0-only — reuse the server's `parse_raw`, Layer-1 + the Layer-0≡Layer-1 test is M3). No proto change | ✅ pinned (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` is authoritative) |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake. **Implementation home: Phase 6** ([`phase-6-m1.md`](phase-6-m1.md)) | ✅ resolved |
@@ -374,7 +385,25 @@ expanded by `scripting.md` / `client.md`. None started.
       Decision 39). Builds + runs under the existing
       `cargo test --workspace --exclude mili-py` and
       `clippy --workspace --all-targets`; no new CI job.
-- [ ] **M2 — render server output** (draw the M2 server mesh).
+- [x] **M2 — render server output.** ✅ **Landed.**
+      `crates/mili-viz-client` now depends on `mili-viz-proto` +
+      `mili-viz-server`; `fetch_server_mesh` spawns an in-process
+      server (`spawn_in_process`), `Subscribe`s, drives
+      `load`/`show`, reads the broadcast `DELTA_RESULT`'s
+      `GeometryRef`, resolves the `flight_ticket` through the frozen
+      in-process `VizService::fetch_geometry` seam, and decodes the
+      `MVG1`/`MVG2` blob (`phase-4-m2.md` Decision 11) into a `Mesh`
+      with CPU per-vertex normals (the `MVG2` scalar is decoded past
+      and ignored — color is M3). The M1 hard-coded triangle is
+      deleted; the `Renderer` is generalized to a depth-tested
+      indexed-mesh pipeline drawn through the auto-framed orbit
+      `Camera` (`Camera::looking_at`). Flight/remote transport stays
+      M5. No proto change; no Phase 4 crate touched. Scope/decisions:
+      [`phase-5-m2.md`](phase-5-m2.md) (41–43). Gating test:
+      `crates/mili-viz-client/tests/m2_render_server_output.rs`
+      (always-on `MVG1` decode + skip-on-absent end-to-end render);
+      M1's `m1_renderer.rs` (camera math + triangle smoke) and every
+      Phase 4 server gating test unchanged and green.
 - [ ] **M3 — `egui` controls** (state scrubber, result picker, view
       controls, command line).
 - [ ] **M3.5 — AI Assistant panel** (`client.md`).
@@ -530,12 +559,24 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     `mili-viz-client/tests/m1_renderer.rs` (four always-on
     `camera_*` + skip-on-absent `headless_render_*`); no Phase 4
     crate touched, server's frozen tests unaffected.
-15. ⏭️ **NEXT:** two independent tracks, both gated only on the
+15. ✅ **DONE (coding Phase 5 M2 — render server output):**
+    `crates/mili-viz-client` wired to the in-process transport —
+    `fetch_server_mesh` spawns a `mili-viz-server`, `Subscribe`s,
+    drives `load`/`show`, resolves the frozen `GeometryRef` via
+    `VizService::fetch_geometry`, decodes the `MVG1`/`MVG2` blob to a
+    `Mesh` (CPU normals; `MVG2` scalar ignored — M3), and draws it
+    through a depth-tested indexed pipeline (triangle deleted) and the
+    auto-framed orbit `Camera`. Remote/Flight stays M5; no proto
+    change; no Phase 4 crate touched. Scope/decisions in
+    [`phase-5-m2.md`](phase-5-m2.md) (41–43). Gating test
+    `m2_render_server_output.rs` (always-on decode + skip-on-absent
+    end-to-end render).
+16. ⏭️ **NEXT:** two independent tracks, both gated only on the
     long-landed Phase 4 M1 — pick either:
-    - **Phase 5 M2** (`mili-viz` client — render server output: a
-      `mili-viz-proto` client over the in-process transport, draw
-      the M2 `GeometryRef` `MVG1` hull. First milestone that wires
-      the transport into the client).
+    - **Phase 5 M3** (`mili-viz` client — `egui` controls: state
+      scrubber, result picker, view controls, command-line entry;
+      also where the `MVG2` per-vertex scalar becomes a colormap).
+      Builds directly on the M2 in-process client + `Renderer`.
     - **Phase 6** (`pygriz` scripting client). Scaffold landed
       (`python/pygriz/`); the M1 coding work is stub generation +
       `connect`/`Hello` handshake + the Layer-0 `command()`/

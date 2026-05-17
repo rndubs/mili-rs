@@ -1,24 +1,31 @@
-//! Minimal `wgpu` renderer: one hard-coded triangle viewed through
-//! the orbit [`Camera`]. Structured render-to-texture-first
-//! (`phase-5-m1.md` Decision 39) — the windowed path in `app.rs` is
-//! a thin wrapper that points the same [`Renderer`] at a surface
-//! texture, and the gating test points it at an off-screen texture.
+//! Minimal `wgpu` renderer: an indexed triangle mesh viewed through
+//! the orbit [`Camera`], with a depth buffer and a single fixed
+//! directional light (`phase-5-m2.md` Decision 42). Structured
+//! render-to-texture-first (`phase-5-m1.md` Decision 39) — the
+//! windowed path in `app.rs` is a thin wrapper that points the same
+//! [`Renderer`] at a surface texture, and the gating test points it
+//! at an off-screen texture.
 //!
-//! The triangle is throwaway scaffolding (deleted at M2 when real
-//! server geometry arrives); the [`Camera`] plumbing is not.
+//! M2 replaces M1's hard-coded triangle (it was scaffolding,
+//! `phase-5-m1.md` Decision 40) with the decoded server [`Mesh`].
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
+use crate::mesh::Mesh;
 
 /// Off-screen render target format. Non-sRGB so pixel-readback in the
 /// gating test is exact (no gamma surprises).
 pub const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Depth target format (depth-test `Less` so an overlapping closed
+/// hull renders correctly without relying on consistent winding).
+pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
 /// Background clear color (linear RGBA). A corner pixel of a rendered
-/// frame is this; a center pixel is the triangle.
+/// frame is this; a framed-mesh center pixel is not.
 pub const CLEAR_COLOR: wgpu::Color = wgpu::Color {
     r: 0.02,
     g: 0.02,
@@ -30,23 +37,8 @@ pub const CLEAR_COLOR: wgpu::Color = wgpu::Color {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
+    normal: [f32; 3],
 }
-
-const TRIANGLE: [Vertex; 3] = [
-    Vertex {
-        position: [0.0, 0.6, 0.0],
-        color: [1.0, 0.2, 0.2],
-    },
-    Vertex {
-        position: [-0.6, -0.5, 0.0],
-        color: [0.2, 1.0, 0.2],
-    },
-    Vertex {
-        position: [0.6, -0.5, 0.0],
-        color: [0.2, 0.4, 1.0],
-    },
-];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -54,21 +46,28 @@ struct Uniforms {
     view_proj: [[f32; 4]; 4],
 }
 
-/// A device + pipeline that can draw the triangle into any
-/// `TextureView` of `target_format`.
+struct MeshBuffers {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+/// A device + pipeline that can draw an uploaded indexed [`Mesh`] into
+/// any `TextureView` of `target_format`.
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    mesh: Option<MeshBuffers>,
 }
 
 impl Renderer {
     /// Build a renderer for an existing device/queue targeting
     /// `target_format` (the window surface format, or
-    /// [`OFFSCREEN_FORMAT`] for headless).
+    /// [`OFFSCREEN_FORMAT`] for headless). No mesh until
+    /// [`upload_mesh`](Self::upload_mesh).
     #[must_use]
     pub fn new(
         device: wgpu::Device,
@@ -76,14 +75,8 @@ impl Renderer {
         target_format: wgpu::TextureFormat,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mili-viz triangle shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("triangle.wgsl").into()),
-        });
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("triangle vertices"),
-            contents: bytemuck::cast_slice(&TRIANGLE),
-            usage: wgpu::BufferUsages::VERTEX,
+            label: Some("mili-viz mesh shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -117,13 +110,13 @@ impl Renderer {
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("triangle pipeline layout"),
+            label: Some("mesh pipeline layout"),
             bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("triangle pipeline"),
+            label: Some("mesh pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -150,7 +143,13 @@ impl Renderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -160,9 +159,9 @@ impl Renderer {
             device,
             queue,
             pipeline,
-            vertex_buffer,
             uniform_buffer,
             bind_group,
+            mesh: None,
         }
     }
 
@@ -173,7 +172,37 @@ impl Renderer {
         &self.device
     }
 
-    /// Record + submit one frame drawing the triangle into `view`.
+    /// Upload (or replace) the mesh this renderer draws.
+    pub fn upload_mesh(&mut self, mesh: &Mesh) {
+        let verts: Vec<Vertex> = mesh
+            .positions
+            .iter()
+            .zip(&mesh.normals)
+            .map(|(&position, &normal)| Vertex { position, normal })
+            .collect();
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh vertices"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh indices"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.mesh = Some(MeshBuffers {
+            vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices.len() as u32,
+        });
+    }
+
+    /// Record + submit one frame: clear, then draw the uploaded mesh
+    /// (if any) into `view`.
     pub fn render(&self, view: &wgpu::TextureView, width: u32, height: u32, camera: &Camera) {
         let vp: Mat4 = camera.view_projection(width, height);
         let uniforms = Uniforms {
@@ -182,6 +211,22 @@ impl Renderer {
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -189,7 +234,7 @@ impl Renderer {
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("triangle pass"),
+                label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
@@ -199,15 +244,25 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            pass.draw(0..TRIANGLE.len() as u32, 0..1);
+            if let Some(m) = &self.mesh {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..m.index_count, 0, 0..1);
+            }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
     }
@@ -244,14 +299,28 @@ pub fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
     })
 }
 
-/// Render the triangle off-screen at `width`x`height` and return the
-/// frame as tightly-packed RGBA8 (`width*height*4` bytes, row-major,
+/// Render the built-in unit triangle off-screen — the M1 pipeline
+/// smoke (`phase-5-m2.md` Decision 43). `None` when no adapter is
+/// available (skip-on-absent).
+#[must_use]
+pub fn render_to_image(width: u32, height: u32, camera: &Camera) -> Option<Vec<u8>> {
+    render_mesh_to_image(width, height, camera, &Mesh::unit_triangle())
+}
+
+/// Render `mesh` off-screen at `width`x`height` and return the frame
+/// as tightly-packed RGBA8 (`width*height*4` bytes, row-major,
 /// top-left origin). `None` when no adapter is available
 /// (skip-on-absent).
 #[must_use]
-pub fn render_to_image(width: u32, height: u32, camera: &Camera) -> Option<Vec<u8>> {
+pub fn render_mesh_to_image(
+    width: u32,
+    height: u32,
+    camera: &Camera,
+    mesh: &Mesh,
+) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
-    let renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
+    let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
+    renderer.upload_mesh(mesh);
     Some(renderer.read_back(width, height, camera))
 }
 

@@ -78,4 +78,23 @@ impl Camera {
     pub fn view_projection(&self, width: u32, height: u32) -> Mat4 {
         self.projection(width, height) * self.view()
     }
+
+    /// A default-orientation orbit camera framed on a bounding sphere
+    /// `(center, radius)` — the M2 auto-frame so a real corpus is in
+    /// view regardless of its coordinate scale (`phase-5-m2.md`
+    /// Decision 42). Distance puts the sphere comfortably inside the
+    /// vertical FOV; the clip planes bracket it.
+    #[must_use]
+    pub fn looking_at(center: Vec3, radius: f32) -> Self {
+        let base = Self::default();
+        let r = radius.max(1e-3);
+        let distance = r / (base.fov_y * 0.5).sin() * 1.3;
+        Self {
+            focus: center,
+            distance,
+            z_near: (distance - r).max(r * 1e-3),
+            z_far: distance + r * 4.0,
+            ..base
+        }
+    }
 }
