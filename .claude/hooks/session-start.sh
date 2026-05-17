@@ -11,9 +11,9 @@ cd "$CLAUDE_PROJECT_DIR"
 # Provision the parity environment via the same script CI uses so web
 # sessions run the reference-mili-python-dependent tests rather than
 # silently skipping them (which made `cargo test` look green locally
-# while CI caught the regression). This inits the reference/mili-python
-# AND reference/mili submodules and pip-installs the Python oracle.
-# griz is referenced only by path, so we don't need its content.
+# while CI caught the regression). This inits the reference/mili-python,
+# reference/mili AND reference/griz submodules (explicitly by path, not
+# recursively) and pip-installs the Python oracle.
 scripts/setup-parity.sh
 
 # Warm the pinned toolchain + dependency cache so the first `cargo
