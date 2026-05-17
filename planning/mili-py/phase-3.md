@@ -1,13 +1,15 @@
 # Phase 3 — the milox/mili-rs write path
 
-> **Status: 3.1 + 3.2 LANDED — 3.3 scoped.** Self-contained
+> **Status: 3.1 + 3.2 + 3.3 LANDED — Phase 3 complete.** Self-contained
 > entry-point doc for the write slice (mirrors
-> [`phase-i.md`](phase-i.md)). The summary + **decision 22** live in
-> [`m4.md`](m4.md) § "Phase 3"; this file carries the reproducible
+> [`phase-i.md`](phase-i.md)). The summary + **decisions 22/23/24** live
+> in [`m4.md`](m4.md) § "Phase 3"; this file carries the reproducible
 > starting state so a fresh session can pick it up cold. Read
-> [`m4.md`](m4.md) (decisions 18/19/20/21 + 22) and
+> [`m4.md`](m4.md) (decisions 18/19/20/21 + 22/23/24) and
 > [`../mili-rs/status.md`](../mili-rs/status.md) (the `milox` parity +
-> redirect tracker row + § "Surprises") first.
+> redirect tracker row + § "Surprises") first. The write path is the
+> last unported redirect surface — with 3.3 landed there is no
+> remaining milox redirect work.
 
 ## Why this phase exists
 
@@ -147,13 +149,27 @@ upstream `miliinternal.py:1518-1538`). `milox.utils` gained verbatim
 milox 837 → 877 pass / 63 → 23 xfail (the 23 = `test_append_states_tool`,
 Phase 3.3).
 
-### Phase 3.3 — `mili.append_states.AppendStatesTool`
+### Phase 3.3 — `mili.append_states.AppendStatesTool`  ✅ LANDED
 
-`test_append_states_tool.py` + upstream `src/mili/append_states.py`:
-the input-dictionary-driven multi-state batch tool over 3.1's
-`append_state`. Validation surface (`VALID_OUTPUT_TYPES` /
-`VALID_OUTPUT_MODES`, `states`/`state_times`/`time_inc`,
-`limit_*`). Not implemented this session.
+Verbatim Python port (decision 24 in [`m4.md`](m4.md)) of upstream
+`src/mili/append_states.py` (366 lines) into `milox.append_states`,
+only the `mili.*` imports repointed at `milox`. It is pure input-spec
+validation (`VALID_OUTPUT_TYPES` / `VALID_OUTPUT_MODES`,
+`states`/`state_times`/`time_inc`, `limit_*`, per-svar shape/jagged/
+int-point checks) + orchestration over the Phase-3.1/3.2 bit-exact
+`copy_non_state_data` / `append_state` / `query(write_data=)`
+primitives — no new byte-layout kernel, so decision 18/19 applies (the
+inverse of 22/23). Surfaced + fixed three latent milox read-path gaps
+(nested `svar.svars[]` population so VECTOR/VEC_ARRAY `atom_qty` is
+non-zero; element-set-name `ips=` interpreted as IP *labels*; a
+state-less no-tfile `copy_non_state_data` output reopens as a valid
+0-state db). Behaviourally gated by the redirected
+`test_append_states_tool.py` (all **23** cases — 19 invalid-input +
+serial/parallel `append`/`write` — promoted); byte-gated by the new
+`crates/mili-rs/tests/parity_write_append_states_tool.rs` (upstream
+`mili` tool vs `milox` tool, `.A` + state files diffed on
+serial/sstate, `append` + `write` modes). milox 877 → 900 pass /
+23 → 0 xfail.
 
 ## Reproducible environment / commands
 
@@ -178,7 +194,7 @@ Single redirected module:
 | Srec model (raw-copied payload) | `crates/mili-rs/src/srec.rs` |
 | Header (verbatim-copied 16 B) | `crates/mili-rs/src/header.rs` |
 | **The writer** | `crates/mili-rs/src/write.rs` |
-| **Parity gate** | `crates/mili-rs/tests/parity_write_append.rs` |
+| **Parity gates** | `crates/mili-rs/tests/parity_write_append.rs` (3.1), `…parity_write_query.rs` (3.2), `…parity_write_append_states_tool.rs` (3.3) |
 | FFI write methods | `crates/mili-py/src/database.rs` |
 | milox wiring (auto-forward + reduce) | `crates/mili-py/python/milox/{miliinternal,milidatabase,parallel,reader}.py` |
 | Redirect harness + xfail buckets | `crates/mili-py/tests/test_upstream_readpath.py` |

@@ -237,23 +237,34 @@ _DERIVED_DBL_NODTANG_REASON = (
 # vs the upstream behavioural oracle (these redirected tests query
 # the written state back). All promoted — no honest-xfail remains in
 # either module.
-_APPEND_STATES_TOOL_REASON = (
-    "Phase 3.3: mili.append_states.AppendStatesTool — the input-dict "
-    "batch tool (planning/mili-py/phase-3.md § Phase 3.3). Not "
-    "implemented this session."
-)
+# Phase 3.3 (decision 24, planning/mili-py/phase-3.md § Phase 3.3):
+# mili.append_states.AppendStatesTool ported verbatim into
+# milox.append_states (pure input-spec validation + orchestration over
+# the already-bit-exact append_state / copy_non_state_data / query(
+# write_data=) primitives — decision-18/19 precedent). Two milox
+# completeness fixes it surfaced: state_variables() now populates the
+# nested svar.svars[] so VECTOR/VEC_ARRAY atom_qty is correct, and a
+# directly-queried element-set VEC_ARRAY now interprets ips= as IP
+# *labels* (not 0-based positions), matching upstream and the
+# bare-component substitution path. A state-less copy_non_state_data
+# output (no <root>T tfile) is now a valid 0-state db on reopen
+# (mirrors upstream afileIO tfile-only-if-on-disk). All 23 cases
+# (19 invalid-input + serial/parallel write|append) promoted — no
+# honest-xfail remains.
 
 
 def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
     key = f"{mod}::{cls}::{meth}"
     if key in _XFAIL:
         return _XFAIL[key]
-    if mod in ("test_append_states", "test_modify_database"):
-        # Phase 3.2: fully promoted (every case bit-exact + the
+    if mod in (
+        "test_append_states",
+        "test_modify_database",
+        "test_append_states_tool",
+    ):
+        # Phase 3.2 / 3.3: fully promoted (every case bit-exact + the
         # behavioural re-query passes). Nothing honest-xfail remains.
         return None
-    if mod == "test_append_states_tool":
-        return _APPEND_STATES_TOOL_REASON
     if mod == "test_milidatabase":
         # Phase I.4: the parallel handler classes (_MDB_PARALLEL_CLASSES)
         # are fully promoted — the per-proc _MiliInternal wrapper +

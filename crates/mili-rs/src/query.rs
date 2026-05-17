@@ -316,7 +316,7 @@ pub(crate) fn plan_state_svar_ip(
         }
         other => other,
     };
-    let mut resolved = resolve_target(svars, parsed, filter.ips)?;
+    let mut resolved = resolve_target(svars, parsed, filter.ips, int_points)?;
 
     let mut matches = collect_matching_subrecs(
         srec,
@@ -777,6 +777,7 @@ fn resolve_target(
     svars: &SvarTable,
     name: QueryName<'_>,
     ips: Option<&[usize]>,
+    int_points: &IntPoints,
 ) -> Result<Resolved> {
     match name {
         // CompSubscript is rewritten to Plain(comp) by the caller
@@ -795,7 +796,7 @@ fn resolve_target(
             // the genuine-misuse typed error (svar carried directly,
             // no linkage) is raised there.
             let picker = if matches!(s.agg, SvarAgg::VecArray { .. }) {
-                resolve_atom_picker(s, ips)?
+                resolve_atom_picker(s, ips, int_points)?
             } else {
                 AtomPicker::AllAtoms
             };
@@ -1143,7 +1144,11 @@ enum AtomPicker {
     Specific { atom_indices: Vec<usize> },
 }
 
-fn resolve_atom_picker(target: &Svar, ips: Option<&[usize]>) -> Result<AtomPicker> {
+fn resolve_atom_picker(
+    target: &Svar,
+    ips: Option<&[usize]>,
+    int_points: &IntPoints,
+) -> Result<AtomPicker> {
     let Some(req) = ips else {
         return Ok(AtomPicker::AllAtoms);
     };
@@ -1156,6 +1161,42 @@ fn resolve_atom_picker(target: &Svar, ips: Option<&[usize]>) -> Result<AtomPicke
             });
         }
     };
+    // When the VEC_ARRAY is an element set queried by its own name,
+    // upstream interprets `ips=` as integration-point *labels* and maps
+    // each to its position via `.index(ip)` against the element-set
+    // payload (`miliinternal.py:191,1251-1270`) — the same label
+    // semantics as the bare-component substitution path
+    // (`try_vec_array_substitution`). Without this, `ips=` would be a
+    // 0-based positional index and `query("es_3c","shell",ips=[2])`
+    // (label 2 of [1,2]) would wrongly raise IpOutOfRange.
+    if let Some(parent) = int_points
+        .parents_of(&target.name)
+        .iter()
+        .find(|p| p.es_svar == target.name)
+    {
+        let ip_labels = &parent.payload[..parent.payload.len().saturating_sub(1)];
+        let n_ip = ip_labels.len();
+        if n_ip == 0 || target.atoms == 0 || !target.atoms.is_multiple_of(n_ip) {
+            return Err(MiliError::MalformedDirectory(
+                "vec_array svar has zero atoms or zero dims",
+            ));
+        }
+        let atoms_per_ip = target.atoms / n_ip;
+        let mut positions = Vec::with_capacity(req.len());
+        for &ip in req {
+            let want =
+                i32::try_from(ip).map_err(|_| MiliError::IpOutOfRange { ip, atoms: n_ip })?;
+            let p = ip_labels
+                .iter()
+                .position(|&x| x == want)
+                .ok_or(MiliError::IpOutOfRange { ip, atoms: n_ip })?;
+            positions.push(p);
+        }
+        return Ok(AtomPicker::PerIp {
+            atoms_per_ip,
+            ips: positions,
+        });
+    }
     let n_ip = dims_product(&dims)?;
     if n_ip == 0 || target.atoms == 0 {
         return Err(MiliError::MalformedDirectory(
