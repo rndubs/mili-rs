@@ -124,7 +124,12 @@ impl Session {
                 *lo,
                 *hi,
             ),
-            None => (topo.encode(db, self.state, None), geometry::LAYOUT, 0.0, 0.0),
+            None => (
+                topo.encode(db, self.state, None),
+                geometry::LAYOUT,
+                0.0,
+                0.0,
+            ),
         };
         let (num_vertices, num_indices) = (topo.num_vertices(), topo.num_indices());
         self.geom_seq += 1;
@@ -306,8 +311,7 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             let loaded = match Database::open(&l.root) {
                 Ok(db) => {
                     let num_states = db.state_count() as u32;
-                    let state_times =
-                        db.times().into_iter().map(f64::from).collect::<Vec<_>>();
+                    let state_times = db.times().into_iter().map(f64::from).collect::<Vec<_>>();
                     let topo = MeshTopology::build(&db);
                     let class_names = topo
                         .as_ref()

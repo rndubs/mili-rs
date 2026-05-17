@@ -60,9 +60,7 @@ fn triangulation(sc: Superclass) -> &'static [[usize; 3]] {
     match sc {
         Superclass::Tri => &[[0, 1, 2]],
         Superclass::Quad => &[[0, 1, 2], [0, 2, 3]],
-        Superclass::Tet | Superclass::Tet10 => {
-            &[[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]]
-        }
+        Superclass::Tet | Superclass::Tet10 => &[[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
         Superclass::Pyramid => &[
             [0, 1, 2],
             [0, 2, 3],
@@ -149,8 +147,7 @@ impl MeshTopology {
             if tris.is_empty() {
                 continue;
             }
-            let Some((rows, ncols)) = db.connectivity_ids(mesh_id, &name).ok().flatten()
-            else {
+            let Some((rows, ncols)) = db.connectivity_ids(mesh_id, &name).ok().flatten() else {
                 continue;
             };
             if ncols < 2 {
@@ -184,11 +181,7 @@ impl MeshTopology {
                     }
                 }
             }
-            let labels = db
-                .labels(mesh_id, &name)
-                .ok()
-                .flatten()
-                .unwrap_or_default();
+            let labels = db.labels(mesh_id, &name).ok().flatten().unwrap_or_default();
             // Only keep the class for scatter if the label list lines
             // up with the connectivity rows (the query→element join
             // key); otherwise it still contributes triangles, just no
@@ -392,8 +385,7 @@ impl MeshTopology {
         let verts = self.coords_at_state(db, state);
         let n_verts = (verts.len() / 3) as u64;
         let n_idx = self.indices.len() as u64;
-        let with_scalar =
-            scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
+        let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
 
         let mut buf = Vec::with_capacity(
             24 + verts.len() * 4

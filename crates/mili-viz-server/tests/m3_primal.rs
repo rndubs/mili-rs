@@ -81,7 +81,12 @@ async fn show(
     // companion assertions; expose min/max through ResultState.
     if g.layout.starts_with("MVG2") {
         assert!(res.min <= res.max, "{result}: min<=max");
-        let finite: Vec<f32> = geom.scalar.iter().copied().filter(|v| v.is_finite()).collect();
+        let finite: Vec<f32> = geom
+            .scalar
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
         assert!(!finite.is_empty(), "{result}: some finite samples");
         let lo = finite.iter().copied().fold(f32::INFINITY, f32::min);
         let hi = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);

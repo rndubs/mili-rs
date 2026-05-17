@@ -31,7 +31,8 @@ fn corpus_path(rel: &[&str]) -> PathBuf {
 
 fn with_client_id(cmd: pb::command::Cmd, id: &str) -> Request<pb::Command> {
     let mut req = Request::new(pb::Command { cmd: Some(cmd) });
-    req.metadata_mut().insert(CLIENT_ID_HEADER, id.parse().unwrap());
+    req.metadata_mut()
+        .insert(CLIENT_ID_HEADER, id.parse().unwrap());
     req
 }
 
