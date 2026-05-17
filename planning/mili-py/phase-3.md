@@ -63,15 +63,29 @@ must reproduce upstream `AFileWriter`'s **output**, not the original
   int/char stream — verified divergent from the original payload),
   plus the string pool + dir-decls + smap block + footer.
 - No d3samp6 fragment has duplicate snames within a directory type,
-  so "one payload write per decl, all decls emitted" = the merged
-  set (the upstream stale-offset-on-duplicate-sname quirk does not
-  arise for this corpus; if a future corpus has it, reproduce
-  `__write_directories`'s first-decl-only offset update). **Phase 3.2
-  update:** the `serial/sstate` d3samp6 corpus *also* has **no**
-  duplicate snames (empirically verified — the Phase-3.1 framing that
-  it did was a misdiagnosis; the serializer was already bit-exact on
-  it). The real append-to-existing-states blocker was the stale
-  in-memory model, fixed in 3.2 (`status.md` § Surprises).
+  so for *that* corpus "one payload write per decl, all decls emitted"
+  = the merged set. **Phase 3.2 update:** the `serial/sstate` d3samp6
+  corpus *also* has **no** duplicate snames (empirically verified —
+  the Phase-3.1 framing that it did was a misdiagnosis; the serializer
+  was already bit-exact on it). The real append-to-existing-states
+  blocker was the stale in-memory model, fixed in 3.2 (`status.md`
+  § Surprises). **Decision 26 (closeout):** the wider corpus *does*
+  exercise the upstream stale-offset-on-duplicate-sname quirk — a
+  whole-corpus audit (155 A-files) found **57 fixtures** with
+  duplicate snames within a directory type (ELEM_CONNS ×53,
+  CLASS_DEF ×4; none in d3samp6). Per "corpus/oracle wins", the quirk
+  is now reproduced bit-exact in `mili_rs::write` rather than left as
+  prose: duplicate-sname entries are merged into a single payload per
+  sname (ELEM_CONNS `superclass ‖ Σblock_cnt ‖ blocks* ‖ conns*`;
+  CLASS_DEF empty), only the **first** decl's offset/length/strings
+  are updated, every later duplicate keeps its **stale** original
+  offset/length, and a duplicate in any other directory type is a
+  hard error (never a silent wrong write). Single-entry groups still
+  raw-copy the original byte-range, so the no-dup corpus (incl.
+  d3samp6) is byte-unchanged. Gated by
+  `crates/mili-rs/tests/parity_write_dup_sname.rs` (5 fixtures,
+  byte-diffed vs the upstream `AFileWriter` golden). See
+  [`m4.md`](m4.md) § "Decision 26".
 
 So `mili_rs::write` copies payload byte-ranges verbatim and rebuilds
 only `STATE_VAR_DICT` (port of `AFileWriter.__write_svars` /

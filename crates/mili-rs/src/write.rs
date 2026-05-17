@@ -16,11 +16,11 @@
 //! int/char stream), plus the directory string pool, the dir-decl
 //! table, the state-map block, and the footer.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::directory::DirEntryType;
+use crate::directory::{DirEntry, DirEntryType};
 use crate::error::{MiliError, Result};
 use crate::header::Endianness;
 use crate::mesh::MeshId;
@@ -126,45 +126,125 @@ impl Database {
         let names = &dir.names;
 
         // ---- payload-bearing directories (dir_order) ----------------
+        // Upstream `AFileWriter.write` parses each `.A` into an
+        // sname-keyed dict (`afile.dirs[dir_type]`) — duplicate snames
+        // within a directory type are **merged** into a single payload
+        // by the parse callbacks (`afileIO.py:354-407`). `__write_
+        // directories` (`afileIO.py:575-584`) then iterates that
+        // deduplicated dict, writing the merged payload **once** per
+        // unique sname and updating the offset/length of only the
+        // **first** matching `DirectoryDecl`
+        // (`next(filter(strings[0]==sname, …))`); every subsequent
+        // duplicate decl keeps its **stale** original offset/length yet
+        // is still emitted by `__write_dir_decls` (`afileIO.py:739-747`).
+        // Decision 26 (`planning/mili-py/m4.md` § "Phase 3"). No d3samp6
+        // fragment exercises this, but 57 corpus fixtures do (ELEM_CONNS
+        // / CLASS_DEF — `parity_write_dup_sname.rs`).
         for (gi, &dt) in DIR_ORDER.iter().enumerate() {
-            for entry in dir.entries.iter().filter(|e| e.entry_type == dt) {
-                let new_off = out.len();
-                let payload_start = usize::try_from(entry.offset)
-                    .map_err(|_| MiliError::MalformedDirectory("write: negative dir offset"))?;
-                let payload_len = usize::try_from(entry.length)
-                    .map_err(|_| MiliError::MalformedDirectory("write: negative dir length"))?;
+            let type_entries: Vec<&DirEntry> =
+                dir.entries.iter().filter(|e| e.entry_type == dt).collect();
+            if type_entries.is_empty() {
+                continue;
+            }
 
-                // The single per-fragment `state_count` APPLICATION_PARAM
-                // scalar is bumped on append (`miliinternal.py:1494`).
-                let is_state_count = dt == DirEntryType::ApplicationParam
-                    && entry.name_count == 1
-                    && names.get(entry.name_start as usize) == "state_count";
-                if is_state_count && payload_len == 4 && state_count_op != StateCountOp::Keep {
-                    let cur = end.read_i32(
-                        a[payload_start..payload_start + 4]
-                            .try_into()
-                            .expect("4 bytes"),
-                    );
-                    let v = match state_count_op {
-                        StateCountOp::Zero => 0,
-                        StateCountOp::Increment => cur + 1,
-                        StateCountOp::Keep => cur,
-                    };
-                    put_i32(&mut out, end, v);
+            // Unique snames in first-occurrence order (== upstream dict
+            // key order: insertion order over the parsed dir-decls), and
+            // the entry indices that share each sname.
+            let mut sname_order: Vec<&str> = Vec::new();
+            let mut groups_by_sname: HashMap<&str, Vec<usize>> = HashMap::new();
+            for (i, e) in type_entries.iter().enumerate() {
+                let sname = names.get(e.name_start as usize);
+                if !groups_by_sname.contains_key(sname) {
+                    sname_order.push(sname);
+                }
+                groups_by_sname.entry(sname).or_default().push(i);
+            }
+
+            // Pass 1 — write the (possibly merged) payload **once** per
+            // unique sname, recording the first decl's new
+            // offset/length and pushing its strings (upstream extends
+            // `strings` once per dict entry, with the first decl's
+            // strings).
+            let mut first_decl: HashMap<&str, (i64, i64)> = HashMap::new();
+            for &sname in &sname_order {
+                let idxs = &groups_by_sname[sname];
+                let new_off = out.len();
+                if idxs.len() == 1 {
+                    let entry = type_entries[idxs[0]];
+                    let payload_start = usize::try_from(entry.offset)
+                        .map_err(|_| MiliError::MalformedDirectory("write: negative dir offset"))?;
+                    let payload_len = usize::try_from(entry.length)
+                        .map_err(|_| MiliError::MalformedDirectory("write: negative dir length"))?;
+                    // The single per-fragment `state_count`
+                    // APPLICATION_PARAM scalar is bumped on append
+                    // (`miliinternal.py:1494`); state_count never
+                    // duplicates so it only arises in the 1-entry path.
+                    let is_state_count = dt == DirEntryType::ApplicationParam
+                        && entry.name_count == 1
+                        && names.get(entry.name_start as usize) == "state_count";
+                    if is_state_count && payload_len == 4 && state_count_op != StateCountOp::Keep {
+                        let cur = end.read_i32(
+                            a[payload_start..payload_start + 4]
+                                .try_into()
+                                .expect("4 bytes"),
+                        );
+                        let v = match state_count_op {
+                            StateCountOp::Zero => 0,
+                            StateCountOp::Increment => cur + 1,
+                            StateCountOp::Keep => cur,
+                        };
+                        put_i32(&mut out, end, v);
+                    } else {
+                        out.extend_from_slice(&a[payload_start..payload_start + payload_len]);
+                    }
                 } else {
-                    out.extend_from_slice(&a[payload_start..payload_start + payload_len]);
+                    // Duplicate sname within this directory type:
+                    // reproduce upstream's parse-merge + single write.
+                    let group: Vec<&DirEntry> = idxs.iter().map(|&i| type_entries[i]).collect();
+                    match dt {
+                        DirEntryType::ElemConns => {
+                            out.extend_from_slice(&merge_elem_conns(a, &group, end)?);
+                        }
+                        // `__write_class_def` (`afileIO.py:607-609`)
+                        // writes nothing — the merged payload is empty.
+                        DirEntryType::ClassDef => {}
+                        // No corpus fixture reaches a duplicate sname in
+                        // any other directory type (decision 26 audit);
+                        // never emit a silently-wrong payload for an
+                        // unvalidated merge rule.
+                        _ => {
+                            return Err(MiliError::Unsupported(
+                                "write: duplicate sname within an unsupported directory type",
+                            ))
+                        }
+                    }
                 }
                 let new_len = (out.len() - new_off) as i64;
-                for i in 0..entry.name_count {
-                    strings_pool.push(names.get((entry.name_start + i) as usize));
+                first_decl.insert(sname, (new_off as i64, new_len));
+                let fe = type_entries[idxs[0]];
+                for i in 0..fe.name_count {
+                    strings_pool.push(names.get((fe.name_start + i) as usize));
                 }
+            }
+
+            // Pass 2 — emit one decl per original entry, in dir-decl
+            // order. The first decl of each sname carries the merged
+            // payload's new offset/length; every duplicate after it
+            // keeps its **stale** original offset/length.
+            for (i, entry) in type_entries.iter().enumerate() {
+                let sname = names.get(entry.name_start as usize);
+                let (offset, length) = if groups_by_sname[sname][0] == i {
+                    first_decl[sname]
+                } else {
+                    (entry.offset, entry.length)
+                };
                 groups[gi].push(EmitDecl {
                     type_code: dt as i64,
                     modifier1: entry.modifier1,
                     modifier2: entry.modifier2,
                     string_qty: entry.string_qty,
-                    offset: new_off as i64,
-                    length: new_len,
+                    offset,
+                    length,
                 });
             }
         }
@@ -531,6 +611,65 @@ impl Database {
                 "append_state: no srec for the new state",
             ))
     }
+}
+
+/// Reproduce upstream's parse-merge + `__write_elem_conn`
+/// (`afileIO.py:389-407, 592-598`) for a duplicate-sname ELEM_CONNS
+/// group. Each original payload is
+/// `superclass(4) ‖ block_cnt(4) ‖ blocks(8·block_cnt) ‖ conns(rest)`;
+/// the parse `np.concatenate`s the per-entry `blocks`/`conns` and sums
+/// `block_cnt`, and the write emits one
+/// `superclass ‖ Σblock_cnt ‖ blocks* ‖ conns*` payload. `superclass`
+/// is identical across the group (same class), so the first entry's is
+/// reused verbatim.
+fn merge_elem_conns(a: &[u8], group: &[&DirEntry], end: Endianness) -> Result<Vec<u8>> {
+    let mut superclass = [0u8; 4];
+    let mut sum_block_cnt: i64 = 0;
+    let mut blocks_cat: Vec<u8> = Vec::new();
+    let mut conns_cat: Vec<u8> = Vec::new();
+    for (k, e) in group.iter().enumerate() {
+        let s = usize::try_from(e.offset)
+            .map_err(|_| MiliError::MalformedDirectory("write: negative dir offset"))?;
+        let l = usize::try_from(e.length)
+            .map_err(|_| MiliError::MalformedDirectory("write: negative dir length"))?;
+        let p = &a[s..s + l];
+        if p.len() < 8 {
+            return Err(MiliError::MalformedDirectory(
+                "write: ELEM_CONNS payload shorter than its 8-byte header",
+            ));
+        }
+        if k == 0 {
+            superclass.copy_from_slice(&p[0..4]);
+        }
+        let block_cnt = end.read_i32(p[4..8].try_into().expect("4 bytes"));
+        let blk_bytes = 8usize
+            .checked_mul(usize::try_from(block_cnt).map_err(|_| {
+                MiliError::MalformedDirectory("write: negative ELEM_CONNS block_cnt")
+            })?)
+            .ok_or(MiliError::MalformedDirectory(
+                "write: ELEM_CONNS block_cnt overflow",
+            ))?;
+        if 8 + blk_bytes > p.len() {
+            return Err(MiliError::MalformedDirectory(
+                "write: ELEM_CONNS blocks run past the payload",
+            ));
+        }
+        sum_block_cnt += i64::from(block_cnt);
+        blocks_cat.extend_from_slice(&p[8..8 + blk_bytes]);
+        conns_cat.extend_from_slice(&p[8 + blk_bytes..]);
+    }
+    let mut out = Vec::with_capacity(8 + blocks_cat.len() + conns_cat.len());
+    out.extend_from_slice(&superclass);
+    put_i32(
+        &mut out,
+        end,
+        i32::try_from(sum_block_cnt).map_err(|_| {
+            MiliError::MalformedDirectory("write: merged ELEM_CONNS block_cnt overflow")
+        })?,
+    );
+    out.extend_from_slice(&blocks_cat);
+    out.extend_from_slice(&conns_cat);
+    Ok(out)
 }
 
 /// `AFileWriter.__collect_svar_data` (`afileIO.py:665-680`): append
