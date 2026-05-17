@@ -44,13 +44,14 @@ pub use adjacency::NeighborElems;
 pub use derived::{
     compute_contact_force, compute_eps_rate, compute_magnitude, compute_mat_cog_disp,
     compute_node_acceleration, compute_node_displacement, compute_node_displacement_magnitude,
-    compute_node_velocity, compute_principal_strain, compute_principal_stress,
-    compute_stress_invariant, contact_force_spec, eps_rate_spec, magnitude_primals, magnitude_spec,
-    mat_cog_disp_spec, nodal_reference_from_coords, nodal_reference_from_query, node_acc_spec,
-    node_disp_mag_spec, node_disp_primal, node_disp_spec, node_vel_spec, principal_strain_primals,
-    principal_strain_spec, principal_stress_primals, principal_stress_spec,
-    stress_invariant_primals, stress_invariant_spec, surfstrain_spec, MagnitudeDerived,
-    PrincipalStrain, PrincipalStress, StressInvariant,
+    compute_node_velocity, compute_principal_strain, compute_principal_strain_alt,
+    compute_principal_stress, compute_stress_invariant, contact_force_spec, eps_rate_spec,
+    magnitude_primals, magnitude_spec, mat_cog_disp_spec, nodal_reference_from_coords,
+    nodal_reference_from_query, node_acc_spec, node_disp_mag_spec, node_disp_primal,
+    node_disp_spec, node_vel_spec, principal_strain_alt_primals, principal_strain_alt_spec,
+    principal_strain_primals, principal_strain_spec, principal_stress_primals,
+    principal_stress_spec, stress_invariant_primals, stress_invariant_spec, surfstrain_spec,
+    MagnitudeDerived, PrincipalStrain, PrincipalStrainAlt, PrincipalStress, StressInvariant,
 };
 #[doc(hidden)]
 pub use directory::{ByteRange, DirEntry, DirEntryType, Directory, NamePool};

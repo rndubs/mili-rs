@@ -15,7 +15,8 @@
 > and [`phase-4-m1.md`](phase-4-m1.md) (the frozen contract this
 > consumes). The decision log is global and monotonic across
 > `mili-viz` (M1: 1–9; M2: 10–12; M3: 13–15; M4: 16–18; M5: 19–21;
-> M5b: 22–24; M6: 25–27; M5c: 28–31). **Phase 6 starts at 32.**
+> M5b: 22–24; M6: 25–27; M5c: 28–31; M5d: 32–34). **Phase 6 starts
+> at 35.**
 
 ## Goal
 
@@ -61,7 +62,7 @@ specified in detail here; later milestones get their own
 
 ## Decisions
 
-### Decision 32 — a top-level `python/` tree, distribution `pygriz`, import `griz`, pure-Python (no pyo3)
+### Decision 35 — a top-level `python/` tree, distribution `pygriz`, import `griz`, pure-Python (no pyo3)
 
 The repo had no home for non-crate Python packages: `crates/mili-py`
 is the Phase 1–3 **`milox` pyo3 extension** (a Rust crate built with
@@ -84,7 +85,7 @@ per subdirectory. The first is `python/pygriz/`:
 - `python/` is the designated drop-zone for future pure-Python
   packages so this decision is not relitigated per package.
 
-### Decision 33 — stubs are generated build output from the single canonical proto, never hand-edited
+### Decision 36 — stubs are generated build output from the single canonical proto, never hand-edited
 
 `crates/mili-viz-proto/proto/mili_viz.proto` is the **one** canonical
 copy (its header already says so; the Rust side codegens protoc-free
@@ -104,7 +105,7 @@ handshake (`HelloReply.compatible` / `mismatch_detail`), never a
 crash — this is the Visit "API matches the engine" guarantee bought
 with a wire contract, and the M1 gate exercises the mismatch branch.
 
-### Decision 34 — M1 is Layer-0 only; Layer-1 is M3 (no duplicate parser, reuse the server's)
+### Decision 37 — M1 is Layer-0 only; Layer-1 is M3 (no duplicate parser, reuse the server's)
 
 `scripting.md` defines two layers; the server **already** parses the
 Layer-0 griz line stream (`crates/mili-viz-server/src/raw.rs`
@@ -132,12 +133,12 @@ ephemeral TCP port (`serve_tcp(":0")`, the M6 transport):
       handshake; a matching `protocol_version` → `compatible == True`;
       a deliberately bumped client version → `compatible == False`
       with a non-empty `mismatch_detail` and a Python **warning, not
-      an exception** (Decision 33 / Visit guarantee).
+      an exception** (Decision 36 / Visit guarantee).
 - [ ] `session.command("load <fixture>; state 2; show sx")` returns
       `ok`, and `session.run_script(path)` streams a `grizinit`-style
       batch (comments/blank lines skipped) to the same dispatcher —
       both via `Command.raw`, no Python-side griz parser
-      (Decision 34).
+      (Decision 37).
 - [ ] The Phase 4 server acceptance suite + M2–M6 gating tests are
       **unchanged and green** (Phase 6 adds a client; it does not
       touch the frozen proto or the server).

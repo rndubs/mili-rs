@@ -1588,6 +1588,41 @@ impl PyMiliDatabase {
                     })
                     .map_err(|e| to_pyerr(&e))?;
                 (computed, "derived")
+            } else if let Some((kind, title)) = mili_rs::principal_strain_alt_spec(svar) {
+                // `*_alt` griz closed-form trig principal-strain
+                // variants (prin_strain[1-3]_alt /
+                // prin_dev_strain[1-3]_alt): a distinct closed-form
+                // load-angle algorithm (no eigensolver) over the same
+                // 6 strain component primals. Same gather pattern as
+                // the non-alt strain arm above. Gated vs the `mili`
+                // oracle to a tight f32 tolerance (numpy float32
+                // arccos/cos are numpy's own SIMD polynomials, not
+                // bitwise-reproducible cross-language;
+                // planning/mili-py/m4.md Decision 27).
+                let primal_names = mili_rs::principal_strain_alt_primals(kind);
+                let computed = py
+                    .allow_threads(|| -> mili_rs::Result<QueryResult> {
+                        let mut primals: Vec<QueryResult> = Vec::with_capacity(primal_names.len());
+                        for pn in primal_names {
+                            let a = QueryArgs {
+                                svar: pn,
+                                class: &entity_type,
+                                labels: labels_ref,
+                                states: &state_idx,
+                                materials: materials_ref,
+                                ips: ips_ref,
+                                subrec: subrec_ref,
+                            };
+                            let p = match &self.backend {
+                                Backend::Single(db) => db.query_full(&a)?,
+                                Backend::Set(s) => s.query_full(&a)?,
+                            };
+                            primals.push(p);
+                        }
+                        mili_rs::compute_principal_strain_alt(kind, &primals, svar, title)
+                    })
+                    .map_err(|e| to_pyerr(&e))?;
+                (computed, "derived")
             } else if let Some((kind, title)) = mili_rs::magnitude_spec(svar) {
                 // sqrt-of-sum-of-component-squares magnitudes
                 // (nodtangmag / shear_magnitude): same element-wise
@@ -2106,6 +2141,7 @@ impl PyMiliDatabase {
                 || mili_rs::stress_invariant_spec(s).is_some()
                 || mili_rs::principal_stress_spec(s).is_some()
                 || mili_rs::principal_strain_spec(s).is_some()
+                || mili_rs::principal_strain_alt_spec(s).is_some()
                 || mili_rs::magnitude_spec(s).is_some()
                 || mili_rs::surfstrain_spec(s).is_some()
             {
