@@ -144,12 +144,30 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
 
 ## Open questions
 
-- **Picking.** griz supports picking elements/nodes via mouse. Round
-  trip or do it client-side from cached geometry? Probably
-  client-side with a separate "describe picked id" RPC.
-- **Time-history plots.** griz embeds 2D plots
-  (`reference/griz/Src/time_hist.c`). On the client, `egui_plot` is
-  good enough for v1.
+- **Picking.** ✅ Resolved — `phase-4-m1.md` Decision 2. Computed
+  **client-side** from the cached `GeometryRef` buffers; the
+  status-bar "describe picked id" readout is one ordinary `Query`
+  for `(class, label, current state)` — **no separate RPC, no M1
+  proto change**. A pick that changes selection emits the existing
+  `Select` command (broadcasts like any mutation).
+- **Time-history plots.** ✅ Resolved — `phase-4-m1.md` Decision 3.
+  Client-side `egui_plot` (Phase 5 M3.5 bottom tab), fed by the
+  **existing** `Query` over a state range (`time_hist.c`
+  (`reference/griz/Src/time_hist.c`) is just a rendering of that
+  data). No server plot RPC; **no M1 proto change**.
+- **Derived-result validation (no oracle).** ✅ Resolved —
+  `phase-4-m1.md` Decision 5. There is no `mili`-style oracle for
+  viz: griz `Src/{stress,strain,iso_surface,contour}.c` formulas are
+  the written spec; correctness is gated by a **committed golden
+  fixture + numeric tolerance**, with **zero live-griz dependency in
+  CI**. Detailed at Phase 4 M5; approach pinned now.
+- **Server-hosted agent on the critical path.** ✅ Resolved —
+  `phase-4-m1.md` Decision 6. The agent **wire contract** is frozen
+  in M1 (so the `protocol_version` handshake never breaks); the
+  agent **implementation** + the local-LLM model choice
+  (`agent-local-llm*.md`) are **off the M1–M5 critical path**
+  (Phase 4/5 M6), capability-gated behind `agent`. The panel is not
+  dropped — it is sequenced last and isolated behind a flag.
 - **Scripting.** Resolved — see `scripting.md`. A pip-installable
   pure-Python package is a second client of `mili-viz-proto` (no
   Visit-style bundled interpreter). Camera is server-authoritative;
@@ -157,9 +175,12 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
   connection path. `grizinit`-style batch files keep working via
   `session.run_script(path)`. This expands Phase 4 M1 with a
   subscription RPC + `StateDelta` stream + version handshake.
-- **Backwards-compatible CLI.** Whether the new client binary
-  accepts griz's command-line flags. Probably yes for the common
-  ones (`-i`, `-b`), as a courtesy.
+- **Backwards-compatible CLI.** ✅ Resolved — `phase-4-m1.md`
+  Decision 4. The client accepts only the portable subset —
+  `-i <base>` → initial `load`, `-b`/`-batch <file>` →
+  `run_script`, `-V` → version, `-w <w> <h>` → window size. The rest
+  of griz's flags (`reference/griz/Src/viewer.c:2900`) are
+  Motif/X11/launcher-specific and dropped. Client-only; no proto.
 - **Client wireframe + AI-first design.** Resolved — see
   `client.md`. The window mirrors griz's shape (left dock for
   Results/Materials/Surfaces, center viewport, bottom tabs for

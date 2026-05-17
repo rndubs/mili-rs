@@ -12,20 +12,23 @@
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (gated on Phase 4 M1).
 - **No `mili-viz` code exists yet.** There are no `mili-viz-*` crates
   in the workspace; this phase is still entirely in design.
-- **⚠️ More planning iterations are needed before implementation.**
-  The architecture is sketched ([`README.md`](README.md)) and two big
-  sub-designs are resolved ([`scripting.md`](scripting.md),
-  [`client.md`](client.md)), but the Phase 4 M1 surface has grown
-  across those docs and several design questions are still open (see
-  [§ Open design questions](#open-design-questions)). **Do not start
-  coding Phase 4 M1 until the M1 surface is pinned in a dedicated
-  scope doc** (the analogue of `mili-py/m1.md` — see
-  [§ Immediate next steps](#immediate-next-steps)).
+- **✅ The Phase 4 M1 surface is now pinned.**
+  [`phase-4-m1.md`](phase-4-m1.md) is the consolidated, buildable M1
+  scope doc (the analogue of `mili-py/m1.md`): it reconciles the
+  three M1 surfaces into one frozen wire contract, enumerates every
+  delta from the proto draft (Decision 1 Δ1–Δ9), defines the M1
+  acceptance gate, and resolves open questions #3–#8. The proto
+  ([`proto/mili_viz.proto`](proto/mili_viz.proto)) is updated to
+  match. **Phase 4 M1 is now coding-ready** (scaffold
+  `mili-viz-proto` per the acceptance gate); no open question blocks
+  it. The local-LLM agent investigation (#7) is explicitly deferred
+  off the critical path, not blocking.
 
 ## What is already decided (read these first)
 
 | Doc | What it pins | State |
 |---|---|---|
+| [`phase-4-m1.md`](phase-4-m1.md) | **The consolidated buildable Phase 4 M1 scope.** Frozen M1 wire contract = union of base vocab + scripting + agent; every delta from the proto draft enumerated (Decision 1 Δ1–Δ9); M1 acceptance gate (no oracle → conformance + Layer-0≡raw + fan-out); Decisions 1–7 resolving open Q3–Q8 | ✅ pinned (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -36,33 +39,35 @@ The reference implementation we are porting from is read-only under
 
 ## Open design questions
 
-These **must be resolved (or explicitly deferred with a reason)**
-before the Phase 4 M1 scope doc is final. "✅" = decided in a doc
-above; "❓" = still open.
+All blocking questions are now **resolved or explicitly deferred
+with a reason** in [`phase-4-m1.md`](phase-4-m1.md). "✅" = decided;
+"⏸️" = deliberately deferred, non-blocking.
 
 | # | Question | State | Where |
 |---|---|---|---|
 | 1 | Scripting client model + camera authority | ✅ resolved | `scripting.md` |
 | 2 | Client wireframe + AI assistant as a first-class panel | ✅ resolved | `client.md` |
-| 3 | **Phase 4 M1 surface is now the union of base RPC + scripting (subscription/`StateDelta`/handshake) + agent (`AgentChat`/`DELTA_AGENT`/`Snapshot`/`Interrupt`). It has never been written down as one consolidated, buildable M1 spec.** | ❓ open — **the blocking item** | needs a new `phase-4-m1.md` |
-| 4 | **Picking** — element/node pick: server round-trip vs. client-side from cached geometry + a "describe picked id" RPC | ❓ open (leaning client-side) | `README.md` § Open questions |
-| 5 | **Time-history plots** — `egui_plot` client-side for v1 vs. server-computed | ❓ soft-leaning `egui_plot` v1; not pinned | `README.md` § Open questions |
-| 6 | **Backwards-compatible CLI** — does the client accept griz's `-i`/`-b` flags | ❓ open (leaning "yes, common ones") | `README.md` § Open questions |
-| 7 | **Local-LLM agent**: model + whether/how it is post-trained, and the host/runtime story for the server-hosted agent | ❓ open — research only | `agent-local-llm*.md` |
-| 8 | Derived-result port order + parity strategy (no Python oracle here — griz `Src/{stress,strain,iso_surface,contour}.c` is the spec; how do we validate?) | ❓ open | Phase 4 M5 |
+| 3 | **Phase 4 M1 surface = union of base RPC + scripting + agent, as one consolidated buildable spec** | ✅ resolved — the blocking item is closed | `phase-4-m1.md` Decision 1 (Δ1–Δ9) |
+| 4 | **Picking** — server round-trip vs. client-side | ✅ resolved: client-side from cached `GeometryRef`; readout reuses `Query`; no M1 proto | `phase-4-m1.md` Decision 2 |
+| 5 | **Time-history plots** — client vs. server | ✅ resolved: client-side `egui_plot` (Ph5 M3.5) fed by existing `Query`; no M1 proto | `phase-4-m1.md` Decision 3 |
+| 6 | **Backwards-compatible CLI** — griz flags | ✅ resolved: portable subset only (`-i`/`-b`/`-V`/`-w`); rest dropped; client-only, no proto | `phase-4-m1.md` Decision 4 |
+| 7 | **Local-LLM agent**: model / post-training / host-runtime | ⏸️ deferred (non-blocking): agent *contract* in M1; *impl* + model choice **off the M1–M5 critical path** (Ph4/5 M6), capability-gated | `phase-4-m1.md` Decision 6; research in `agent-local-llm*.md` |
+| 8 | Derived-result port + validation (no Python oracle) | ✅ resolved: formulas-as-spec + committed golden + tolerance, **no live griz in CI**; detail at M5 | `phase-4-m1.md` Decision 5 |
 
 ## Phase 4 — `mili-viz` server (NOT STARTED)
 
 Milestones from [`README.md`](README.md) § "Phase 4 milestones",
 expanded by `scripting.md` / `client.md`. None started.
 
-- [ ] **M1 — proto crate + in-process transport.** `mili-viz-proto`
-      command vocab + `tonic` server stub over an in-memory channel.
-      **Scope is larger than the README bullet:** also the
-      multi-client subscription RPC + server→client `StateDelta`
-      stream + version handshake (`scripting.md`) **and** `AgentChat`
-      + `DELTA_AGENT` broadcast kind + `Snapshot` + `Interrupt`
-      (`client.md`). ⚠️ Pin this in `phase-4-m1.md` before coding.
+- [ ] **M1 — proto crate + in-process transport.** ✅ **Scope
+      pinned** in [`phase-4-m1.md`](phase-4-m1.md) (frozen wire
+      contract = base vocab + scripting subscription/`StateDelta`/
+      handshake + agent `AgentChat`/`DELTA_AGENT`/`CaptureFrame`/
+      `Interrupt`; proto updated to match). **Coding-ready.** Gating
+      tests = the `phase-4-m1.md` § "M1 acceptance gate" checklist
+      (handshake/capability, Layer-0≡raw equivalence, subscription
+      fan-out, frozen-stub `UNIMPLEMENTED`, conformance). Agent RPCs
+      are frozen-but-`UNIMPLEMENTED` until Ph4/5 M6 (Decision 6/7).
 - [ ] **M2 — load + state navigation.** `load`/`state`/`next`/`prev`;
       stream vertex+index buffers per state.
 - [ ] **M3 — primal result display.** `show <svar>`; color array from
@@ -91,29 +96,29 @@ expanded by `scripting.md` / `client.md`. None started.
 
 ## Immediate next steps (pick up here)
 
-The work is **planning, not coding** — in priority order:
+The planning gate is **cleared**. Items 1–4 below are **done**
+([`phase-4-m1.md`](phase-4-m1.md), Decisions 1–7; proto updated;
+open Q3–Q8 resolved/deferred). Remaining work is coding:
 
-1. **Write `planning/mili-viz/phase-4-m1.md`** — a consolidated,
-   buildable M1 scope doc (the analogue of `mili-py/m1.md`). It must
-   reconcile the three M1 surfaces into one: the base command vocab
-   (`README.md`), the scripting subscription/`StateDelta`/handshake
-   (`scripting.md`), and the agent `AgentChat`/`DELTA_AGENT`/
-   `Snapshot`/`Interrupt` (`client.md`). Output: the exact
-   `mili-viz-proto` message set and the M1 acceptance gate. **This is
-   the one blocking item (open Q3).**
-2. **Resolve open questions 4–6** (picking, time-history, CLI compat)
-   — each is a short decision; record it in `README.md` § Open
-   questions and reference it from this tracker's table.
-3. **Decide the derived-result validation strategy (Q8)** — there is
-   no Python oracle for Phase 4 M5; settle now whether griz itself is
-   run as a golden, or numeric tolerances vs. `Src/*.c`, before M5 is
-   scheduled.
-4. **Take the local-LLM agent investigation to a decision (Q7)** —
-   promote `agent-local-llm*.md` from research notes to a pinned
-   decision (model, post-training, server host/runtime), or explicitly
-   defer the agent panel out of the Phase 4/5 critical path.
-5. Only once (1) lands: scaffold the `mili-viz-proto` crate in the
-   workspace and begin Phase 4 M1.
+1. ✅ **`phase-4-m1.md` written** — consolidated buildable M1 scope;
+   the three surfaces reconciled into one frozen contract; every
+   proto delta enumerated (Decision 1 Δ1–Δ9); M1 acceptance gate
+   defined. (Open Q3 closed.)
+2. ✅ **Open Q4–Q6 resolved** (picking / time-history / CLI compat)
+   — `phase-4-m1.md` Decisions 2–4, recorded in `README.md` § Open
+   questions.
+3. ✅ **Derived-result validation (Q8) decided** —
+   `phase-4-m1.md` Decision 5: formulas-as-spec + committed golden +
+   tolerance, no live griz in CI; detail deferred to M5.
+4. ✅ **Local-LLM agent (Q7) decided as a scope call** —
+   `phase-4-m1.md` Decision 6: contract in M1, impl + model choice
+   off the M1–M5 critical path (capability-gated). `agent-local-llm*.md`
+   stays research, explicitly non-gating.
+5. ⏭️ **NEXT (coding):** scaffold `crates/mili-viz-proto` with the
+   `tonic` `build.rs` against the updated `proto/mili_viz.proto`, and
+   satisfy the `phase-4-m1.md` § "M1 acceptance gate" checklist
+   (in-process transport, handshake, Layer-0≡raw, subscription
+   fan-out, frozen-stub `UNIMPLEMENTED`).
 
 ## Update protocol
 
