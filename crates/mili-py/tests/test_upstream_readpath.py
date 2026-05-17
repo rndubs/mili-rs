@@ -58,126 +58,27 @@ _REDIRECT = {
 # are no longer xfailed. Nothing else in this dict yet.
 _XFAIL: dict[str, str] = {}
 
-# test_milidatabase: milox collapses upstream's per-proc fan-out in the
-# Rust DatabaseSet, so the parallel handler classes' merge_results=False
-# per-proc-unmerged shapes legitimately differ — that is parallel /
-# Phase-H scope, not the Phase-G read half. Whole classes xfail.
-_MDB_PARALLEL_CLASSES = (
-    "TestReturnCodes",
-    "LoopWrapperParallelTests",
-    "ServerWrapperParallelTests",
-    "LoopWrapperContextManagerParallelTests",
-    "ServerWrapperContextManagerParallelTests",
-)
+# Phase I.4 (decision 21) promoted the entire parallel-handler surface.
+# The wrapper holds a real per-proc list of milox _MiliInternal (each
+# opening one fragment via open_single — serial-gate bit-exact) and
+# MiliDatabase applies upstream's per-method reduce_function table over
+# the verbatim milox.reductions; adjacency.py is the verbatim upstream
+# port over the per-proc geometry rewrap. This *is* upstream's exact
+# per-proc compute-then-merge algorithm over per-fragment engines that
+# are each individually serial-gate bit-exact, so it is bit-exact by
+# construction — including the db0()-only accessors I.3 could not
+# reproduce. So _MDB_PARALLEL_CLASSES / _ADJ_PARALLEL_CLASSES /
+# TestCombineFunction / TestMergeDataFrames / TestServerWrapperReductions
+# / TestLoopWrapperReductions / ParallelDerivedExpressions are no longer
+# xfailed (all enumerated cases pass; 564 → 827, accounted below). Only
+# the Phase-3 write path (append_state / copy_non_state_data) stays
+# honestly xfailed — a distinct unported slice, not a parallel-scope
+# difference.
+
 # Serial read-half methods that need a still-unported core engine.
-# The projection sub-slice landed (milox.projection verbatim port +
-# MiliDatabase._project_result), so test_query_project_to_nodes is no
-# longer xfailed — nothing else in the Phase-G read half is unported.
+# Empty: the Phase-G read half + projection sub-slice all landed.
 _MDB_PHASE_H_METHODS: dict[str, str] = {}
-# Parallel-class methods that legitimately *pass* now that the
-# ResultModifier reductions are ported: the AVERAGE dataframe reduces to
-# one partition-independent value per state (no per-proc label axis), so
-# the Rust-DatabaseSet-merged result is bit-identical to upstream's
-# per-proc-combined result. The other reduction methods keep a
-# label/argmin axis that differs per partition → still honest parallel
-# xfail. Excluded from the whole-class xfail so the strict harness
-# asserts the pass.
-_MDB_PARALLEL_PASSING = {
-    "test_query_average_dataframe",
-}
 
-
-# test_adjacency: the serial GeometricMeshInfo / AdjacencyMapping
-# classes are the Phase-H adjacency sub-slice and must pass. The
-# LoopWrapper* / ServerWrapper* (incl. *MergeResults*) classes drive
-# the per-proc-unmerged parallel handlers — milox collapses that
-# fan-out in the Rust DatabaseSet, so they legitimately differ
-# (parallel scope, like _MDB_PARALLEL_CLASSES). Whole classes xfail.
-_ADJ_PARALLEL_CLASSES = (
-    "LoopWrapperGeometricMeshInfoTests",
-    "LoopWrapperAdjacencyMappingTests",
-    "ServerWrapperGeometricMeshInfoTests",
-    "ServerWrapperAdjacencyMappingTests",
-    "LoopWrapperGeometricMeshInfoMergeResultsTests",
-    "LoopWrapperAdjacencyMappingMergeResultsTests",
-    "ServerWrapperGeometricMeshInfoMergeResultsTests",
-    "ServerWrapperAdjacencyMappingMergeResultsTests",
-)
-
-
-# test_reductions: TestSerialReductions opens the *serial* d3samp6
-# twice (merge_results False/True) — both single-fragment _MiliInternal,
-# so the serial-vs-"parallel" comparison is the already-ported primal /
-# reshape / geometry surface and must pass. TestCombineFunction /
-# TestMergeDataFrames / TestServerWrapperReductions /
-# TestLoopWrapperReductions drive the *parallel* d3samp6 through the
-# per-proc-unmerged handlers (merge_results=False expects upstream's
-# per-proc list; milox collapses that fan-out in the Rust DatabaseSet),
-# so they legitimately differ — parallel scope, whole-class xfail like
-# _MDB_PARALLEL_CLASSES / _ADJ_PARALLEL_CLASSES.
-# TestCombineFunction drives the parallel d3samp6 with
-# merge_results=False and its helper iterates the upstream per-proc
-# *list*; milox returns the Rust-DatabaseSet-merged dict, so every
-# method legitimately differs (whole-class parallel scope, all fail —
-# no incidental pass).
-_REDUCTIONS_COMBINE_CLASS = "TestCombineFunction"
-# TestServerWrapperReductions / TestLoopWrapperReductions compare the
-# *serial* d3samp6 against the *parallel* d3samp6 through the
-# ServerWrapper/LoopWrapper forwarding path.
-#
-# Phase I.3 (the merge_results=True re-reduce relocation): the wrapper
-# now forwards every merge_results=True read to a _MiliInternal adapter
-# *over the Set-backed PyMiliDatabase*. The Rust DatabaseSet already
-# performed upstream's per-fragment reduction bit-exactly (decision 19),
-# and _MiliInternal supplies the exact upstream accessor signatures +
-# return shapes — so the genuinely cross-fragment-merged accessors
-# (labels / connectivity / nodes / times / components_of_vector_svar /
-# containing+/state_variables_of_class / derived_variables_of_class /
-# supported_derived_variables) are now bit-exact vs upstream's per-proc
-# _MiliInternal + reduce_<X> and were **promoted** (removed from this
-# set).
-#
-# The remaining methods stay honest strict-xfail: their Set-backend
-# accessor resolves via fragment 0 only in the Rust core (the db0()
-# convention — not a true cross-fragment merge: an MPI rank with no
-# elements of a class never declares its class/svar/material tables),
-# so they legitimately differ from upstream's per-proc _MiliInternal +
-# reduce_<X> (list_concatenate / dictionary_merge). Reproducing them
-# needs the Phase-I.4 per-proc-list + per-method reduce path (the full
-# per-proc surface) — out of I.3 scope by the recorded decision point
-# ("keep the Rust merge where bit-exact, don't double-work; only
-# Python-merge where a test needs the per-proc list"). test_append_state
-# / test_copy_non_state_data are additionally the Phase-3 write path.
-_REDUCTIONS_WRAPPER_METHODS = {
-    "test_all_labels_of_material",
-    "test_append_state",
-    "test_class_labels_of_material",
-    "test_classes_of_derived_variable",
-    "test_classes_of_state_variable",
-    "test_copy_non_state_data",
-    "test_int_points_of_state_variable",
-    "test_materials_of_class_name",
-    "test_nodes_of_elems",
-    "test_nodes_of_material",
-    "test_parts_of_class_name",
-    "test_queriable_svars",
-    "test_state_variable_titles",
-}
-_REDUCTIONS_WRAPPER_CLASSES = (
-    "TestServerWrapperReductions",
-    "TestLoopWrapperReductions",
-)
-# TestMergeDataFrames queries the parallel d3samp6 brick/beam with
-# per-proc-local labels (e.g. brick label 20 lives on one proc only);
-# the merged Rust result legitimately differs from the per-proc-unmerged
-# expectation. node-class methods use global labels and pass.
-_REDUCTIONS_MERGEDF_CLASS = "TestMergeDataFrames"
-_REDUCTIONS_MERGEDF_METHODS = {
-    "test_multiple_scalars",
-    "test_single_scalar",
-    "test_vector",
-    "test_vector_array",
-}
 # Serial methods that still route through a genuinely-unported engine.
 # The derived-variable *listing* surface landed (Phase H listing
 # sub-slice) so those promoted to green; only the Phase-3 write path
@@ -327,8 +228,11 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
     if key in _XFAIL:
         return _XFAIL[key]
     if mod == "test_milidatabase":
-        if cls in _MDB_PARALLEL_CLASSES and meth not in _MDB_PARALLEL_PASSING:
-            return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
+        # Phase I.4: the parallel handler classes (_MDB_PARALLEL_CLASSES)
+        # are fully promoted — the per-proc _MiliInternal wrapper +
+        # per-method reduce_function table reproduce upstream's exact
+        # contract bit-for-bit (decision 21). Only _MDB_PHASE_H_METHODS
+        # (empty) would remain.
         if meth in _MDB_PHASE_H_METHODS:
             return _MDB_PHASE_H_METHODS[meth]
     if mod == "test_derived":
@@ -337,43 +241,30 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
             or meth in _DERIVED_SERIAL_PASSING
         ):
             return None
+        # ParallelDerivedExpressions is promoted (Phase I.4): the
+        # wrapper forwards query per-proc and MiliDatabase respects the
+        # merge_results=False contract, so the per-proc derived result
+        # is bit-exact vs upstream.
         if cls == "ParallelDerivedExpressions":
-            return (
-                "parallel handler scope + derived value engine (Rust "
-                "DatabaseSet collapses the per-proc fan-out; Phase H "
-                "derived value sub-slice)"
-            )
+            return None
         if cls == "SerialDerivedExpressions":
             if meth in _DERIVED_DBL_NODTANG_BLOCKED:
                 return _DERIVED_DBL_NODTANG_REASON
         return "Phase H: derived value engine (next sub-slice)"
-    if mod == "test_adjacency" and cls in _ADJ_PARALLEL_CLASSES:
-        return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
+    # test_adjacency: _ADJ_PARALLEL_CLASSES promoted (Phase I.4) — the
+    # verbatim adjacency.py over the per-proc geometry rewrap is
+    # upstream's exact per-proc compute-then-merge.
     if mod == "test_reductions":
-        if cls == _REDUCTIONS_COMBINE_CLASS:
-            return "parallel handler scope (Rust DatabaseSet collapses the per-proc fan-out; Phase H)"
-        if (
-            cls in _REDUCTIONS_WRAPPER_CLASSES
-            and meth in _REDUCTIONS_WRAPPER_METHODS
-        ):
-            if meth in _REDUCTIONS_WRITE_METHODS:
-                return _REDUCTIONS_WRITE_METHODS[meth]
-            return (
-                "Phase I.4: merge_results=True now routes through the "
-                "_MiliInternal-over-Set adapter (I.3), but this accessor "
-                "resolves via fragment 0 only in the Rust core "
-                "(db0() — not a true cross-fragment merge), so it "
-                "differs from upstream's per-proc _MiliInternal + "
-                "reduce_<X>; needs the I.4 per-proc-list + reduce path"
-            )
-        if (
-            cls == _REDUCTIONS_MERGEDF_CLASS
-            and meth in _REDUCTIONS_MERGEDF_METHODS
-        ):
-            return "parallel handler scope (per-proc-local labels in parallel d3samp6; Phase H)"
+        # Phase I.4: TestCombineFunction / TestMergeDataFrames /
+        # TestServerWrapperReductions / TestLoopWrapperReductions are
+        # promoted (decision 21 — the per-proc list + verbatim
+        # reductions.* is upstream's exact algorithm over serial-gate
+        # bit-exact per-fragment engines, including the db0()-only
+        # accessors I.3 could not reproduce). Only the Phase-3 write
+        # path (append_state / copy_non_state_data) stays xfailed.
+        if meth in _REDUCTIONS_WRITE_METHODS:
+            return _REDUCTIONS_WRITE_METHODS[meth]
         if cls == "TestSerialReductions":
-            if meth in _REDUCTIONS_WRITE_METHODS:
-                return _REDUCTIONS_WRITE_METHODS[meth]
             if meth in _REDUCTIONS_PHASE_H_METHODS:
                 return _REDUCTIONS_PHASE_H_METHODS[meth]
     return None

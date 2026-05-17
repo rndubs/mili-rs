@@ -1,6 +1,6 @@
 # Phase I — parallel per-proc-unmerged surface
 
-> **Status: I.1 + I.2 + I.3 LANDED; I.4 next.** This is the self-contained
+> **Status: I.1 + I.2 + I.3 + I.4 LANDED — Phase I complete.** This is the self-contained
 > entry-point doc for the parallel slice. The summary + decision 20
 > live in [`m4.md`](m4.md) § "Phase I"; this file carries the
 > reproducible starting state so a fresh session can pick it up
@@ -275,17 +275,67 @@ first non-`M_INVALID_LABEL` across procs). Decision-19-compliant
 already-green merged milox parity tests green (it had regressed
 `test_connectivity_by_class[xmilics-d3samp6]`).
 
-### Phase I.4 — promote the parallel-handler xfail buckets
+### Phase I.4 — full parallel-handler surface  ✅ **LANDED**
 
-In `crates/mili-py/tests/test_upstream_readpath.py`, promote each as
-its Phase-I.x dependency lands (strict-xfail removed only when
-bit-exact): `_MDB_PARALLEL_CLASSES`, `_ADJ_PARALLEL_CLASSES`,
-`_REDUCTIONS_WRAPPER_CLASSES` / `_REDUCTIONS_COMBINE_CLASS` /
-`_REDUCTIONS_MERGEDF_CLASS`, `ParallelDerivedExpressions`. Whatever
-remains genuinely parallel-only (e.g. `use_shared_memory` subprocess
-semantics with no serial oracle) stays honestly xfailed with a
-concrete reason — never silently passed (the harness is strict: a
-passing xfailed case fails the harness until promoted).
+**Decision 21 (recorded — the I.4 architecture point; amends, does
+not reverse, decisions 19/20).** The central question was: port
+upstream `MiliDatabase`'s named-accessor + per-method `reduce_function`
+table verbatim (a), vs a per-method-name→reducer map on milox's
+generic forwarder (b); and how to source the per-proc list. **Decision:
+adopt the upstream contract verbatim, option (b) for the dispatch.**
+The `LoopWrapper`/`ServerWrapper` hold a **real per-proc list of milox
+`_MiliInternal`**, each opening **one fragment's A-file via
+`open_single`** (`reader.open_database` drops the trailing `A` →
+per-proc bases, exactly upstream `MiliDatabase.__init__`); they forward
+every callable as `[proc.m(*a,**kw) for proc in procs]` and rewrap the
+`geometry` property as a per-proc `_GeometryWrapper`. The
+`merge_results=True` reduction moves to `MiliDatabase`'s
+`_REDUCE_FUNCTIONS` (the upstream named-accessor→reducer map) applied
+in the generic `__getattr__` forwarder over the **already-verbatim**
+`milox.reductions` — option (b) chosen over (a) because `reductions.py`
+is a complete verbatim port and the wrapper is decision-20 non-parity
+plumbing, so a name→reducer map is the minimal faithful surface (no
+need to re-spell ~40 named accessors). `nodes`/`measure` are explicit
+upstream-verbatim methods; `query` honors `__postprocess`
+(raw per-proc list when `serial or not merge_results`, else `combine`);
+`__check_for_exceptions` added. `milox.adjacency` is now the **verbatim
+upstream `adjacency.py`** (pure non-parity merge plumbing over the
+per-proc Rust `geometry` rewrap — the decision-18/19 precedent one
+level out). This **supersedes** the I.3 `_MiliInternal`-over-Set
+mechanism *for the wrapper path*: the per-proc list + verbatim
+reductions/adjacency *is* upstream's exact algorithm over per-fragment
+engines that are each individually serial-gate bit-exact, so it is
+**bit-exact by construction wherever upstream is** — including the
+`db0()`-only accessors I.3 left honest-xfailed. The Rust `DatabaseSet`
+merge is **unchanged** and still backs the direct `_MiliInternal(set_db)`
+consumers (decision 19 invariant intact — Phase I added no new value
+math; I.4 did **not** need to extend the FFI, the I.1 `*_per_fragment()`
+surface is superseded for the wrapper path but kept).
+
+**Two faithful-contract fixes** (corpus/oracle wins; logged in
+status.md § Surprises): (1) `milox._MiliInternal.query` now catches the
+Rust `MiliPythonError` and returns an empty-but-shaped result + ERROR
+return code — upstream `_MiliInternal.__query` *never raises* (a
+fragment routinely lacks a class/svar; the empty-res+code shape is what
+lets the wrapper build a clean per-proc list and `parse_return_codes`
+raise only when *all* procs error). (2)
+`milox._MiliInternal.material_numbers` now returns an ndarray like
+upstream (was the Rust `list`).
+
+**Promotions.** The entire parallel-handler xfail surface in
+`crates/mili-py/tests/test_upstream_readpath.py`:
+`_MDB_PARALLEL_CLASSES`, `_ADJ_PARALLEL_CLASSES`,
+`_REDUCTIONS_WRAPPER_*` / `_REDUCTIONS_COMBINE_CLASS` /
+`_REDUCTIONS_MERGEDF_CLASS`, `ParallelDerivedExpressions`. milox
+**564 → 827 pass / 269 → 6 xfail** (`564+269 = 827+6 = 833`, fully
+accounted; strict-harness-verified zero genuine failures, zero
+regressions to the 564). The only remaining 6 xfails are the
+**Phase-3 write path** (`test_append_state`/`test_copy_non_state_data`
+×{Serial,Server,Loop}WrapperReductions) — a distinct unported slice,
+not a parallel-scope difference. No `use_shared_memory`
+subprocess-only case needed an honest-xfail: milox's `ServerWrapper`
+is a single-process identity and the upstream tests have no
+subprocess-spawn assertion the serial-equivalent loop fails.
 
 ## Out of Phase I (unchanged boundary)
 

@@ -11,13 +11,30 @@ imports repointed at ``milox``).
 
 from __future__ import annotations
 
-from typing import Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 from .reductions import combine
+
+
+def argument_to_ndarray(
+    argument: ArrayLike, dtype: Any
+) -> Optional[NDArray[Any]]:
+    """Verbatim port of upstream ``mili.utils.argument_to_ndarray``.
+
+    Convert an ArrayLike object into a numpy array of the specified
+    dtype, returning ``None`` if the conversion raises."""
+    try:
+        if np.isscalar(argument):
+            as_array = np.array([argument], dtype=dtype)
+        else:
+            as_array = np.array(argument, dtype=dtype)
+    except:  # noqa: E722 — upstream bare except
+        as_array = None
+    return as_array
 
 
 def query_data_to_dataframe(

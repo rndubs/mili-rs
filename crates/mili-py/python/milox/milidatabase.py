@@ -44,10 +44,62 @@ from .projection import (
     tri_to_nodal,
     truss_to_nodal,
 )
+from . import reductions
 from .reductions import combine
 from .utils import result_dictionary_to_dataframe
 
 __all__ = ["MiliDatabase", "MiliPythonError", "ResultModifier", "parse_return_codes"]
+
+
+# Upstream ``MiliDatabase``'s per-accessor ``reduce_function`` table
+# (``reference/mili-python/src/mili/milidatabase.py`` — each named
+# method calls ``__postprocess(self._mili.X(...), reduce_function=...)``).
+# Phase I.4 decision 21, option (b): milox keeps its generic
+# ``__getattr__`` forwarder and drives the per-method merge from this
+# name→reducer map over the verbatim ``milox.reductions`` port. A
+# method absent from the table is *not* a postprocessed ``MiliDatabase``
+# accessor upstream (it is read raw via ``db._mili.X()`` — e.g.
+# ``connectivity_ids`` / ``mesh_object_classes`` / ``subrecords`` /
+# ``parameters`` from ``grizinterface``), so it returns the raw per-proc
+# list under a wrapper exactly as upstream. ``nodes`` / ``query`` /
+# ``measure`` have bespoke handling (explicit methods below).
+_REDUCE_FUNCTIONS: Dict[str, Any] = {
+    "reload_state_maps": reductions.zeroth_entry,
+    "metadata": reductions.zeroth_entry,
+    "superclass_from_class_name": reductions.reduce_superclass_from_class_names,
+    "state_maps": reductions.zeroth_entry,
+    "srec_fmt_qty": reductions.zeroth_entry,
+    "mesh_dimensions": reductions.zeroth_entry,
+    "state_count": reductions.zeroth_entry,
+    "class_names": reductions.list_concatenate_unique_str,
+    "int_points_of_state_variable": reductions.list_concatenate_unique,
+    "element_sets": reductions.dictionary_merge_no_concat,
+    "integration_points": reductions.dictionary_merge_no_concat,
+    "times": reductions.zeroth_entry,
+    "queriable_svars": reductions.list_concatenate_unique_str,
+    "supported_derived_variables": reductions.zeroth_entry,
+    "derived_variables_of_class": reductions.list_concatenate_unique_str,
+    "classes_of_derived_variable": reductions.list_concatenate_unique_str,
+    "labels": reductions.reduce_labels,
+    "materials": reductions.zeroth_entry,
+    "material_numbers": reductions.list_concatenate_unique,
+    "connectivity": reductions.reduce_connectivity,
+    "faces": reductions.dictionary_merge_no_concat,
+    "material_classes": reductions.list_concatenate_unique_str,
+    "classes_of_state_variable": reductions.list_concatenate_unique_str,
+    "state_variables_of_class": reductions.list_concatenate_unique_str,
+    "state_variable_titles": reductions.dictionary_merge_no_concat,
+    "containing_state_variables_of_class": reductions.list_concatenate_unique_str,
+    "components_of_vector_svar": reductions.list_concatenate_unique_str,
+    "parts_of_class_name": reductions.list_concatenate,
+    "materials_of_class_name": reductions.list_concatenate,
+    "class_labels_of_material": reductions.list_concatenate,
+    "all_labels_of_material": reductions.dictionary_merge_concat,
+    "nodes_of_elems": reductions.reduce_nodes_of_elems,
+    "nodes_of_material": reductions.list_concatenate_unique,
+    "append_state": reductions.zeroth_entry,
+    "copy_non_state_data": reductions.zeroth_entry,
+}
 
 
 def parse_return_codes(
@@ -129,18 +181,37 @@ class MiliDatabase:
             # mdg_enum_to_string calls.
             args = tuple(mdg_enum_to_string(a) for a in args)
             kwargs = {k: mdg_enum_to_string(v) for k, v in kwargs.items()}
-            result = attr(*args, **kwargs)
+            results = attr(*args, **kwargs)
             # Upstream MiliDatabase.__postprocess order: snapshot the
-            # return code, clear it, *then* raise — so a raised error
-            # never leaves a stale code that re-raises on the next
-            # call. The Rust DatabaseSet already merged per-fragment
-            # results, so there is no Python-side reduce (decision 19).
+            # return code, clear it, raise (so a raised error never
+            # strands a stale code), then re-raise any per-proc
+            # exception the wrapper captured, then apply the
+            # per-accessor reduce when merge_results=True (decision 21).
             return_codes = engine.returncode()
             engine.clear_return_code()
             parse_return_codes(return_codes)
-            return result
+            self._check_for_exceptions(results)
+            if self.serial or not self.merge_results:
+                return results
+            reduce_function = _REDUCE_FUNCTIONS.get(name)
+            if reduce_function is None:
+                return results
+            return reduce_function(results)
 
         return _forward
+
+    def _check_for_exceptions(self, results: Any) -> None:
+        """Verbatim port of upstream
+        ``MiliDatabase.__check_for_exceptions``: a serial engine yields
+        a single result (raise it if it is an Exception); a wrapper
+        yields a per-proc list (raise the first Exception the
+        ``LoopWrapper``/``ServerWrapper`` ``__loop_caller`` captured)."""
+        if self.serial and isinstance(results, Exception):
+            raise results
+        if not self.serial and isinstance(results, list):
+            for res in results:
+                if isinstance(res, Exception):
+                    raise res
 
     def _postprocess_return_codes(self) -> None:
         """Upstream ``MiliDatabase.__postprocess`` return-code half
@@ -418,21 +489,30 @@ class MiliDatabase:
             svar_names = mdg_enum_to_string(svar_names)
 
         engine = self.__dict__["_mili"]
-        # __postprocess: the Rust DatabaseSet already merged, so combine
-        # is identity here (decision 19) — kept to mirror upstream.
-        result = combine(
-            engine.query(
-                svar_names,
-                entity_type_str,
-                material,
-                labels,
-                states,
-                ips,
-                write_data,
-                **kwargs,
-            )
+        # Upstream MiliDatabase.query: __postprocess(self._mili.query(...),
+        # reduce_function=reductions.combine). __postprocess returns the
+        # raw per-proc list when (serial or not merge_results) and
+        # combine(list) otherwise. The Rust per-fragment query is
+        # parity-correct primal/derived; combine / the modifier /
+        # projection layers are the decision-18 non-parity post-process.
+        results = engine.query(
+            svar_names,
+            entity_type_str,
+            material,
+            labels,
+            states,
+            ips,
+            write_data,
+            **kwargs,
         )
-        self._postprocess_return_codes()
+        return_codes = engine.returncode()
+        engine.clear_return_code()
+        parse_return_codes(return_codes)
+        self._check_for_exceptions(results)
+        if self.serial or not self.merge_results:
+            result = results
+        else:
+            result = combine(results)
 
         if modifier:
             result = self._process_query_modifier(
@@ -445,3 +525,60 @@ class MiliDatabase:
         if as_dataframe:
             return result_dictionary_to_dataframe(result)
         return result
+
+    def nodes(self) -> "np.ndarray":
+        """Verbatim port of upstream ``MiliDatabase.nodes``
+        (``milidatabase.py:168``).
+
+        Bespoke (not a ``__postprocess`` accessor): the
+        ``merge_results=True`` merge dedups node coordinates by the
+        first appearance of each (duplicated) node label across procs.
+        Reads the raw per-proc ``labels("node")`` / ``nodes()`` lists
+        from the engine directly, exactly as upstream."""
+        engine = self.__dict__["_mili"]
+        if self.serial or not self.merge_results:
+            return engine.nodes()
+        # Concatenate node labels (contains duplicates across procs).
+        nlabels = reductions.list_concatenate(engine.labels("node"))
+        # Index of first appearance of each node, original order.
+        _, indexes = np.unique(nlabels, axis=0, return_index=True)
+        indexes.sort()
+        nodes = np.concatenate(engine.nodes())
+        return nodes[indexes]
+
+    def measure(
+        self,
+        a_entity_type: Union[str, Any],
+        a_label: int,
+        b_entity_type: Union[str, Any],
+        b_label: int,
+        states: Optional[Union[List[int], int]] = None,
+    ) -> Any:
+        """Verbatim port of upstream ``MiliDatabase.measure``
+        (``milidatabase.py:882``).
+
+        Bespoke (not a ``__postprocess`` accessor): distance between
+        two elements' centroids over the parity-correct ``centroid``
+        derived query; ``reductions.combine`` collapses the per-proc
+        list (identity for the serial / merged case)."""
+        a_centroid = combine(
+            self.query("centroid", a_entity_type, labels=[a_label], states=states)
+        )
+        a_states = a_centroid["centroid"]["layout"]["states"]
+        a_data = a_centroid["centroid"]["data"]
+
+        b_centroid = combine(
+            self.query("centroid", b_entity_type, labels=[b_label], states=states)
+        )
+        b_data = b_centroid["centroid"]["data"]
+
+        x_dist = b_data[:, :, 0] - a_data[:, :, 0]
+        y_dist = b_data[:, :, 1] - a_data[:, :, 1]
+        z_dist = b_data[:, :, 2] - a_data[:, :, 2]
+
+        x_dist = x_dist * x_dist
+        y_dist = y_dist * y_dist
+        z_dist = z_dist * z_dist
+
+        distance = np.sqrt(x_dist + y_dist + z_dist).ravel()
+        return distance, a_states

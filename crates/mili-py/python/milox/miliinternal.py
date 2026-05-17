@@ -328,6 +328,14 @@ class _MiliInternal:
             for cls, lbls in self._db.all_labels_of_material(mat).items()
         }
 
+    def material_numbers(self) -> "np.ndarray":
+        # Upstream _MiliInternal.material_numbers (miliinternal.py:595)
+        # returns np.array(...) — an ndarray, not the Rust core's list.
+        # The wrapper's reduce_function (list_concatenate_unique) also
+        # yields an ndarray, so the serial/parallel type-equality
+        # assertions hold.
+        return np.array(self._db.material_numbers())
+
     def parameters(self) -> Dict[str, Any]:
         return self._db.parameters()
 
@@ -482,10 +490,45 @@ class _MiliInternal:
                     "State variable names must be a string or iterable "
                     "of strings"
                 ) from None
-        return self._db.query(
-            svar_names, class_sname, material, labels, states, ips,
-            write_data, **kwargs,
-        )
+        try:
+            return self._db.query(
+                svar_names, class_sname, material, labels, states, ips,
+                write_data, **kwargs,
+            )
+        except MiliPythonError as e:
+            # Upstream _MiliInternal.query never raises: every failure
+            # (svar/class absent on this fragment, no labels, bad
+            # states/ips, …) sets the ERROR return code and returns a
+            # well-formed but *empty* result dict keyed by the queried
+            # svars (miliinternal.py:__query — `return res`). For a
+            # parallel db a fragment routinely lacks a class/svar, so
+            # this leniency is what lets the LoopWrapper/ServerWrapper
+            # build a clean per-proc list (parse_return_codes then
+            # raises only when *all* procs error / the serial case),
+            # rather than the Rust exception aborting the whole fan-out.
+            self._err(str(e))
+            from .datatypes import QueryDict, QueryLayout
+
+            if isinstance(svar_names, str):
+                names = [svar_names]
+            else:
+                names = list(svar_names)
+            return {
+                name: QueryDict(
+                    data=np.empty([0], dtype=np.float32),
+                    layout=QueryLayout(
+                        states=np.empty([0], dtype=np.int32),
+                        labels=np.empty([0], dtype=np.int32),
+                        components=[],
+                        times=np.empty([0], dtype=np.float32),
+                    ),
+                    source="",
+                    class_name=class_sname,
+                    title="",
+                    modifier="",
+                )
+                for name in names
+            }
 
     # ---- forward already-ported accessors / raise for Phase H ----
     def __getattr__(self, name: str) -> Any:
