@@ -91,3 +91,35 @@ def upstream_mili():
 
 
 CASES = list(discover_cases())
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Closeout hard gate — strict 0-xfail.
+
+    The milox redirect surface is complete (Phase 3 landed; every
+    upstream read-path module redirected-and-promoted or consciously
+    excluded). With the xfail bucket empty, *any* xfail/xpass in the
+    milox suite means parity silently rotted (a redirected case quietly
+    started differing, or a passing case is still marked xfail). Fail
+    the whole session in that case so CI's ``test-milox`` job is a hard
+    gate, not best-effort.
+
+    Skip-not-fail is preserved: an absent submodule/oracle yields
+    *skips*, never xfails, so a bare local run (no
+    ``scripts/setup-parity.sh``) still reads green — same convention as
+    the rest of this harness and the Rust parity jobs."""
+    tr = session.config.pluginmanager.get_plugin("terminalreporter")
+    if tr is None:
+        return
+    xfailed = len(tr.stats.get("xfailed", []))
+    xpassed = len(tr.stats.get("xpassed", []))
+    if xfailed or xpassed:
+        tr.write_sep(
+            "=",
+            f"strict 0-xfail gate FAILED: {xfailed} xfailed / "
+            f"{xpassed} xpassed (milox redirect surface is declared "
+            f"complete — promote or consciously re-scope)",
+            red=True,
+            bold=True,
+        )
+        session.exitstatus = 1

@@ -170,6 +170,7 @@ impl PyMiliDatabase {
                     s.qty_svars,
                     s.svar_names,
                     s.ordinal_blocks,
+                    s.state_byte_offset,
                 )
             })
             .collect();
@@ -1959,6 +1960,7 @@ impl PyMiliDatabase {
                             s.qty_svars,
                             s.svar_names,
                             s.ordinal_blocks,
+                            s.state_byte_offset,
                         )
                     })
                     .collect();

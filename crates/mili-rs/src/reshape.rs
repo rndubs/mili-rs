@@ -45,6 +45,11 @@ pub struct SubrecInfo {
     /// match upstream `Subrecord.ordinal_blocks`
     /// (`afileIO.py:439-459`).
     pub ordinal_blocks: Vec<i64>,
+    /// Byte offset of this subrecord within a state's data block,
+    /// cumulative over the flattened subrecord list in srec order
+    /// (upstream `miliinternal.py:271-272`: `state_byte_offset =
+    /// offset; offset += srec.byte_size`).
+    pub state_byte_offset: i64,
 }
 
 /// Mirror of the `StateVariable` fields the read-path suite compares
@@ -224,8 +229,20 @@ impl Database {
     /// upstream's parser (`afileIO.py:430-462`).
     pub fn subrecords(&self, mesh: MeshId) -> Vec<SubrecInfo> {
         let mut out = Vec::new();
+        // Cumulative byte offset within a state's data block, in the
+        // flattened srec/subrecord declaration order — the byte-for-byte
+        // analogue of upstream's `offset` accumulator
+        // (`miliinternal.py:235,271-272`).
+        let mut running: i64 = 0;
         for srec in self.srecs().iter() {
             for sub in &srec.subrecords {
+                let state_byte_offset = running;
+                if let Ok((atoms, widths)) = crate::query::atoms_and_widths(sub, self.svars()) {
+                    let size = (sub.object_count() as i64).saturating_mul(
+                        crate::srec::derive_lumps(&atoms, &widths).bytes_per_object() as i64,
+                    );
+                    running = running.saturating_add(size);
+                }
                 let sclass = self
                     .meshes()
                     .mesh(mesh)
@@ -260,6 +277,7 @@ impl Database {
                     qty_svars: sub.svar_names.len() as i32,
                     svar_names: sub.svar_names.clone(),
                     ordinal_blocks,
+                    state_byte_offset,
                 });
             }
         }

@@ -73,6 +73,16 @@ jobs:
     # pytest parity harness (import milox vs upstream mili) on the
     # parity corpus + xmilics multi-fragment families. Skip-not-fail
     # when the corpus / oracle is absent, same as the Rust parity jobs.
+    #
+    # Hard gate (closeout, redirect-coverage): the harness includes
+    # `test_redirect_coverage_is_exhaustive` (every upstream
+    # reference/mili-python/tests/test_*.py is redirected-and-promoted
+    # or consciously EXCLUDED) and a strict 0-xfail
+    # `pytest_sessionfinish` check in conftest.py (any xfail/xpass fails
+    # the session). So this step enforces "every upstream read-path test
+    # promoted, 0 xfail" with no tolerance — a future submodule bump
+    # adding an unredirected test_*.py, or a silently-diverging case,
+    # fails CI here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
