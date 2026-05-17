@@ -270,6 +270,27 @@ Typed errors today; not in Phase 2 scope.
 Brief pointers — each has a fix in the code and the byte-layout docs
 were updated to match. Read the linked source for the full story.
 
+- **Rust-side corpus-coverage hard gate — the sibling of the milox
+  redirect-coverage guard** (`m4.md` decision 25, applied to the
+  parity/fixture suites; no new latent bug — the on-disk family set
+  already matched). `CLAUDE.md` § "skip-on-absent" warned the parity /
+  `*_fixtures.rs` / `smoke_full_corpus.rs` suites all *early-return
+  instead of failing* when a fixture family is absent, so with the
+  milox Python side now gated the remaining silent-rot path was a
+  corpus family quietly vanishing (emptied / partial submodule) or a
+  new upstream family nothing references. New
+  `crates/mili-rs/tests/parity_corpus_coverage.rs` (parity-feature-
+  gated, so it only bites under CI's `test-parity` job, which runs
+  `scripts/setup-parity.sh` first → the parity environment is present)
+  asserts the on-disk families under `serial/`/`parallel/`/`v3/`/`th/`
+  (`reference/mili-python`) + `xmilics/` (`reference/mili`) equal
+  exactly the accounted manifest ∪ `EXCLUDED` (mirrors
+  `smoke_full_corpus.rs::corpora()`'s canonical 14+2+3+2+9), and each
+  accounted family dir is non-empty. Per-submodule skip-not-fail
+  preserved for a bare local run; CI doc comment added to the
+  `test-parity` job. Audit delta: 30/30 families accounted, 0 latent
+  gaps — the milox audit flushed the only real bug (decision 25's
+  `state_byte_offset`); this is pure drift-proofing.
 - **Closeout redirect-coverage audit surfaced one latent milox
   metadata gap: `Subrecord.state_byte_offset` was never populated**
   (`m4.md` decision 25). Wiring the last two un-redirected read-path
