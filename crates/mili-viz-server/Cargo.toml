@@ -1,0 +1,28 @@
+[package]
+name = "mili-viz-server"
+version = "0.0.0"
+description = "Phase 4 M1 mili-viz server stub: in-process MiliViz transport, dispatch + broadcast."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+mili-viz-proto = { path = "../mili-viz-proto" }
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = "0.5"
+hyper-util = "0.1"
+
+[dev-dependencies]
+mili-viz-proto = { path = "../mili-viz-proto" }
+prost = "0.14"
+tonic = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "time"] }
+tokio-stream = "0.1"
+
+[lints]
+workspace = true

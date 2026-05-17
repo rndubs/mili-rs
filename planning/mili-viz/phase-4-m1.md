@@ -338,35 +338,41 @@ reasoning generalized to the protocol). M1 is a planning deliverable;
 this gate is what the *coding* M1 PR must satisfy and is recorded here
 so it is not reinvented:
 
-- [ ] `crates/mili-viz-proto` builds; `tonic` `build.rs` generates
+- [x] `crates/mili-viz-proto` builds; `tonic` `build.rs` generates
       Rust from the Δ1–Δ9 `.proto`; the message set matches
-      [§ M1 proto surface](#m1-proto-surface) exactly.
-- [ ] `mili-viz-server` stub serves `MiliViz` over an **in-process**
-      transport (in-memory channel, no TCP).
-- [ ] **Handshake test:** matching `protocol_version` → `compatible`;
+      [§ M1 proto surface](#m1-proto-surface) exactly. *(protoc-free
+      build — see Decision 9.)*
+- [x] `mili-viz-server` stub serves `MiliViz` over an **in-process**
+      transport (in-memory channel, no TCP). *(`spawn_in_process`,
+      `tokio::io::duplex`.)*
+- [x] **Handshake test:** matching `protocol_version` → `compatible`;
       a deliberately bumped version → `compatible == false` with
       `mismatch_detail` set and **no panic** (the Visit-without-the-
-      lock-in guarantee, scripting.md).
-- [ ] **Capability test:** a server built without an LLM backend omits
+      lock-in guarantee, scripting.md). → `handshake_match_and_mismatch`
+- [x] **Capability test:** a server built without an LLM backend omits
       `agent` from `HelloReply.capabilities`; with it, present.
-- [ ] **Command-equivalence test (scripting.md "Layer 0 ≡ raw"):** for
+      → `capability_agent_present_absent`
+- [x] **Command-equivalence test (scripting.md "Layer 0 ≡ raw"):** for
       every typed `Command` variant, the typed form and the equivalent
       `Command.raw` string produce an identical `StateDelta` sequence.
-      This is the M1 form of a parity test.
-- [ ] **Subscription fan-out test:** two in-process clients subscribe;
+      This is the M1 form of a parity test. → `layer0_equals_raw`
+- [x] **Subscription fan-out test:** two in-process clients subscribe;
       a mutation from one is observed by both, ordered, with
       `seq == CommandReply.delta_seq` and `origin_client_id` set;
       a late subscriber's stream opens with a `DELTA_SNAPSHOT`
       reflecting prior mutations (incl. an `AgentTranscript` field,
-      empty in M1).
-- [ ] **Frozen-stub test (Decision 7):** `AgentChat`, `Interrupt`,
+      empty in M1). → `subscription_fanout`
+- [x] **Frozen-stub test (Decision 7):** `AgentChat`, `Interrupt`,
       `CaptureFrame` return `UNIMPLEMENTED` naming the gating
       milestone; the messages compile and round-trip.
-- [ ] **Conformance test:** every `Command` `oneof` arm dispatches and
+      → `frozen_stubs_unimplemented`
+- [x] **Conformance test:** every `Command` `oneof` arm dispatches and
       broadcasts the correct `DeltaKind` (geometry effects stubbed:
-      `GeometryRef` empty until M2).
-- [ ] `status.md` milestone checklist + open-questions table updated;
-      `README.md` § "Open questions" records Decisions 2–6.
+      `GeometryRef` empty until M2). → `conformance_all_command_arms`
+      (Decision 8 pins the mapping)
+- [x] `status.md` milestone checklist + open-questions table updated;
+      `README.md` § "Open questions" records Decisions 2–6 (recorded
+      when those decisions landed in PR #44).
 
 No `cargo`/render/LLM behavior beyond the above is in M1. M2 attaches
 `mili-rs` and real geometry; the gate above is purely the contract +
@@ -386,6 +392,64 @@ transport + broadcast semantics.
   (Decisions 2, 3 fix the contract these consume; they add no M1
   proto).
 
+## M1 implementation notes (build reality; continues the decision log)
+
+These were forced by build/codegen reality during the coding M1 PR.
+Same `m4.md` decision-numbered framing; the corpus/toolchain wins on a
+conflict with the design draft, and the resolution is recorded here so
+M2+ does not re-litigate it.
+
+### Decision 8 — `Command` → `DeltaKind` is many-to-one *by design*; the mapping is pinned in code and by the conformance test (no `.proto` change)
+
+The frozen proto's `DeltaKind` has 10 values; the `Command` `oneof`
+has 17 arms. They are not 1:1 and were never meant to be: `DeltaKind`
+names *which aspect of session state changed*, while `Command` names
+*the action*. Coding M1 forced this latent ambiguity to a concrete,
+total function.
+
+**Decision: `DeltaKind` stays the state-aspect taxonomy it is; the
+many-to-one `Command → DeltaKind` mapping is owned by
+`mili_viz_server::command_delta_kind` and pinned by the
+`conformance_all_command_arms` test — no proto change.** The folds:
+`show`/`contour`/`cmap`/`legend`/`cutpln`/`render` →
+`DELTA_RESULT` (all mutate the displayed-result aspect; the distinct
+*visual* effects are M3+/M6); `rot`/`tx`/`scale`/`zoom`/`view set`/
+`view reset`/named-view → `DELTA_CAMERA` (camera is one
+server-authoritative aspect — scripting.md); `select`/`clrsel` →
+`DELTA_SELECTION`; `state`/`next…last` → `DELTA_STATE`. `raw` carries
+no kind of its own — it is parsed to a typed command first and takes
+that command's kind.
+
+**Trade-off recorded.** Adding a `DeltaKind` per command (e.g.
+`DELTA_CONTOUR`, `DELTA_CUTPLANE`) would make the broadcast
+self-describing without the mapping table. Rejected: it is exactly the
+frozen-contract change Decision 1 forbids, and it conflates "what
+changed" with "what was asked" — a subscriber re-extracting geometry
+cares about the *result* aspect regardless of whether `show` or `cmap`
+caused it. The mapping lives in code (testable, M2-evolvable) instead
+of in the wire.
+
+### Decision 9 — the proto is compiled protoc-free via `protox`; `protoc` is **not** a build dependency (keeps `setup-parity.sh` the only provisioning source of truth)
+
+`tonic-prost-build`'s default path shells out to `protoc`, which is
+**not** present on the parity/web runners (`setup-parity.sh`
+deliberately provisions only `mili`/`mili-python`; CLAUDE.md forbids
+widening it).
+
+**Decision: `crates/mili-viz-proto/build.rs` uses `protox` (a
+pure-Rust protobuf compiler) to produce a `FileDescriptorSet`, fed to
+`tonic_prost_build::configure().compile_fds(...)`. No `protoc` binary,
+no new system provisioning, no `setup-parity.sh` change.** This keeps
+the viz build self-contained under plain `cargo build` on the same
+runners the rest of the workspace uses.
+
+**Trade-off recorded.** Vendoring `protoc` via `protobuf-src` would
+track upstream `protoc` exactly. Rejected: it drags a C++/CMake build
+into a pure-Rust workspace and adds a heavyweight, flaky dependency for
+zero contract benefit — the same reasoning Decision 5 used to reject
+griz-in-CI. `protox` parses proto3 fully for this contract; if a future
+proto feature outruns it, that is an M-time revisit, not an M1 cost.
+
 ## Decision log (this doc)
 
 | # | Title | Resolves |
@@ -397,3 +461,5 @@ transport + broadcast semantics.
 | 5 | Derived-result validation: formulas-as-spec + committed golden + tolerance, no live griz | open Q8 |
 | 6 | Agent contract in M1; impl + local-LLM off the M1–M5 critical path | open Q7 |
 | 7 | Frozen-but-`UNIMPLEMENTED` stubs are a contract state | applies 1 & 6 |
+| 8 | `Command`→`DeltaKind` many-to-one by design; pinned in code, no proto change | M1 build reality |
+| 9 | protoc-free proto build via `protox`; no new provisioning | M1 build reality |

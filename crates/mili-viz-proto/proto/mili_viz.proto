@@ -1,0 +1,506 @@
+// mili-viz-proto — Phase 4 M1 wire contract.
+//
+// This is the LIVE, FROZEN M1 wire contract built by this crate's
+// tonic `build.rs`. It is the canonical copy; the design-time
+// original is planning/mili-viz/proto/mili_viz.proto. The body (from
+// `syntax = "proto3"` down) is the CONSOLIDATED M1 surface specified
+// by phase-4-m1.md: the union of the base griz command vocabulary
+// (README.md), the scripting multi-client surface (scripting.md), and
+// the server-hosted agent surface (client.md). It supersedes the
+// pre-agent draft @ 5bd8195; every change is enumerated as Δ1–Δ9 in
+// phase-4-m1.md Decision 1. The body is FROZEN — do not redesign it
+// here; changes go through a planning revision. The agent RPCs are
+// frozen here but return UNIMPLEMENTED until Phase 4/5 M6
+// (phase-4-m1.md Decisions 6 & 7).
+//
+// Design rules (see scripting.md / README.md / phase-4-m1.md):
+//   * The command vocabulary is the griz command set, unchanged.
+//   * Camera is server-authoritative; every client (egui window,
+//     Python script) is a peer that mutates via Execute and observes
+//     via the Subscribe stream.
+//   * Bulk geometry does NOT travel in protobuf. Responses carry an
+//     Arrow Flight ticket; vertex/index/color buffers ride Flight.
+//   * The session/connection file (~/.griz/sessions/<id>.json) is
+//     JSON on disk, not proto. Hello is the on-wire handshake that
+//     the token in that file authenticates.
+
+syntax = "proto3";
+
+package mili_viz.v1;
+
+// ---------------------------------------------------------------------------
+// Service
+// ---------------------------------------------------------------------------
+
+service MiliViz {
+  // Handshake. First call on any connection. Negotiates protocol
+  // version + capabilities and authenticates the session token. A
+  // version/capability mismatch is reported here (client warns),
+  // never a crash — this is the guarantee Visit buys with
+  // co-compilation, bought instead with a wire contract.
+  rpc Hello(HelloRequest) returns (HelloReply);
+
+  // Apply one command (or a ';'-joined Layer-0 stream). Mutates
+  // server-authoritative session state. The resulting StateDeltas
+  // are broadcast to ALL subscribers, including the caller.
+  rpc Execute(Command) returns (CommandReply);
+
+  // Server -> client broadcast of authoritative state changes.
+  // Drives both live GUI sync and the Python `@s.on(...)` hooks.
+  // The stream opens with a Snapshot delta describing current state.
+  rpc Subscribe(SubscribeRequest) returns (stream StateDelta);
+
+  // Pull result data back to the caller. Small results inline;
+  // large ones set `flight` and the client fetches via Arrow Flight.
+  // Also the data path for the client-side pick "describe" readout
+  // (phase-4-m1.md Decision 2) and time-history (Decision 3).
+  rpc Query(QueryRequest) returns (QueryReply);
+
+  // --- Agent surface (phase-4-m1.md Decision 1 Δ1–Δ3) -------------
+  // Frozen in M1; server-side implementation is Phase 4/5 M6 and is
+  // gated behind the `agent` capability (Decision 6). A server with
+  // no LLM backend returns UNIMPLEMENTED here and omits `agent` from
+  // HelloReply.capabilities so a conformant client hides the panel.
+
+  // Client -> server user turn. The server runs the agent loop; the
+  // agent's commands flow through the SAME internal dispatch as
+  // Execute, so they broadcast as ordinary StateDeltas tagged with
+  // the agent's origin_client_id. Token/tool/status events ride the
+  // Subscribe stream as DELTA_AGENT (not this reply).
+  rpc AgentChat(AgentChatRequest) returns (AgentChatReply);
+
+  // Barge-in: cancel the in-flight agent turn. Always reachable
+  // (the panel's persistent Stop). Empty turn_id = current turn.
+  rpc Interrupt(InterruptRequest) returns (InterruptReply);
+
+  // Offscreen framebuffer capture: (w,h,format) -> encoded bytes.
+  // Backs BOTH the agent vision tool and Python `s.snapshot()` —
+  // one capability, two callers. Named CaptureFrame (not Snapshot)
+  // to avoid colliding with the full-state `Snapshot` delta below
+  // (phase-4-m1.md Decision 1 Δ7).
+  rpc CaptureFrame(FrameRequest) returns (FrameReply);
+}
+
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
+
+message HelloRequest {
+  // Semver of the proto contract the client was generated against.
+  string protocol_version = 1;
+  // Token from the session/connection file. Empty for in-process.
+  string session_token = 2;
+  // Free-form, e.g. "griz-py/0.1.0", "egui-client/0.1.0".
+  string client_id = 3;
+  // Optional capabilities the client understands (forward-compat).
+  repeated string capabilities = 4;
+}
+
+message HelloReply {
+  string server_protocol_version = 1;
+  bool compatible = 2;
+  // Human-readable note when compatible == false (client warns).
+  string mismatch_detail = 3;
+  // Capabilities the server actually supports (intersection guidance).
+  // Reserved value `agent` (phase-4-m1.md Decision 1 Δ9): present iff
+  // an LLM backend is configured. The client keys the AI Assistant
+  // panel's existence off it — absent => panel hidden, no error.
+  repeated string capabilities = 4;
+  // Echoed so a script can confirm which session it attached to.
+  SessionInfo session = 5;
+}
+
+message SessionInfo {
+  string id = 1;
+  uint32 pid = 2;
+  string host = 3;
+  uint32 port = 4;
+  // Loaded run root, empty if nothing loaded yet.
+  string db = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Commands  (griz vocabulary; see reference/griz/Src/interpret.c)
+// ---------------------------------------------------------------------------
+
+message Command {
+  oneof cmd {
+    // Layer-0 escape hatch: a raw griz/grizinit line or ';'-joined
+    // stream. `session.command(...)` and `run_script(...)` use this.
+    // Layer-1 calls SHOULD use the typed variants below so the
+    // server need not re-parse, but the two MUST be equivalent
+    // (enforced by an integration test).
+    string raw = 1;
+
+    Load load = 2;          // load <root>
+    Close close = 3;        // close
+    SetState set_state = 4; // state <N>
+    Step step = 5;          // next | prev | first | last
+    Select select = 6;      // select <class> <range>
+    ClearSelection clrsel = 7;   // clrsel <class>
+    Show show = 8;          // show <result> [opts]
+    View view = 9;          // rot|tx|ty|tz|scale|zf|zb / set / reset
+    Isosurface iso = 10;    // iso on/off <result> <min> <max>
+    Contour contour = 11;   // contour <result>
+    MaterialVisibility material = 12; // enable|disable <class> [<mat>]
+    CutPlane cutplane = 13; // cutpln / cutrpln
+    Colormap colormap = 14; // cmap / named maps
+    LegendLimits legend = 15;
+    NamedView named_view = 16;   // save/restore/list named views
+    Render render = 17;          // offscreen-capable image/animation
+  }
+}
+
+message Load   { string root = 1; }
+message Close  {}
+
+message SetState { uint32 state = 1; }   // 1-based, mirrors griz
+
+message Step {
+  enum Dir { NEXT = 0; PREV = 1; FIRST = 2; LAST = 3; }
+  Dir dir = 1;
+}
+
+message Select {
+  string class_name = 1;
+  // griz-style range string, e.g. "1-100,150,200-210".
+  string range = 2;
+}
+message ClearSelection { string class_name = 1; }
+
+message Show {
+  string result = 1;        // primal svar or derived name
+  string component = 2;     // e.g. "eff" for stress; empty if n/a
+  map<string, string> opts = 3;
+}
+
+message View {
+  oneof op {
+    Rotate rotate = 1;       // rot <axis> <angle>
+    Translate translate = 2; // tx/ty/tz <d>
+    Scale scale = 3;         // scale <f>
+    Zoom zoom = 4;           // zf / zb
+    SetCamera set = 5;       // absolute camera
+    bool reset = 6;          // view reset
+  }
+}
+message Rotate    { double x = 1; double y = 2; double z = 3; } // degrees
+message Translate { double dx = 1; double dy = 2; double dz = 3; }
+message Scale     { double factor = 1; }
+message Zoom      { double factor = 1; }
+message SetCamera {
+  double azimuth = 1;
+  double elevation = 2;
+  double distance = 3;
+  // Optional explicit focal point; unset = keep current.
+  optional double fx = 4;
+  optional double fy = 5;
+  optional double fz = 6;
+}
+
+message Isosurface {
+  string result = 1;
+  bool on = 2;                 // iso on/off
+  repeated double levels = 3;  // explicit isovalues
+  // Or a count of evenly spaced levels between (min,max). If both
+  // set, `levels` wins.
+  uint32 count = 4;
+  optional double min = 5;
+  optional double max = 6;
+}
+
+message Contour { string result = 1; uint32 count = 2; }
+
+message MaterialVisibility {
+  bool enable = 1;             // enable vs disable
+  string class_name = 2;       // optional, empty = all
+  optional uint32 material = 3;
+}
+
+message CutPlane {
+  double ox = 1; double oy = 2; double oz = 3; // origin
+  double nx = 4; double ny = 5; double nz = 6; // normal
+  bool relative = 7;           // cutrpln vs cutpln
+}
+
+message Colormap { string name = 1; }          // "cool", "jet", ...
+
+message LegendLimits {
+  // Unset bound = autoscale that end.
+  optional double min = 1;
+  optional double max = 2;
+}
+
+message NamedView {
+  enum Op { SAVE = 0; RESTORE = 1; LIST = 2; }
+  Op op = 1;
+  string name = 2;
+}
+
+message Render {
+  string path = 1;             // server-side path, or empty -> inline
+  uint32 width = 2;
+  uint32 height = 3;
+  // For animations: render these states in order. Empty = current.
+  repeated uint32 states = 4;
+  // Container hint when states given: "png" frame or "mp4".
+  string format = 5;
+}
+
+message CommandReply {
+  bool ok = 1;
+  string error = 2;            // populated iff !ok
+  // Monotonic id of the StateDelta this command produced, so a
+  // caller can correlate its Execute with the broadcast it sees.
+  uint64 delta_seq = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Subscription / state deltas
+// ---------------------------------------------------------------------------
+
+message SubscribeRequest {
+  // Optional filter; empty = all delta kinds.
+  repeated DeltaKind kinds = 1;
+}
+
+enum DeltaKind {
+  DELTA_UNSPECIFIED = 0;
+  DELTA_SNAPSHOT = 1;     // full state, sent once at stream open
+  DELTA_LOADED = 2;
+  DELTA_STATE = 3;
+  DELTA_SELECTION = 4;
+  DELTA_RESULT = 5;
+  DELTA_ISOSURFACE = 6;
+  DELTA_CAMERA = 7;
+  DELTA_MATERIALS = 8;
+  DELTA_CLOSED = 9;
+  DELTA_AGENT = 10;       // phase-4-m1.md Decision 1 Δ4: agent
+                          // transcript/tool/status events ride the
+                          // existing Subscribe stream so every client
+                          // mirrors the conversation (camera-like).
+}
+
+message StateDelta {
+  uint64 seq = 1;              // monotonic, matches CommandReply.delta_seq
+  string origin_client_id = 2; // who caused it ("" = server)
+  DeltaKind kind = 3;
+
+  oneof payload {
+    Snapshot snapshot = 4;
+    LoadedState loaded = 5;
+    uint32 state = 6;          // new 1-based state index
+    SelectionState selection = 7;
+    ResultState result = 8;
+    IsosurfaceState isosurface = 9;
+    CameraState camera = 10;
+    MaterialsState materials = 11;
+    bool closed = 12;
+    AgentEvent agent = 13;     // phase-4-m1.md Decision 1 Δ5
+  }
+}
+
+// Full session-state delta, sent once at Subscribe stream open
+// (DELTA_SNAPSHOT). NOTE: this is the *session state* snapshot, NOT a
+// framebuffer capture — pixel capture is CaptureFrame/FrameReply
+// (phase-4-m1.md Decision 1 Δ7).
+message Snapshot {
+  LoadedState loaded = 1;
+  uint32 state = 2;
+  SelectionState selection = 3;
+  ResultState result = 4;
+  CameraState camera = 5;
+  MaterialsState materials = 6;
+  // phase-4-m1.md Decision 1 Δ8: a late-joining client gets the
+  // running agent transcript + status here, same as camera/selection.
+  // Empty in M1 (agent loop is M6, Decision 6).
+  AgentTranscript agent = 7;
+}
+
+message LoadedState {
+  string db = 1;
+  uint32 num_states = 2;
+  repeated double state_times = 3;
+  repeated string class_names = 4;
+}
+
+message SelectionState {
+  // class_name -> range string currently selected.
+  map<string, string> by_class = 1;
+}
+
+message ResultState {
+  string result = 1;
+  string component = 2;
+  double min = 3;
+  double max = 4;
+  // Geometry/colors for the active result ride Arrow Flight.
+  GeometryRef geometry = 5;
+}
+
+message IsosurfaceState {
+  string result = 1;
+  repeated double levels = 2;
+  GeometryRef geometry = 3;
+}
+
+message CameraState {
+  double azimuth = 1;
+  double elevation = 2;
+  double distance = 3;
+  double fx = 4;
+  double fy = 5;
+  double fz = 6;
+}
+
+message MaterialsState {
+  // material id -> visible
+  map<uint32, bool> visible = 1;
+}
+
+// Pointer to bulk data served over Arrow Flight, never inline.
+message GeometryRef {
+  bytes flight_ticket = 1;
+  // Arrow schema name / layout id so the client knows how to read it
+  // (e.g. "verts_f32x3+idx_u32+color_rgba8").
+  string layout = 2;
+  uint64 num_vertices = 3;
+  uint64 num_indices = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Query  (data back into Python — the real scripting payoff)
+// ---------------------------------------------------------------------------
+
+message QueryRequest {
+  string result = 1;
+  string class_name = 2;
+  repeated int64 labels = 3;   // empty = all
+  repeated uint32 states = 4;  // empty = current
+  string component = 5;
+}
+
+message QueryReply {
+  bool ok = 1;
+  string error = 2;
+  oneof data {
+    InlineTable inline = 3;    // small results
+    bytes flight_ticket = 4;   // large -> Arrow Flight (Arrow table)
+  }
+}
+
+// Minimal inline carrier; large/typed data uses Flight instead so we
+// don't reinvent Arrow in protobuf.
+message InlineTable {
+  repeated int64 labels = 1;
+  repeated uint32 states = 2;
+  // Row-major [len(states) x len(labels) x components].
+  repeated double values = 3;
+  uint32 components = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Agent  (phase-4-m1.md Decision 1 Δ6 — server-hosted agent, client.md)
+//
+// FROZEN in M1, IMPLEMENTED in Phase 4/5 M6 (Decision 6/7). The agent
+// is a peer of the command vocabulary: every action it takes is an
+// ordinary Command producing an ordinary StateDelta, so it inherits
+// server-authoritative sync for free. These messages add the user
+// turn, barge-in, framebuffer capture, and the broadcast event stream;
+// they do NOT add a privileged subsystem or touch the geometry/Flight
+// path.
+// ---------------------------------------------------------------------------
+
+message AgentChatRequest {
+  string text = 1;
+  // Optional "[attach frame]" — the user pinned the current viewport
+  // to this message. The server already has the framebuffer; this is
+  // just the intent flag + optional pre-encoded bytes for remote.
+  bool attach_frame = 2;
+  bytes attached_frame = 3;          // optional, encoded; empty = let
+  string attached_frame_format = 4;  // server capture it ("png"/"jpeg")
+}
+
+message AgentChatReply {
+  bool ok = 1;
+  string error = 2;           // populated iff !ok (e.g. UNIMPLEMENTED
+                              // detail in M1, or no `agent` capability)
+  // Stable id for this turn; Interrupt(turn_id) cancels it and the
+  // DELTA_AGENT events carry it.
+  string turn_id = 3;
+}
+
+message InterruptRequest { string turn_id = 1; } // empty = current turn
+message InterruptReply   { bool ok = 1; string error = 2; }
+
+message FrameRequest {
+  uint32 width = 1;
+  uint32 height = 2;
+  string format = 3;          // "png" | "jpeg"
+}
+message FrameReply {
+  bool ok = 1;
+  string error = 2;
+  bytes image = 3;            // encoded frame bytes
+  string format = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+// One agent event, broadcast to ALL subscribers as a StateDelta with
+// kind == DELTA_AGENT. Every client mirrors the conversation (shared
+// session state, like the camera).
+message AgentEvent {
+  string turn_id = 1;
+  oneof ev {
+    AgentStatus status = 2;       // thinking/running/idle/interrupted/error
+    AgentToken token = 3;         // assistant text delta (streaming)
+    AgentToolBegin tool_begin = 4;
+    AgentToolEnd tool_end = 5;
+    AgentUserTurn user_turn = 6;  // echo the human's message to all
+                                  // clients (shared transcript)
+  }
+}
+
+enum AgentStatusKind {
+  AGENT_IDLE = 0;
+  AGENT_THINKING = 1;
+  AGENT_RUNNING = 2;
+  AGENT_INTERRUPTED = 3;
+  AGENT_ERROR = 4;
+}
+message AgentStatus { AgentStatusKind kind = 1; string detail = 2; }
+
+message AgentToken { string text = 1; }
+
+// Inline collapsed transcript line, e.g. summary = "ran: state 47;
+// show sx"; expanding shows `detail` (the exact Command/Query).
+message AgentToolBegin {
+  string call_id = 1;
+  string summary = 2;
+  string detail = 3;
+}
+message AgentToolEnd {
+  string call_id = 1;
+  bool ok = 2;
+  string result_summary = 3;   // e.g. "sx -> [0, 5.2e4]"
+  // If the tool was a mutating Command, the StateDelta it produced,
+  // so the provenance journal can correlate (origin_client_id is the
+  // agent's stable id).
+  uint64 delta_seq = 4;
+}
+message AgentUserTurn { string text = 1; bool had_frame = 2; }
+
+// Transcript replay for a late-joining client, carried in the opening
+// DELTA_SNAPSHOT (Snapshot.agent). Empty in M1.
+message AgentTranscript {
+  repeated AgentMessage messages = 1;
+  AgentStatus status = 2;       // current agent status at join time
+}
+message AgentMessage {
+  string role = 1;              // "user" | "assistant"
+  string text = 2;
+  // Collapsed tool lines already rendered for this message, in order.
+  repeated string tool_lines = 3;
+  string turn_id = 4;
+}
