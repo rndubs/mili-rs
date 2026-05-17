@@ -8,7 +8,7 @@
 //! the parity-exact primal `nodpos` query. The encoded blob layout is
 //! frozen by `planning/mili-viz/phase-4-m2.md` Decision 11.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use mili_rs::{Database, MeshId, QueryArgs, StateValues, Superclass};
 
@@ -378,19 +378,52 @@ impl MeshTopology {
         Some((scalar, lo, hi))
     }
 
-    /// Encode the current-state hull. `scalar` (per-vertex, phase-4-m3
-    /// Decision 14) yields the `MVG2` layout; `None` is the M2 `MVG1`
-    /// bare hull, byte-identical to before.
-    pub fn encode(&self, db: &Database, state: u32, scalar: Option<&[f32]>) -> Vec<u8> {
+    /// A material is visible unless `materials` maps it to `false`
+    /// (phase-4-m4.md Decision 16 — never-named materials stay
+    /// visible; `disable` sets `false`).
+    fn material_visible(materials: &BTreeMap<u32, bool>, mat: u32) -> bool {
+        materials.get(&mat) != Some(&false)
+    }
+
+    /// Triangle list filtered to visible-material triangles, in the
+    /// original order (phase-4-m4.md Decision 16). With nothing
+    /// disabled this is the full list in the M2/M3 order, so the
+    /// encoded blob stays byte-identical for the frozen tests.
+    fn visible_triangles(&self, materials: &BTreeMap<u32, bool>) -> (Vec<u32>, Vec<u32>) {
+        let mut idx = Vec::with_capacity(self.indices.len());
+        let mut mat = Vec::with_capacity(self.tri_material.len());
+        for (t, &m) in self.tri_material.iter().enumerate() {
+            if Self::material_visible(materials, m) {
+                idx.extend_from_slice(&self.indices[t * 3..t * 3 + 3]);
+                mat.push(m);
+            }
+        }
+        (idx, mat)
+    }
+
+    /// Encode the current-state hull, dropping triangles of disabled
+    /// materials (phase-4-m4.md Decision 16). `scalar` (per-vertex,
+    /// phase-4-m3 Decision 14) yields the `MVG2` layout; `None` is the
+    /// M2 `MVG1` bare hull. With no material disabled the bytes are
+    /// identical to M2/M3. Returns the blob and the post-filter
+    /// `num_indices` for the `GeometryRef`.
+    pub fn encode(
+        &self,
+        db: &Database,
+        state: u32,
+        scalar: Option<&[f32]>,
+        materials: &BTreeMap<u32, bool>,
+    ) -> (Vec<u8>, u64) {
         let verts = self.coords_at_state(db, state);
         let n_verts = (verts.len() / 3) as u64;
-        let n_idx = self.indices.len() as u64;
+        let (indices, tri_material) = self.visible_triangles(materials);
+        let n_idx = indices.len() as u64;
         let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
 
         let mut buf = Vec::with_capacity(
             24 + verts.len() * 4
-                + self.indices.len() * 4
-                + self.tri_material.len() * 4
+                + indices.len() * 4
+                + tri_material.len() * 4
                 + if with_scalar { verts.len() / 3 * 4 } else { 0 },
         );
         buf.extend_from_slice(if with_scalar { b"MVG2" } else { b"MVG1" });
@@ -400,10 +433,10 @@ impl MeshTopology {
         for f in &verts {
             buf.extend_from_slice(&f.to_le_bytes());
         }
-        for i in &self.indices {
+        for i in &indices {
             buf.extend_from_slice(&i.to_le_bytes());
         }
-        for m in &self.tri_material {
+        for m in &tri_material {
             buf.extend_from_slice(&m.to_le_bytes());
         }
         if with_scalar {
@@ -411,15 +444,11 @@ impl MeshTopology {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
         }
-        buf
+        (buf, n_idx)
     }
 
     pub fn num_vertices(&self) -> u64 {
         self.node_count as u64
-    }
-
-    pub fn num_indices(&self) -> u64 {
-        self.indices.len() as u64
     }
 
     pub fn mesh_id(&self) -> MeshId {
