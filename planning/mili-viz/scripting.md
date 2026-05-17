@@ -72,6 +72,14 @@ the griz command set). What is added:
 This is a larger surface than "server accepts strings; client emits
 strings," so it belongs in M1 explicitly rather than being assumed.
 
+The concrete draft lives at `proto/mili_viz.proto` — a design
+artifact, not a built crate yet. It moves into
+`crates/mili-viz-proto/proto/` with a `tonic` `build.rs` when
+Phase 4 M1 starts. Layer-1 API calls lower to the typed `Command`
+variants there; `session.command(...)` / `run_script(...)` use the
+`Command.raw` escape hatch, and the two MUST stay equivalent
+(integration test).
+
 ## Connection model
 
 Three modes; interactive `attach()` is the priority.
