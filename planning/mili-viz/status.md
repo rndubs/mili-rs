@@ -9,8 +9,11 @@
 ## TL;DR — where we are
 
 - **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families; + M5d ✅: the `*_alt` trig principal-strain variants — core kernel + viz routing), M6 ✅ (remote transport) landed.** The derived family is now **fully complete**: the last deferral (`*_alt`, `phase-4-m5c.md` Decision 28) is discharged — the parity-gated `mili_rs::compute_principal_strain_alt` core kernel + its trivial viz seam landed (`phase-4-m5d.md`; `../mili-py/m4.md` Decision 27).
-- **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
-  Phase 4 M1; now unblocked).
+- **Phase 5 (`mili-viz` client): 🟢 IN PROGRESS — M1 ✅ landed**
+  (`wgpu` renderer skeleton: `crates/mili-viz-client`, orbit camera +
+  hard-coded triangle, render-to-texture-first; gating test
+  `tests/m1_renderer.rs` — always-on camera math + skip-on-absent
+  headless GPU render). M2–M6 ⏳ not started.
 - **Phase 6 (`pygriz` scripting client): ⏳ NOT STARTED** — scaffold
   landed (`python/pygriz/`, the new top-level `python/` tree); a third
   pure-Python client of the frozen contract, gated only on Phase 4 M1,
@@ -170,6 +173,7 @@
 | [`phase-4-m5c.md`](phase-4-m5c.md) | **The buildable Phase 4 M5 third-slice scope (`surfstrain*` + nodal-time families).** Surface strain + nodal displacement/velocity/acceleration behind the frozen contract; Decisions 28–31 (family set = nodal-time + `surfstrain{x,y,z,xy,yz,zx}`, `*_alt` re-deferred — no parity-exact `mili-rs` kernel, belongs in a core sub-slice, also corrects Decision 22's "nodal-time already M3-reachable" imprecision; nodal-time via a node-direct branch group + a factored M3 node→vertex helper, element scatter untouched; `surfstrain*` via a separate `scatter_hex_faces` per-face Hex gather over the parity-exact `surface_strain_query` + a viz-local canonical face table, M5/M5b/M3 byte-stable; gating test = the exact displacement-magnitude norm identity + structural/state-tracking, no cross-cardinality checks). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5d.md`](phase-4-m5d.md) | **The buildable Phase 4 M5d scope (the `*_alt` griz closed-form trig principal-strain variants) — discharges `phase-4-m5c.md` Decision 28.** Two-part: Part A is a `mili-rs` **core** derived sub-slice (`compute_principal_strain_alt` + `PrincipalStrainAlt`/`*_alt_spec`/`_primals`, wired through `crates/mili-py`, gated vs the `mili` oracle to a tight **f32 tolerance** — not bitwise — because numpy's float32 `arccos`/`cos` are numpy's own SIMD polynomials, ≠ libm, not cross-language bit-reproducible; recorded in `../mili-py/m4.md` Decision 27); Part B is the trivial viz routing (Decisions 32–34: own `PrincipalStrainAlt` enum mirroring upstream's separate `compute_function`s, the verbatim M5b element-scatter branch with only `*_spec`/`*_primals`/`compute_*` swapped; gating test = single-shared-gather invariants only — structural + the per-vertex principal-ordering `1≥2≥3` identity + state-tracking + totality/Decision-28 closure; M5c's `*_alt`→bare-hull assertion intentionally removed, superseded). No proto change, no `parity` feature in `mili-viz-server`; M5/M5b/M5c/M3/M6 byte-stable | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m6.md`](phase-4-m6.md) | **The buildable Phase 4 M6 scope (remote transport).** gRPC + Arrow Flight over TCP behind the frozen contract; Decisions 25–27 (real Flight + gRPC TCP transport redeems `phase-4-m2.md` Decision 10 — its tonic-version premise is now factually false but the deferral was still correct; ticket/blob/layout byte-stable; in-process seam kept. Flight via the canonical vendored `Flight.proto` on the existing protoc-free `protox` path — zero change to the frozen `mili_viz.proto`; only `DoGet` implemented, other Flight RPCs `UNIMPLEMENTED`; verbatim opaque blob in `FlightData.data_body`; heavy `arrow-flight` crate rejected for dependency surface. `serve_tcp(addr)` pre-binds a `TcpListener`, co-serves both services on one port; gating test binds a real ephemeral `127.0.0.1:0`). No `mili_viz.proto`/blob/ticket change | ✅ pinned + landed (2026-05-17) |
+| [`phase-5-m1.md`](phase-5-m1.md) | **The buildable Phase 5 M1 scope (`wgpu` renderer skeleton).** First client-side milestone: a standalone `crates/mili-viz-client` (`wgpu`/`winit`/`glam`, **no** mili/proto/server dep — README "No mili involvement"). Decisions 38–40 (standalone crate, transport attaches at M2; render-to-texture-first so the gating test is a real headless GPU render with skip-on-absent, always-on camera-math half; orbit `Camera` is the reusable tested core with field shape aligned 1:1 to the frozen proto `CameraState`, triangle is throwaway scaffolding). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m1.md`](phase-6-m1.md) | **The buildable Phase 6 M1 scope (`pygriz` scaffold + stubs + connect/handshake).** The scripting client gets an implementation home: a third pure-Python client of the frozen contract, gated only on Phase 4 M1 (independent of the Phase 5 renderer). Decisions 35–37 (top-level `python/` tree, dist `pygriz` / import `griz`, pure-Python no-pyo3; stubs are gitignored build output from the one canonical proto; M1 is Layer-0-only — reuse the server's `parse_raw`, Layer-1 + the Layer-0≡Layer-1 test is M3). No proto change | ✅ pinned (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` is authoritative) |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake. **Implementation home: Phase 6** ([`phase-6-m1.md`](phase-6-m1.md)) | ✅ resolved |
@@ -348,10 +352,28 @@ expanded by `scripting.md` / `client.md`. None started.
       `remote_transport_grpc_and_flight_over_tcp`; M1's six + M2 +
       M3 + M4 + M5 + M5b tests unchanged and green.
 
-## Phase 5 — `mili-viz` client (NOT STARTED, gated on Phase 4 M1)
+## Phase 5 — `mili-viz` client (IN PROGRESS — M1 ✅ landed)
 
-- [ ] **M1 — `wgpu` renderer skeleton** (window, camera, hard-coded
-      triangle).
+- [x] **M1 — `wgpu` renderer skeleton.** ✅ **Landed.** New
+      standalone crate `crates/mili-viz-client` (`wgpu` 29 / `winit`
+      0.30 / `glam`; **no** `mili-rs`/`mili-viz-proto`/`mili-viz-server`
+      dependency — README "No mili involvement"). Orbit `Camera`
+      (`azimuth`/`elevation`/`distance` + focus, field-aligned 1:1 to
+      the frozen proto `CameraState`) + a hard-coded triangle through
+      a minimal pipeline. Renderer is render-to-texture-first
+      (`render_to_image`); the windowed `run()` path is a thin
+      `winit::ApplicationHandler` wrapper around the same `Renderer`.
+      No proto change; no Phase 4 crate touched (server's frozen
+      tests unaffected). Scope/decisions:
+      [`phase-5-m1.md`](phase-5-m1.md) (Decisions 38–40). Gating
+      test: `crates/mili-viz-client/tests/m1_renderer.rs` — four
+      always-on `camera_*` view-projection assertions +
+      `headless_render_draws_triangle_over_clear` (real off-screen
+      GPU render asserting clear-corner vs triangle-center;
+      skip-on-absent when no `wgpu` adapter, per CLAUDE.md /
+      Decision 39). Builds + runs under the existing
+      `cargo test --workspace --exclude mili-py` and
+      `clippy --workspace --all-targets`; no new CI job.
 - [ ] **M2 — render server output** (draw the M2 server mesh).
 - [ ] **M3 — `egui` controls** (state scrubber, result picker, view
       controls, command line).
@@ -497,10 +519,23 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     `m5d_alt_strain.rs::derived_alt_principal_strain`. **Phase 4
     (`mili-viz` server) is complete with no deferred derived
     families.**
-14. ⏭️ **NEXT:** two independent tracks, both gated only on the
+14. ✅ **DONE (coding Phase 5 M1 — `wgpu` renderer skeleton):** new
+    standalone crate `crates/mili-viz-client` (`wgpu` 29 / `winit`
+    0.30 / `glam`; no mili/proto/server dep — README "No mili
+    involvement"). Orbit `Camera` (field-aligned to the frozen proto
+    `CameraState`) + hard-coded triangle through a minimal pipeline;
+    render-to-texture-first `Renderer` with a thin windowed `run()`
+    wrapper. Scope/decisions [`phase-5-m1.md`](phase-5-m1.md)
+    (38–40). Gating test
+    `mili-viz-client/tests/m1_renderer.rs` (four always-on
+    `camera_*` + skip-on-absent `headless_render_*`); no Phase 4
+    crate touched, server's frozen tests unaffected.
+15. ⏭️ **NEXT:** two independent tracks, both gated only on the
     long-landed Phase 4 M1 — pick either:
-    - **Phase 5** (`mili-viz` client — `wgpu`/`egui` renderer; M1 was
-      its only gate and is long landed).
+    - **Phase 5 M2** (`mili-viz` client — render server output: a
+      `mili-viz-proto` client over the in-process transport, draw
+      the M2 `GeometryRef` `MVG1` hull. First milestone that wires
+      the transport into the client).
     - **Phase 6** (`pygriz` scripting client). Scaffold landed
       (`python/pygriz/`); the M1 coding work is stub generation +
       `connect`/`Hello` handshake + the Layer-0 `command()`/
