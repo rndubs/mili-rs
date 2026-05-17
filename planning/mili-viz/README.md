@@ -79,9 +79,12 @@ Owns:
   2. **Remote** — connect to a server on an HPC login node over
      gRPC + Flight.
 
-Caches the last frame's geometry locally so the client can do view
-manipulation (rotation, zoom) without round-tripping to the server.
-Result selection and state stepping do round-trip.
+Caches the last frame's geometry locally so the client can *predict*
+view manipulation (rotation, zoom) responsively, but the camera is
+**server-authoritative**: the client sends the view command and
+reconciles against the server's broadcast, so a script and an open
+GUI window stay in sync. Result selection and state stepping
+round-trip. See `scripting.md` for the full rationale.
 
 ## Why `wgpu` + `egui`
 
@@ -103,7 +106,9 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
 
 1. **M1 — proto crate + in-process transport.** Define commands;
    stand up a `tonic` server stub that accepts them over an in-memory
-   channel.
+   channel. Also defines the multi-client surface (subscription RPC +
+   server→client `StateDelta` stream + version handshake) that the
+   scripting client and live GUI sync depend on — see `scripting.md`.
 2. **M2 — load + state navigation.** `load`, `state`, `next`, `prev`.
    Server streams back vertex + index buffers for the loaded mesh
    at each state.
@@ -138,10 +143,13 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
 - **Time-history plots.** griz embeds 2D plots
   (`reference/griz/Src/time_hist.c`). On the client, `egui_plot` is
   good enough for v1.
-- **Scripting.** griz's batch mode reads a command file. The server
-  already accepts a command stream, so batch mode is just "pipe the
-  file in." Worth confirming we keep `grizinit`-style files working
-  as a migration aid.
+- **Scripting.** Resolved — see `scripting.md`. A pip-installable
+  pure-Python package is a second client of `mili-viz-proto` (no
+  Visit-style bundled interpreter). Camera is server-authoritative;
+  interactive `attach()` to a running GUI session is the priority
+  connection path. `grizinit`-style batch files keep working via
+  `session.run_script(path)`. This expands Phase 4 M1 with a
+  subscription RPC + `StateDelta` stream + version handshake.
 - **Backwards-compatible CLI.** Whether the new client binary
   accepts griz's command-line flags. Probably yes for the common
   ones (`-i`, `-b`), as a courtesy.
