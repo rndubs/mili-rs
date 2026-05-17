@@ -2169,6 +2169,52 @@ impl PyMiliDatabase {
         }
         Ok(out)
     }
+
+    /// Phase 3.1 write path. Upstream `_MiliInternal.copy_non_state_data`
+    /// (`miliinternal.py:1542`): write a new `.A` with no states. The
+    /// parallel wrappers fan out per-fragment over `open_single`
+    /// engines, so the write path is always the `Single` backend.
+    fn copy_non_state_data(&self, py: Python<'_>, new_base_name: &str) -> PyResult<()> {
+        match &self.backend {
+            Backend::Single(db) => py
+                .allow_threads(|| db.copy_non_state_data(new_base_name))
+                .map_err(|e| to_pyerr(&e)),
+            Backend::Set(_) => Err(MiliPythonError::new_err(
+                "copy_non_state_data is a per-fragment operation; open the \
+                 fragment via open_single (the parallel wrappers do this)",
+            )),
+        }
+    }
+
+    /// Phase 3.1 write path. Upstream `_MiliInternal.append_state`
+    /// (`miliinternal.py:1433`): append one new state; returns the new
+    /// state count.
+    #[pyo3(signature = (new_state_time, zero_out=true, limit_states_per_file=None, limit_bytes_per_file=None))]
+    fn append_state(
+        &self,
+        py: Python<'_>,
+        new_state_time: f64,
+        zero_out: bool,
+        limit_states_per_file: Option<i64>,
+        limit_bytes_per_file: Option<i64>,
+    ) -> PyResult<usize> {
+        match &self.backend {
+            Backend::Single(db) => py
+                .allow_threads(|| {
+                    db.append_state(
+                        new_state_time,
+                        zero_out,
+                        limit_states_per_file,
+                        limit_bytes_per_file,
+                    )
+                })
+                .map_err(|e| to_pyerr(&e)),
+            Backend::Set(_) => Err(MiliPythonError::new_err(
+                "append_state is a per-fragment operation; open the \
+                 fragment via open_single (the parallel wrappers do this)",
+            )),
+        }
+    }
 }
 
 /// Build the upstream `QueryDict` entry for one resolved

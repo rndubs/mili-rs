@@ -22,6 +22,7 @@ from ._native import (
 from . import (
     adjacency,
     afileIO,
+    append_states,
     datatypes,
     geometric_mesh_info,
     grizinterface,
