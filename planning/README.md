@@ -48,23 +48,39 @@ naming, error model, workspace layout) live in `shared/`.
 The phases are sequential at the crate level but each phase has its own
 internal milestones (documented in its subdirectory):
 
-1. **Phase 1 — `mili-rs` read path.** Open, query metadata, read state
-   results. Parallel over directory entries. Validate against the
-   mili-python test suite as an oracle.
-2. **Phase 2 — `mili-py`.** PyO3 bindings exposing the existing
-   `MiliDatabase` surface, backed by `mili-rs`. Migrate the
-   mili-python test suite; it becomes our regression net.
-3. **Phase 3 — `mili-rs` write path.** Parity with `mc_wrt_*`. Round-trip
-   tests against reference databases.
-4. **Phase 4 — `mili-viz` server.** Port griz's command interpreter as
-   the RPC surface. In-process Rust client first, then split over Arrow
-   Flight.
-5. **Phase 5 — `mili-viz` client.** `wgpu` + `egui` viewer; remote mode
-   over Flight when the server runs on an HPC login node.
+1. **Phase 1 — `mili-rs` read path. ✅ COMPLETE.** Open, query
+   metadata, read state results. Parallel over directory entries.
+   Bit-exact vs the mili-python oracle across the corpus. (`mili-rs/
+   status.md`.)
+2. **Phase 2 — `mili-py` (`milox`). ✅ COMPLETE.** PyO3 bindings
+   presenting the `mili` API surface, backed by `mili-rs`. The
+   upstream read-path test suite runs against `milox` with an import
+   redirect: **938 pass / 0 xfail**, strict 0-xfail harness, 16/16
+   upstream test-file coverage redirected-or-excluded. (`mili-py/
+   m4.md` decision 25.)
+3. **Phase 3 — `mili-rs` write path. ✅ COMPLETE.** `append_state`,
+   `copy_non_state_data`, `query(write_data=)`, `AppendStatesTool` —
+   bit-exact vs the upstream `AFileWriter` oracle; the last
+   un-exercised writer edge (duplicate snames within a directory type)
+   closed and gated. (`mili-py/phase-3.md`, `m4.md` decisions 22–26.)
+4. **Phase 4 — `mili-viz` server. ⏳ NOT STARTED — needs more
+   planning iterations before implementation.** Port griz's command
+   interpreter as the RPC surface. In-process Rust client first, then
+   split over Arrow Flight. Several design questions are still open;
+   see [`mili-viz/status.md`](mili-viz/status.md).
+5. **Phase 5 — `mili-viz` client. ⏳ NOT STARTED — gated on Phase 4
+   M1.** `wgpu` + `egui` viewer; remote mode over Flight when the
+   server runs on an HPC login node. See
+   [`mili-viz/status.md`](mili-viz/status.md).
 
-Phases 1 and 2 unblock the existing Python user base. Phase 3 is
-required before anyone retires `libmili`. Phases 4–5 can start in
-parallel with Phase 3 once `mili-rs`'s read API stabilizes.
+**Phases 1–3 are done: the port is functionally complete and
+hard-gated against drift on both the Rust and Python sides.** Phases
+1–2 unblocked the existing Python user base; Phase 3 unblocked
+retiring `libmili`. **Phases 4–5 are the remaining work** and are a
+new subsystem (a command-language server + renderer), not more
+oracle-validated porting — they need their own design iterations
+before coding starts. The single-source-of-truth for that is the
+`mili-viz` status tracker.
 
 ## Layout
 
@@ -80,9 +96,15 @@ planning/
 │   ├── plan.md           # detailed module-by-module build plan
 │   └── status.md         # live status tracker (steps, edge cases, coverage)
 ├── mili-py/
-│   └── README.md
+│   ├── README.md
+│   ├── m1.md … m4.md      # milestone scope + decisions (read path)
+│   └── phase-i.md, phase-3.md  # parallel-handler + write-path slices
 └── mili-viz/
-    └── README.md
+    ├── README.md           # architecture (server/client split)
+    ├── status.md           # ⭐ live tracker — START HERE for Phase 4/5
+    ├── scripting.md        # scripting-client design (resolved)
+    ├── client.md           # client wireframe + AI-first design (resolved)
+    └── agent-local-llm*.md # local-LLM agent investigation
 ```
 
 Each subdirectory's `README.md` is the entry point; further detail docs
