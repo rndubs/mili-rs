@@ -52,6 +52,17 @@ jobs:
     # full-corpus suites (skip-not-fail when the corpus or python
     # package is absent at runtime, but here we always install both
     # via the shared setup script).
+    #
+    # Hard gate (corpus-coverage): the parity suite includes
+    # `parity_corpus_coverage.rs` — because this step runs
+    # `scripts/setup-parity.sh` (inits both submodules) before
+    # `cargo test --features parity`, the parity environment is present,
+    # so that guard asserts every on-disk corpus family is
+    # exercised+accounted and no accounted family silently vanished. The
+    # per-family skip-on-absent convention (the rest of the parity
+    # suites) is preserved; this guard turns "a family quietly
+    # disappeared / a new upstream family nothing references" — the
+    # remaining silent-rot path — into a hard CI failure here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
