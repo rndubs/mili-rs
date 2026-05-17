@@ -364,6 +364,7 @@ class _MiliInternal:
                 file_number=sm["file_number"],
                 file_offset=sm["file_offset"],
                 time=sm["time"],
+                state_map_id=sm["state_map_id"],
             )
             for sm in self._db.state_maps()
         ]

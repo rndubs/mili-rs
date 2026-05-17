@@ -226,35 +226,17 @@ _DERIVED_DBL_NODTANG_REASON = (
 )
 
 
-# Phase 3.1 (decision 22, planning/mili-py/phase-3.md): the on-disk
-# A/T/S writer landed in the Rust core, bit-exact-gated by
-# crates/mili-rs/tests/parity_write_append.rs on the parallel d3samp6
-# corpus (copy_non_state_data ×8 fragments + append_state on a
-# freshly-copied 0-state db: .A + state file byte-for-byte vs the
-# upstream AFileWriter golden). The redirected test_append_states
-# cases that exercise exactly that slice pass and are promoted; the
-# rest exercise the still-unported general write surface (append to a
-# db with existing states / multi-state / zero_out=False prev-state
-# data copy / per-file limits / the serial-sstate multi-entry-per-sname
-# directory merge) and stay honest strict-xfail → Phase 3.2.
-_APPEND_STATES_PROMOTED = {
-    ("TestAppendStateSerial", "test_serial_append_bad_time"),
-    ("TestAppendStateParallel", "test_parallel_append_bad_time"),
-    ("TestCopyNonStateDataSerial", "test_copy"),
-    ("TestCopyNonStateDataParallel", "test_copy"),
-}
-_APPEND_STATES_REASON = (
-    "Phase 3.2: append to a db with existing states / multi-state / "
-    "zero_out=False prev-state copy / per-file limits / serial-sstate "
-    "multi-entry-per-sname dir merge — the general write surface "
-    "(planning/mili-py/phase-3.md § Phase 3.2). Phase 3.1 bit-exact-"
-    "gated the 0-state copy_non_state_data + append on parallel d3samp6."
-)
-_MODIFY_DATABASE_REASON = (
-    "Phase 3.2: query(write_data=) write-half — the general state-data "
-    "scatter (planning/mili-py/phase-3.md § Phase 3.2). Not implemented "
-    "this session."
-)
+# Phase 3.2 (decision 23, planning/mili-py/phase-3.md): the
+# query(write_data=) write-half + the in-memory `append_state`
+# refresh landed. `test_modify_database` (the general state-data
+# scatter — the inverse of the read byte-gather) and the whole of
+# `test_append_states` (append to a db with existing states /
+# multi-state / zero_out true|false / per-file limits / serial-sstate
+# / copy-then-append) are now bit-exact vs the upstream AFileWriter
+# golden (gated by crates/mili-rs/tests/parity_write_query.rs) and
+# vs the upstream behavioural oracle (these redirected tests query
+# the written state back). All promoted — no honest-xfail remains in
+# either module.
 _APPEND_STATES_TOOL_REASON = (
     "Phase 3.3: mili.append_states.AppendStatesTool — the input-dict "
     "batch tool (planning/mili-py/phase-3.md § Phase 3.3). Not "
@@ -266,12 +248,10 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
     key = f"{mod}::{cls}::{meth}"
     if key in _XFAIL:
         return _XFAIL[key]
-    if mod == "test_append_states":
-        if (cls, meth) in _APPEND_STATES_PROMOTED:
-            return None
-        return _APPEND_STATES_REASON
-    if mod == "test_modify_database":
-        return _MODIFY_DATABASE_REASON
+    if mod in ("test_append_states", "test_modify_database"):
+        # Phase 3.2: fully promoted (every case bit-exact + the
+        # behavioural re-query passes). Nothing honest-xfail remains.
+        return None
     if mod == "test_append_states_tool":
         return _APPEND_STATES_TOOL_REASON
     if mod == "test_milidatabase":

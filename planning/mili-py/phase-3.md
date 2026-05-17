@@ -1,6 +1,6 @@
 # Phase 3 — the milox/mili-rs write path
 
-> **Status: 3.1 LANDED — 3.2 + 3.3 scoped.** Self-contained
+> **Status: 3.1 + 3.2 LANDED — 3.3 scoped.** Self-contained
 > entry-point doc for the write slice (mirrors
 > [`phase-i.md`](phase-i.md)). The summary + **decision 22** live in
 > [`m4.md`](m4.md) § "Phase 3"; this file carries the reproducible
@@ -57,7 +57,12 @@ must reproduce upstream `AFileWriter`'s **output**, not the original
   so "one payload write per decl, all decls emitted" = the merged
   set (the upstream stale-offset-on-duplicate-sname quirk does not
   arise for this corpus; if a future corpus has it, reproduce
-  `__write_directories`'s first-decl-only offset update).
+  `__write_directories`'s first-decl-only offset update). **Phase 3.2
+  update:** the `serial/sstate` d3samp6 corpus *also* has **no**
+  duplicate snames (empirically verified — the Phase-3.1 framing that
+  it did was a misdiagnosis; the serializer was already bit-exact on
+  it). The real append-to-existing-states blocker was the stale
+  in-memory model, fixed in 3.2 (`status.md` § Surprises).
 
 So `mili_rs::write` copies payload byte-ranges verbatim and rebuilds
 only `STATE_VAR_DICT` (port of `AFileWriter.__write_svars` /
@@ -117,15 +122,30 @@ wired as honest strict-xfail (concrete reason → 3.2 / 3.3).
 Write tests create `*.plt*` under cwd and `os.remove` them in
 tearDown — mirrored; no generated artifacts committed.
 
-### Phase 3.2 — `query(write_data=)` write-half
+### Phase 3.2 — `query(write_data=)` write-half  ✅ LANDED
 
-`test_modify_database.py` + upstream `miliinternal.py:1100` `query`
-`write_data` path: invert the read byte-gather to a scatter
-(`srec.extract_ordinals(write_data=)`, the `argsort`/`searchsorted`
-write-label alignment, `rb+` in-place per-state writes). Build on
-3.1's state-file write primitive (which already does the
-single-svar `nodpos`/`sand` scatter internally). Not implemented
-this session.
+`mili_rs::Database::scatter_query` (decision 23,
+[`m4.md`](m4.md) § "Phase 3"): the read `ReadPlan` **inverted** to an
+`rb+` per-state byte-slab scatter — the byte-for-byte inverse of
+`run_query`'s gather and the generalisation of 3.1's single-svar
+`scatter_state_field` to an arbitrary svar / class / labels / states
+/ ips from a `QueryDict`. The `write_data`-label → result-order
+realignment upstream spells `argsort`/`searchsorted`
+(`miliinternal.py:1331-1334`) is the plan-result-label → `wd_labels`
+position map; the state axis is positional (`sidx`). Thin FFI in
+`database.rs::query` (primal svars, `Single` backend; the parallel
+wrappers fan out per-fragment per decision 21). `append_state` made
+in-memory-refreshing (`&mut self` + `Database::reload`; the live-
+mmapped `.A` rewritten atomically write-then-rename; the `zero_out`
++ `n>0` nodpos patch now copies the **previous state**, mirroring
+upstream `miliinternal.py:1518-1538`). `milox.utils` gained verbatim
+`results_by_element` / `writeable_from_results_by_element`
+(`milox.reader` re-exports them); `state_maps()` carries
+`state_map_id`. Gated bit-exact by
+`crates/mili-rs/tests/parity_write_query.rs`. **All 26
+`test_modify_database` + all 18 `test_append_states` promoted** →
+milox 837 → 877 pass / 63 → 23 xfail (the 23 = `test_append_states_tool`,
+Phase 3.3).
 
 ### Phase 3.3 — `mili.append_states.AppendStatesTool`
 

@@ -18,8 +18,14 @@ from .milidatabase import MiliDatabase
 from .miliinternal import _MiliInternal
 from .parallel import LoopWrapper, ServerWrapper
 from .reductions import combine
+from .utils import results_by_element, writeable_from_results_by_element
 
-__all__ = ["open_database", "combine"]
+__all__ = [
+    "open_database",
+    "combine",
+    "results_by_element",
+    "writeable_from_results_by_element",
+]
 
 
 def open_database(

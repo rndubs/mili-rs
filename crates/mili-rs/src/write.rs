@@ -28,7 +28,7 @@ use crate::query::{plan_state_svar_ip, Filter, IntPoints};
 use crate::srec::Srec;
 use crate::state::StateMeta;
 use crate::svar::{SvarAgg, SvarTable};
-use crate::Database;
+use crate::{Database, QueryArgs};
 
 /// `mili.afileIO.AFileWriter`'s `dir_order` /
 /// `__write_dir_decls.dir_decl_order` (`afileIO.py:520-526, 729-737`):
@@ -334,8 +334,18 @@ impl Database {
         smaps.push(new_smap);
 
         // Rewrite the `.A` (smap appended, state_count bumped).
+        // Atomic write-then-rename: the database's own `a_mmap` is a
+        // live `MAP_SHARED` mapping of this very path — truncating it in
+        // place under that mapping corrupts every subsequent
+        // `a_bytes()` read in this same call (the nodal-position read
+        // below) and the in-process re-parse (`reload`), surfacing as
+        // "NODES: payload shorter than declared body" (the Phase-3.1
+        // surprise). Renaming a fresh inode over the path leaves the
+        // old mapping valid (original bytes) and gives `reload` a clean
+        // new file. Bytes are identical to a direct write, so the
+        // Phase-3.1 byte gate is unaffected.
         let abytes = self.serialize_afile(&smaps, StateCountOp::Increment)?;
-        std::fs::write(self.a_path(), abytes)?;
+        atomic_write(self.a_path(), &abytes)?;
 
         // State file `<base><suffix>` (`"{:02}".format(file_number)`).
         let state_path = self.state_file_path(file_number);
@@ -368,9 +378,33 @@ impl Database {
         // (`miliinternal.py:1518-1538`).
         if n == 0 || zero_out {
             let data_start = (file_offset + 8) as u64;
-            let mesh = self.canonical_mesh_id();
-            if let Some((coords, _dim)) = self.node_coords(mesh)? {
-                self.scatter_state_field(&state_path, data_start, "nodpos", "node", &coords)?;
+            // Upstream (`miliinternal.py:1518-1538`): on the **first**
+            // state write the initial nodal positions (`db.nodes()`);
+            // on a later `zero_out` state copy the **previous state's**
+            // nodal positions (`query("nodpos", states=[prev])`), not
+            // the initial coords. Both are then scattered exactly as a
+            // `query(write_data=)` would (decision 23) — the same
+            // single-svar primitive.
+            let nodpos_vals: Vec<f32> = if n == 0 {
+                let mesh = self.canonical_mesh_id();
+                self.node_coords(mesh)?.map(|(c, _)| c).unwrap_or_default()
+            } else {
+                let qa = QueryArgs {
+                    svar: "nodpos",
+                    class: "node",
+                    labels: None,
+                    states: &[n - 1],
+                    materials: None,
+                    ips: None,
+                    subrec: None,
+                };
+                match self.query_full(&qa)?.values {
+                    crate::query::StateValues::F32(v) => v,
+                    _ => Vec::new(),
+                }
+            };
+            if !nodpos_vals.is_empty() {
+                self.scatter_state_field(&state_path, data_start, "nodpos", "node", &nodpos_vals)?;
             }
             if let Some(classes) = self.classes_of_state_variable("sand") {
                 for class in classes {
@@ -583,6 +617,21 @@ fn build_svar_payload(svars: &SvarTable, end: Endianness) -> Vec<u8> {
     put_i32(&mut out, end, str_bytes as i32);
     out.extend_from_slice(&body);
     out
+}
+
+/// Write `bytes` to `path` atomically (write a sibling temp file, then
+/// `rename` it over `path`). The rename swaps in a **new inode**, so a
+/// pre-existing `MAP_SHARED` mapping of `path` keeps observing the old
+/// inode's original bytes — required because the database rewrites its
+/// own live-mmapped `.A` (Phase 3.2; see `append_state`).
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = match path.file_name().and_then(|s| s.to_str()) {
+        Some(name) => path.with_file_name(format!(".{name}.milox-tmp")),
+        None => return Err(MiliError::MalformedDirectory("write: bad .A path")),
+    };
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// The trailing `(\d+)$` of a `<base>A` path's filename
