@@ -845,6 +845,10 @@ impl Database {
     /// `write_data` to the svar dtype on the `var_data[...] =`
     /// assignment, so the cast to the plan's [`NumType`] reproduces
     /// that bit-for-bit for the corpus (f32/f64/i32 svars).
+    // Filter resolution + plan build + the typed-encode/scatter loop
+    // are one linear flow mirroring `run_query`; splitting would only
+    // scatter it (same rationale as `run_query`'s allow).
+    #[allow(clippy::too_many_lines)]
     pub fn scatter_query(
         &self,
         args: &QueryArgs<'_>,
