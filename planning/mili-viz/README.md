@@ -153,3 +153,15 @@ integration story), `bevy` (overkill, ECS we do not need), Qt
 - **Backwards-compatible CLI.** Whether the new client binary
   accepts griz's command-line flags. Probably yes for the common
   ones (`-i`, `-b`), as a courtesy.
+- **Client wireframe + AI-first design.** Resolved — see
+  `client.md`. The window mirrors griz's shape (left dock for
+  Results/Materials/Surfaces, center viewport, bottom tabs for
+  command-line/scripting/time-history) with an AI Assistant as a
+  first-class panel. Key decisions (2026-05-17): the agent is a
+  **server-hosted** service (colocated with the data, one API key,
+  conversation is broadcast shared state); it is a peer of the
+  command vocabulary, not a second mechanism; fully autonomous with
+  barge-in + a provenance journal; debugging is data-first
+  (`Query`) with `Snapshot` corroboration. Expands Phase 4 M1 with
+  `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, and
+  `Interrupt`; adds Phase 5 M3.5/M6.
