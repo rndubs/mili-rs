@@ -241,5 +241,8 @@ README Phase 5 M1–M5 stand. Inserted:
   enough for v1.
 - **Offline model bar.** What local model is good enough for the
   query-first debugging loop on an air-gapped cluster — affects how
-  hard the `LlmProvider` boundary must work.
+  hard the `LlmProvider` boundary must work. A scoped, optional
+  exploration of a *tiny* fine-tuned command-generation model (not
+  the full agent) is sketched in `agent-local-llm.md` — non-priority,
+  revisit before building.
 ```
