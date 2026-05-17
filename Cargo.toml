@@ -4,7 +4,7 @@ resolver = "2"
 # but is excluded from the default `test` / `test-parity` jobs via
 # `--exclude mili-py` so those fast jobs never link pyo3. A dedicated
 # `test-milox` CI job builds it with maturin and runs pytest.
-members = ["crates/mili-rs", "crates/mili-py"]
+members = ["crates/mili-rs", "crates/mili-py", "crates/mili-viz-proto", "crates/mili-viz-server"]
 
 [workspace.package]
 edition = "2021"

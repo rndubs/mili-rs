@@ -8,11 +8,25 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): ⏳ NOT STARTED.**
-- **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (gated on Phase 4 M1).
-- **No `mili-viz` code exists yet.** There are no `mili-viz-*` crates
-  in the workspace; this phase is still entirely in design.
-- **✅ The Phase 4 M1 surface is now pinned.**
+- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅ landed.**
+- **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
+  Phase 4 M1; now unblocked).
+- **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
+  (protoc-free `protox`+`tonic` codegen of the frozen Δ1–Δ9
+  contract) and `crates/mili-viz-server` (in-process `tokio::io::
+  duplex` transport, dispatch+broadcast plumbing) are in the
+  workspace; `cargo test --workspace` is green. Every
+  `phase-4-m1.md` § "M1 acceptance gate" box is checked, satisfied
+  by the six gating tests in
+  `crates/mili-viz-server/tests/acceptance.rs`:
+  `handshake_match_and_mismatch`, `capability_agent_present_absent`,
+  `layer0_equals_raw`, `subscription_fanout`,
+  `frozen_stubs_unimplemented`, `conformance_all_command_arms`.
+  Two build-reality decisions were logged (`phase-4-m1.md`
+  Decisions 8–9: `Command`→`DeltaKind` is many-to-one by design;
+  proto built protoc-free via `protox`). Next coding milestone: M2
+  (load + state navigation, real geometry over Arrow Flight).
+- **✅ The Phase 4 M1 surface is pinned.**
   [`phase-4-m1.md`](phase-4-m1.md) is the consolidated, buildable M1
   scope doc (the analogue of `mili-py/m1.md`): it reconciles the
   three M1 surfaces into one frozen wire contract, enumerates every
@@ -59,15 +73,19 @@ with a reason** in [`phase-4-m1.md`](phase-4-m1.md). "✅" = decided;
 Milestones from [`README.md`](README.md) § "Phase 4 milestones",
 expanded by `scripting.md` / `client.md`. None started.
 
-- [ ] **M1 — proto crate + in-process transport.** ✅ **Scope
-      pinned** in [`phase-4-m1.md`](phase-4-m1.md) (frozen wire
-      contract = base vocab + scripting subscription/`StateDelta`/
-      handshake + agent `AgentChat`/`DELTA_AGENT`/`CaptureFrame`/
-      `Interrupt`; proto updated to match). **Coding-ready.** Gating
-      tests = the `phase-4-m1.md` § "M1 acceptance gate" checklist
-      (handshake/capability, Layer-0≡raw equivalence, subscription
-      fan-out, frozen-stub `UNIMPLEMENTED`, conformance). Agent RPCs
-      are frozen-but-`UNIMPLEMENTED` until Ph4/5 M6 (Decision 6/7).
+- [x] **M1 — proto crate + in-process transport.** ✅ **Landed.**
+      `crates/mili-viz-proto` + `crates/mili-viz-server` in the
+      workspace; the frozen Δ1–Δ9 contract is codegen'd protoc-free
+      and served over an in-process `tokio::io::duplex` channel with
+      live `Hello`/`Subscribe`/`Execute`/`Query` and
+      frozen-`UNIMPLEMENTED` `AgentChat`/`Interrupt`/`CaptureFrame`
+      (Decision 7). Every `phase-4-m1.md` § "M1 acceptance gate"
+      box is checked; gating tests in
+      `crates/mili-viz-server/tests/acceptance.rs`:
+      `handshake_match_and_mismatch`, `capability_agent_present_absent`,
+      `layer0_equals_raw`, `subscription_fanout`,
+      `frozen_stubs_unimplemented`, `conformance_all_command_arms`.
+      Build-reality decisions logged: `phase-4-m1.md` Decisions 8–9.
 - [ ] **M2 — load + state navigation.** `load`/`state`/`next`/`prev`;
       stream vertex+index buffers per state.
 - [ ] **M3 — primal result display.** `show <svar>`; color array from
@@ -114,11 +132,16 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
    `phase-4-m1.md` Decision 6: contract in M1, impl + model choice
    off the M1–M5 critical path (capability-gated). `agent-local-llm*.md`
    stays research, explicitly non-gating.
-5. ⏭️ **NEXT (coding):** scaffold `crates/mili-viz-proto` with the
-   `tonic` `build.rs` against the updated `proto/mili_viz.proto`, and
-   satisfy the `phase-4-m1.md` § "M1 acceptance gate" checklist
+5. ✅ **DONE (coding M1):** `crates/mili-viz-proto` (protoc-free
+   `protox`+`tonic` codegen) and `crates/mili-viz-server`
    (in-process transport, handshake, Layer-0≡raw, subscription
-   fan-out, frozen-stub `UNIMPLEMENTED`).
+   fan-out, frozen-stub `UNIMPLEMENTED`, conformance) landed; the
+   `phase-4-m1.md` § "M1 acceptance gate" checklist is fully
+   satisfied (six tests in `tests/acceptance.rs`).
+6. ⏭️ **NEXT (coding M2):** load + state navigation — wire
+   `mili-rs` into `mili-viz-server`, extract per-state vertex/index
+   buffers, and stream them over Arrow Flight (real `GeometryRef`,
+   today empty). See Phase 4 M2 below.
 
 ## Update protocol
 

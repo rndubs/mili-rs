@@ -1,0 +1,24 @@
+[package]
+name = "mili-viz-proto"
+version = "0.0.0"
+description = "Phase 4 M1 wire contract (tonic/gRPC types) for the mili-viz server/client split."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+prost = "0.14"
+tonic = "0.14"
+tonic-prost = "0.14"
+
+[build-dependencies]
+# protoc is intentionally NOT a build dependency: the parity/web
+# runners do not ship it. `protox` is a pure-Rust protobuf compiler;
+# it produces a FileDescriptorSet that tonic-prost-build turns into
+# Rust without ever shelling out to protoc.
+protox = "0.9"
+tonic-prost-build = "0.14"
+
+[lints]
+workspace = true
