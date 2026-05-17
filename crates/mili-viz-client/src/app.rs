@@ -102,6 +102,9 @@ impl App {
             num_vertices: verts,
             num_indices: idx,
         });
+        // Accumulate the time-history series from the broadcast
+        // result range (`phase-5-m3.5.md` Decision 50).
+        self.shell.record_time_sample();
         if let Some(g) = &r.geometry {
             if let Ok(mesh) = self.session.resolve_geometry(g) {
                 self.range = if r.result.is_empty() {
@@ -151,8 +154,24 @@ impl App {
                 self.shell.phase = SessionPhase::AttachedIdle;
                 None
             }
+            UiAction::RunCommand(raw) => {
+                // Verbatim Layer-0 (`phase-5-m3.5.md` Decision 48):
+                // the line goes out as `Command{ raw }`; the dim
+                // outcome row is appended after the Execute returns.
+                let res = self
+                    .rt
+                    .block_on(self.session.execute(pb::command::Cmd::Raw(raw.clone())));
+                match res {
+                    Ok(()) => self.shell.push_command_outcome(true, ""),
+                    Err(e) => self.shell.push_command_outcome(false, &e.to_string()),
+                }
+                None
+            }
             // Client-only: already applied to ShellState by the UI.
-            UiAction::SetStride(_) | UiAction::ToggleOverlay(_) => None,
+            UiAction::SetStride(_)
+            | UiAction::ToggleOverlay(_)
+            | UiAction::SelectBottomTab(_)
+            | UiAction::CollapseBottomTabs => None,
         };
         if let Some(cmd) = cmd {
             let _ = self.rt.block_on(self.session.execute(cmd));

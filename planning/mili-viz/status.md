@@ -10,7 +10,27 @@
 
 - **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families; + M5d ✅: the `*_alt` trig principal-strain variants — core kernel + viz routing), M6 ✅ (remote transport) landed.** The derived family is now **fully complete**: the last deferral (`*_alt`, `phase-4-m5c.md` Decision 28) is discharged — the parity-gated `mili_rs::compute_principal_strain_alt` core kernel + its trivial viz seam landed (`phase-4-m5d.md`; `../mili-py/m4.md` Decision 27).
 - **Phase 5 (`mili-viz` client): 🟢 IN PROGRESS — M1 ✅, M2 ✅,
-  M3 ✅ landed.** M1 = `wgpu` renderer skeleton
+  M3 ✅, M3.5 ✅ landed.** M3.5 = the bottom tabs: the Layer-0
+  command line (verbatim `Execute(Command{raw})` over the live
+  in-process `Session`, client-side `griz>` transcript), the
+  scripting runner (a structured **disabled placeholder** — the
+  subprocess+`attach()` runner is blocked on the uncoded Phase 6
+  `pygriz`), and the `egui_plot` time-history (fed by the
+  already-implemented `Subscribe`/`ResultState` stream — the
+  server's `Query` RPC is a shape-only stub, so the `Query`-fed
+  per-element series is the documented forward path). The bottom
+  panel is an always-present 22 px tab strip with a
+  default-collapsed body, so the M3 render footprint and
+  `m3_egui_shell.rs` stay byte-stable and the Decision-45
+  additive-composition seam is untouched. `egui_plot` 0.35.0 pinned
+  (sparse-index-verified vs the frozen `egui` 0.34.2). No proto
+  change; no Phase 4 crate touched. Scope + Decisions 48–52:
+  [`phase-5-m3.5.md`](phase-5-m3.5.md). Gating test
+  `tests/m3_5_bottom_tabs.rs` (always-on tab/transcript/time-series
+  logic; skip-on-absent collapsed-vs-open composite render); M1's
+  `m1_renderer.rs` + M2's `m2_render_server_output.rs` + M3's
+  `m3_egui_shell.rs` and every Phase 4 server gating test unchanged
+  and green. M4–M6 ⏳ not started. M1 = `wgpu` renderer skeleton
   (`crates/mili-viz-client`, orbit camera + hard-coded triangle,
   render-to-texture-first). M2 = render server output: depends on
   `mili-viz-proto` + `mili-viz-server`, drives `load`/`show` over the
@@ -34,8 +54,8 @@
   `tests/m3_egui_shell.rs` (always-on colormap + `MVG2` decode +
   pure `ShellState`/`build_shell_ui` logic; skip-on-absent composite
   mesh+`egui` render); M1's `m1_renderer.rs` + M2's
-  `m2_render_server_output.rs` unchanged and green. M3.5/M4–M6
-  ⏳ not started.
+  `m2_render_server_output.rs` unchanged and green. (M3.5 ✅ landed
+  — see the M3.5 entry above; M4–M6 ⏳ not started.)
 - **Phase 6 (`pygriz` scripting client): ⏳ NOT STARTED** — scaffold
   landed (`python/pygriz/`, the new top-level `python/` tree); a third
   pure-Python client of the frozen contract, gated only on Phase 4 M1,
@@ -198,6 +218,7 @@
 | [`phase-5-m1.md`](phase-5-m1.md) | **The buildable Phase 5 M1 scope (`wgpu` renderer skeleton).** First client-side milestone: a standalone `crates/mili-viz-client` (`wgpu`/`winit`/`glam`, **no** mili/proto/server dep — README "No mili involvement"). Decisions 38–40 (standalone crate, transport attaches at M2; render-to-texture-first so the gating test is a real headless GPU render with skip-on-absent, always-on camera-math half; orbit `Camera` is the reusable tested core with field shape aligned 1:1 to the frozen proto `CameraState`, triangle is throwaway scaffolding). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-5-m2.md`](phase-5-m2.md) | **The buildable Phase 5 M2 scope (render server output).** First client milestone to wire the transport: `mili-viz-client` depends on `mili-viz-proto` + `mili-viz-server`, drives `Subscribe`/`load`/`show` over `spawn_in_process`, resolves the frozen `GeometryRef` via the in-process `VizService::fetch_geometry` seam (Flight/remote is M5), decodes the `MVG1`/`MVG2` blob to a `Mesh`. Decisions 41–43 (in-process transport + frozen `fetch_geometry` seam; `MVG1`/`MVG2`→`Mesh` with CPU normals, triangle deleted, depth-tested indexed pipeline, `MVG2` scalar ignored until M3, auto-framing camera; gating test = always-on decode unit + skip-on-absent end-to-end render, M1 camera gate + triangle smoke kept). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-5-m3.md`](phase-5-m3.md) | **The buildable Phase 5 M3 scope (`egui` shell).** Toolbar + left dock + the five viewport overlays in the L1 layout behind the frozen contract; Decisions 44–47 (pin the `egui` 0.34.2 stack, verified vs the frozen `wgpu` 29 / `winit` 0.30 via the sparse index; `egui` is an **additive non-clearing second pass** on the same view — `Renderer::render` byte-for-byte preserved so the M1/M2 render-to-texture seam never moves; shell UI = pure `fn(&mut Ui,&mut ShellState)->Vec<UiAction>` always-on gate, windowed via `egui-winit` + a live in-process `Session`, camera stays server-authoritative — M3 emits the command, M4 reconciles; the `MVG2` scalar → vertex colour via a viz-local cool→warm map autoscaled by `ResultState.{min,max}`, `Colormap`/`LegendLimits` deferred to M4+). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-5-m3.5.md`](phase-5-m3.5.md) | **The buildable Phase 5 M3.5 scope (bottom tabs).** The Layer-0 command line + scripting runner + `egui_plot` time-history behind the frozen contract; Decisions 48–52 (command line = verbatim `Execute(Command{raw})` over the live `Session`, client-side `griz>` transcript; scripting tab = structured **disabled placeholder**, the subprocess+`attach()` runner blocked on the uncoded Phase 6 `pygriz`; time-history fed by the already-implemented `Subscribe`/`ResultState` stream — the server `Query` RPC is a shape-only stub, so the `Query`-fed per-element series is the documented forward path; bottom panel = always-present 22 px strip + default-collapsed body so the M3 footprint / `m3_egui_shell.rs` / Decision-45 seam stay byte-stable; `egui_plot` 0.35.0 pinned, sparse-index-verified vs the frozen `egui` 0.34.2). No proto change; no Phase 4 crate touched | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m1.md`](phase-6-m1.md) | **The buildable Phase 6 M1 scope (`pygriz` scaffold + stubs + connect/handshake).** The scripting client gets an implementation home: a third pure-Python client of the frozen contract, gated only on Phase 4 M1 (independent of the Phase 5 renderer). Decisions 35–37 (top-level `python/` tree, dist `pygriz` / import `griz`, pure-Python no-pyo3; stubs are gitignored build output from the one canonical proto; M1 is Layer-0-only — reuse the server's `parse_raw`, Layer-1 + the Layer-0≡Layer-1 test is M3). No proto change | ✅ pinned (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` is authoritative) |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake. **Implementation home: Phase 6** ([`phase-6-m1.md`](phase-6-m1.md)) | ✅ resolved |
@@ -437,7 +458,32 @@ expanded by `scripting.md` / `client.md`. None started.
       logic; skip-on-absent composite render); M1's `m1_renderer.rs`
       + M2's `m2_render_server_output.rs` and every Phase 4 server
       gating test unchanged and green.
-- [ ] **M3.5 — AI Assistant panel** (`client.md`).
+- [x] **M3.5 — bottom tabs.** ✅ **Landed.** The Layer-0 command
+      line (verbatim `Execute(Command{raw})` over the live in-process
+      `Session`; client-side `griz>` echo + dim/error transcript on
+      `ShellState`), the scripting runner (a structured **disabled
+      placeholder** — the subprocess+`attach()` runner is blocked on
+      the uncoded Phase 6 `pygriz`; lights up as a fill-in when
+      Phase 6 lands), and the `egui_plot` time-history (fed by the
+      already-implemented `Subscribe`/`ResultState` stream — the
+      server `Query` RPC is a shape-only stub, so the `Query`-fed
+      per-element series is the documented forward path). The bottom
+      panel is an always-present 22 px tab strip with a
+      default-collapsed body, so the M3 render footprint /
+      `m3_egui_shell.rs` / the Decision-45 additive seam stay
+      byte-stable. `egui_plot` 0.35.0 pinned (sparse-index-verified
+      vs the frozen `egui` 0.34.2; the name-matching 0.34.x line
+      wrongly needs `egui` 0.33). No proto change; no Phase 4 crate
+      touched. Scope/decisions:
+      [`phase-5-m3.5.md`](phase-5-m3.5.md) (48–52). Gating test:
+      `crates/mili-viz-client/tests/m3_5_bottom_tabs.rs` (always-on
+      tab-toggle / verbatim-Layer-0 / time-series logic;
+      skip-on-absent collapsed-vs-open composite render); M1's
+      `m1_renderer.rs` + M2's `m2_render_server_output.rs` + M3's
+      `m3_egui_shell.rs` and every Phase 4 server gating test
+      unchanged and green. _(The AI Assistant panel — formerly
+      mislabeled "M3.5" here — is Phase 5 M6 per `client.md`
+      §"Phasing".)_
 - [ ] **M4 — local view manipulation** (rotate/zoom without server
       round-trip; reconcile against server-authoritative camera).
 - [ ] **M5 — remote mode** (connect to a remote server; tune buffers
@@ -615,18 +661,37 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     (44–47). Gating test
     `m3_egui_shell.rs` (always-on colormap + `MVG2` decode + pure
     shell logic; skip-on-absent composite render).
-17. ⏭️ **NEXT:** two independent tracks, both gated only on the
-    long-landed Phase 4 M1 — pick either:
-    - **Phase 5 M3.5** (`mili-viz` client — bottom tabs: the Layer-0
-      command line first, then the subprocess scripting runner, then
-      the `egui_plot` time-history). The wireframes call this out as a
-      distinct milestone after the M3 shell; builds directly on the
-      landed M3 `ShellState`/`build_shell_ui`.
+17. ✅ **DONE (coding Phase 5 M3.5 — the bottom tabs):** the
+    Layer-0 command line (verbatim `Execute(Command{raw})` over the
+    live in-process `Session`; client-side `griz>` transcript), the
+    scripting runner (a structured **disabled placeholder** — the
+    subprocess+`attach()` runner is blocked on the uncoded Phase 6
+    `pygriz`), and the `egui_plot` time-history (fed by the
+    already-implemented `Subscribe`/`ResultState` stream — the server
+    `Query` RPC is a shape-only stub, so the `Query`-fed per-element
+    series is the documented forward path). Always-present 22 px tab
+    strip + default-collapsed body keeps the M3 footprint /
+    `m3_egui_shell.rs` / the Decision-45 seam byte-stable; `egui_plot`
+    0.35.0 pinned (sparse-index-verified vs the frozen `egui`
+    0.34.2). No proto change; no Phase 4 crate touched.
+    Scope/decisions in [`phase-5-m3.5.md`](phase-5-m3.5.md) (48–52).
+    Gating test `m3_5_bottom_tabs.rs` (always-on tab/transcript/
+    time-series logic; skip-on-absent collapsed-vs-open composite
+    render).
+18. ⏭️ **NEXT:** independent tracks, all gated only on the
+    long-landed Phase 4 M1 — pick any:
+    - **Phase 5 M4** (`mili-viz` client — local view manipulation:
+      client-side rotate/zoom prediction reconciled against the
+      server-authoritative broadcast `DELTA_CAMERA`; `Colormap` /
+      `LegendLimits` honoured). Builds directly on the landed M3/M3.5
+      `ShellState`/`build_shell_ui` + the live `Session`.
     - **Phase 6** (`pygriz` scripting client). Scaffold landed
       (`python/pygriz/`); the M1 coding work is stub generation +
       `connect`/`Hello` handshake + the Layer-0 `command()`/
       `run_script()` path. Scope: [`phase-6-m1.md`](phase-6-m1.md)
-      Decisions 35–37. Independent of Phase 5.
+      Decisions 35–37. Independent of Phase 5; **also unblocks the
+      M3.5 scripting runner** (Decision 49's placeholder lights up
+      once `pygriz` + `attach()` land).
     No `mili-rs`/`mili-py` derived work remains.
 
 ## Update protocol

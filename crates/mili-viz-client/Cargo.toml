@@ -18,6 +18,7 @@ glam = "0.32"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 egui = "0.34.2"
+egui_plot = "0.35.0"
 egui-wgpu = "0.34.2"
 egui-winit = { version = "0.34.2", default-features = false }
 mili-viz-proto = { path = "../mili-viz-proto" }
