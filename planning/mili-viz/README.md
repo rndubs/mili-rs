@@ -1,5 +1,12 @@
 # `mili-viz` — client / server visualization stack
 
+> **Status: ⏳ NOT STARTED — design phase, needs more planning
+> iterations before implementation.** This README is the architecture;
+> the live tracker, the open design questions, and the concrete next
+> steps are in **[`status.md`](status.md) — start there.** Phases 1–3
+> (`mili-rs` + `milox`) are complete; `mili-viz` is the remaining work
+> and no `mili-viz-*` crate exists yet.
+
 A from-scratch replacement for griz, split into a server that does the
 heavy I/O and a thin renderer client. The server links `mili-rs`
 directly; the client speaks a small RPC protocol to the server and

@@ -1,11 +1,14 @@
 # `mili-py` — PyO3 + numpy bindings
 
-> **Status: ready to start.** Phase 1 (`mili-rs`) is feature-complete
-> for the read path and has bit-exact parity against `mili-python`
-> across 12 corpus fixtures (`crates/mili-rs/tests/parity_*.rs`).
-> See [`../mili-rs/status.md`](../mili-rs/status.md) for the Phase-1
-> wrap-up and the "Known gaps Phase 2 inherits" section before
-> starting M1.
+> **Status: ✅ COMPLETE.** The `milox` PyO3/numpy bindings present the
+> full `mili` API surface backed by `mili-rs`. The upstream read-path
+> test suite runs against `milox` with only an import redirect:
+> **938 pass / 0 xfail**, strict 0-xfail harness, 16/16 upstream
+> test-file coverage redirected-or-excluded. Milestones M1–M4 + the
+> Phase-I parallel-handler slice + the Phase-3 write path all landed;
+> see [`m4.md`](m4.md) (decisions 1–26) and [`phase-3.md`](phase-3.md)
+> for the record. No open work in the `mili-py` port — next work is
+> Phase 4/5 ([`../mili-viz/status.md`](../mili-viz/status.md)).
 
 An API-compatible reimplementation of the pure-Python `mili` package
 (upstream `mili-python`), backed by `mili-rs` under the hood. The

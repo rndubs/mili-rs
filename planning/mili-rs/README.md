@@ -3,9 +3,16 @@
 A pure-Rust replacement for `libmili`. Byte-for-byte compatible with
 existing mili databases on disk. No C dependency.
 
-> **Where to look:** [`plan.md`](plan.md) for the module-by-module build
-> plan, [`status.md`](status.md) for the live tracker of which steps
-> have landed.
+> **Status: ✅ COMPLETE (read + write).** Phases 1, 1.5 and 3 have
+> all landed — the core reads any `libmili` database bit-exact and
+> writes back through the renormalising `AFileWriter`-compatible
+> serializer, both gated against the upstream oracle. No open work in
+> the `mili-rs` core; next work is Phase 4/5
+> ([`../mili-viz/status.md`](../mili-viz/status.md)).
+>
+> **Where to look:** [`plan.md`](plan.md) for the module-by-module
+> build plan, [`status.md`](status.md) for the live tracker (now the
+> historical Phase-1/3 record).
 
 ## Objectives
 

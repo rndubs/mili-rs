@@ -3,20 +3,36 @@
 Live tracker. **Source of truth for what's safe to depend on**; the
 design rationale lives in [`plan.md`](plan.md).
 
-## What's next
+## Status: Phases 1–3 COMPLETE
 
-**Phase 1 is complete** for the single-A-file read path. Before
-starting Phase 2 (`mili-py`), we firm up the Rust layer with three
-items so we don't end up patching two layers in lockstep. See
-**Phase 1.5** below.
+**The `mili-rs` core (read + write) and the `milox` Python bindings
+are functionally complete and hard-gated against drift.** Nothing in
+the `mili-rs`/`mili-py` port is open work.
 
-The one Phase-1 follow-up that can't be closed from a normal PR:
+| Phase | Scope | State |
+|---|---|---|
+| 1 — `mili-rs` read path | open, metadata, query, state read; rayon; bit-exact vs oracle | ✅ complete |
+| 1.5 — read-side firming | `DatabaseSet`, xmilics parity, FFI plan pinned | ✅ complete |
+| 2 — `mili-py` / `milox` | PyO3 bindings; full read-path parity | ✅ complete — **938 pass / 0 xfail**, strict 0-xfail harness, 16/16 upstream file coverage (`../mili-py/m4.md` decision 25) |
+| 3 — `mili-rs` write path | `append_state` / `copy_non_state_data` / `query(write_data=)` / `AppendStatesTool`; duplicate-sname edge | ✅ complete — bit-exact vs upstream `AFileWriter` (`../mili-py/phase-3.md`, `m4.md` decisions 22–26) |
 
-- **Step 13 fuzz cron clean-run gate.** CI job exists
-  (`.github/workflows/ci.yml § fuzz`, scheduled `0 7 * * *` UTC). Flips
-  to ✅ once a maintainer confirms the first cron run lands clean (or
-  manually triggers `workflow_dispatch` from the Actions UI). No code
-  change required from here.
+The only non-✅ item is operational, not code:
+
+- **Step 13 fuzz-cron clean-run gate.** CI job exists
+  (`.github/workflows/ci.yml § fuzz`, scheduled `0 7 * * *` UTC).
+  Flips to ✅ once a maintainer confirms one clean cron run (or
+  triggers `workflow_dispatch` from the Actions UI). **No code change
+  required.**
+
+**Next work is Phase 4/5 (`mili-viz`)** — a new subsystem, not more
+porting. Its tracker is the single source of truth:
+[`../mili-viz/status.md`](../mili-viz/status.md). Read that to pick up
+the next steps; it also flags the design questions that still need
+resolving before implementation starts.
+
+Everything in *this* file below is the historical Phase-1/1.5
+reference (step tables, edge cases, coverage) — retained as the design
+record, not as open work.
 
 ## Phase 1.5 — pre-`mili-py` read-side firming
 
