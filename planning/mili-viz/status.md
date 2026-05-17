@@ -8,7 +8,7 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ landed.**
+- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families) landed.**
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
@@ -90,8 +90,29 @@
   `crates/mili-viz-server/tests/m5_derived.rs`
   `derived_stress_invariants` (validates the viz routing via the
   linear-pressure identity); M1's six + M2 + M3 + M4 tests still pass
-  unchanged. Next coding milestone: M6 (remote transport — gRPC +
-  Arrow Flight over TCP).
+  unchanged.
+- **✅ Phase 4 M5 follow-up is implemented (eigenvalue families).**
+  `show prin_stress[1-3]`/`prin_dev_stress[1-3]`/`max_shear_stress`/
+  `prin_strain[1-3]`/`prin_dev_strain[1-3]`/`vol_strain` routes
+  through `mili_rs::{principal_stress,principal_strain}_spec` →
+  per-class `query_full` → the already-parity-exact
+  `mili_rs::compute_principal_{stress,strain}` kernel → M3's
+  **unchanged** nodal scatter — the identical M5 seam, only the
+  `*_spec`/`*_primals`/`compute_*` calls swapped (two branches added
+  before the primal `classes_of_state_variable` lookup; the M5
+  stress-invariant branch and the M3 primal path are byte-stable). No
+  proto change, no `parity` feature. The gating test uses only
+  single-shared-gather algebraic invariants (eigenvalue descending
+  order, relative deviatoric tracelessness, the max-shear relation) —
+  cross-cardinality "trace" phrasings were rejected because the
+  IP-inconsistent `serial/basic1` corpus makes a 3- vs 6-primal
+  `query_full` select different IP samples (a real ~1.5e-3 skew, not a
+  routing defect; pinned in Decision 24). Scope + Decisions 22–24 in
+  [`phase-4-m5b.md`](phase-4-m5b.md). Gating test:
+  `crates/mili-viz-server/tests/m5b_principal.rs`
+  `derived_principal_families`; M1's six + M2 + M3 + M4 + M5 tests
+  still pass unchanged. Next coding milestone: M6 (remote transport —
+  gRPC + Arrow Flight over TCP).
 - **✅ The Phase 4 M1 surface is pinned.**
   [`phase-4-m1.md`](phase-4-m1.md) is the consolidated, buildable M1
   scope doc (the analogue of `mili-py/m1.md`): it reconciles the
@@ -113,6 +134,7 @@
 | [`phase-4-m3.md`](phase-4-m3.md) | **The buildable Phase 4 M3 scope.** Primal result display behind the frozen contract; Decisions 13–15 (leaf-svar resolution via `classes_of_state_variable`, unresolvable → bare hull; optional per-vertex `scalar_f32`, `MVG2` layout, element→nodal-averaged / nodal→direct / vector→comp 0; `ResultState.{min,max}` = autoscale data range, `legend` stays a client clamp). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m4.md`](phase-4-m4.md) | **The buildable Phase 4 M4 scope.** Selection + enable/disable behind the frozen contract; Decisions 16–18 (`enable`/`disable` filters the emitted triangle list by per-triangle material, default-visible, scalar/range byte-stable, composes with `MVG1`/`MVG2`; selection stays metadata-only via the existing `DELTA_SELECTION` + `Snapshot`, `clrsel` empty-class clears all; effects on next `show`, one delta per `Execute`). No proto/format change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5.md`](phase-4-m5.md) | **The buildable Phase 4 M5 scope (first slice).** Scalar stress invariants behind the frozen contract; Decisions 19–21 (the derived oracle exists — `mili-rs::derived`, bit-exact vs `mili` Python — so reuse `compute_stress_invariant`, no formula port, no griz golden, **supersedes `phase-4-m1.md` Decision 5**; resolve → per-class `query_full` → kernel → M3 nodal scatter, eigensolver/per-face/time families deferred; gating test uses the linear-pressure identity, no `parity` feature in `mili-viz-server`). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-4-m5b.md`](phase-4-m5b.md) | **The buildable Phase 4 M5 follow-up scope (eigenvalue families).** Principal stress/strain, deviatoric, max-shear, volumetric strain behind the frozen contract; Decisions 22–24 (family set = the 14 eigensolver-on-already-prepped-element-class names, `surfstrain*`/`*_alt`/time deferred; routing reuses the M5 seam verbatim — two branches before the primal lookup, only `*_spec`/`*_primals`/`compute_*` swapped, M5/M3 paths byte-stable; gating test uses only single-shared-gather invariants — ordering + relative tracelessness + max-shear — cross-cardinality "trace" checks rejected for an IP-sampling skew). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -208,6 +230,18 @@ expanded by `scripting.md` / `client.md`. None started.
       Gating test: `crates/mili-viz-server/tests/m5_derived.rs`
       `derived_stress_invariants` (linear-pressure identity); M1's six
       + M2 + M3 + M4 tests unchanged and green.
+  - [x] **M5 follow-up — eigenvalue families.** ✅ **Landed.**
+        `prin_stress[1-3]`/`prin_dev_stress[1-3]`/`max_shear_stress`/
+        `prin_strain[1-3]`/`prin_dev_strain[1-3]`/`vol_strain` via the
+        identical M5 seam (two branches, only `*_spec`/`*_primals`/
+        `compute_*` swapped; M5 invariant + M3 primal paths
+        byte-stable). No proto change, no `parity` feature.
+        Scope/decisions: [`phase-4-m5b.md`](phase-4-m5b.md) (22–24).
+        Gating test:
+        `crates/mili-viz-server/tests/m5b_principal.rs`
+        `derived_principal_families` (single-shared-gather invariants:
+        ordering + relative tracelessness + max-shear); M1's six + M2
+        + M3 + M4 + M5 tests unchanged and green.
 - [ ] **M6 — remote transport.** Same proto over gRPC + Arrow Flight
       on TCP; validate over a real network mount.
 
@@ -279,12 +313,23 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
    superseded by `phase-4-m5.md` Decision 19). Eigensolver/`surfstrain`/
    time families deferred (Decision 20). Gating test
    `m5_derived.rs::derived_stress_invariants`.
-10. ⏭️ **NEXT:** either the **M5 follow-up sub-slice** (principal
-    stress/strain + `surfstrain` via the same routing seam — only the
-    `compute_*` call changes) or **coding M6** (remote transport — the
-    same proto over gRPC + Arrow Flight on TCP; Decision 10 swaps the
-    in-process geometry store for a real Flight `DoGet`, format/ticket
-    frozen at M2).
+10. ✅ **DONE (coding M5 follow-up):** eigenvalue families —
+    `prin_stress[1-3]`/`prin_dev_stress[1-3]`/`max_shear_stress`/
+    `prin_strain[1-3]`/`prin_dev_strain[1-3]`/`vol_strain` route
+    through `mili_rs::compute_principal_{stress,strain}` via the
+    identical M5 seam (only `*_spec`/`*_primals`/`compute_*` swapped).
+    Scope/decisions in [`phase-4-m5b.md`](phase-4-m5b.md) (22–24).
+    Gating test `m5b_principal.rs::derived_principal_families`.
+    `surfstrain*`/`*_alt`/nodal-time families remain deferred
+    (Decision 22).
+11. ⏭️ **NEXT:** either the remaining derived sub-slice
+    (`surfstrain*` per-face Hex + the `*_alt` trig strains + nodal
+    time-derived families — a different gather than the
+    already-prepped-element-class seam, see `phase-4-m5b.md`
+    Decision 22) or **coding M6** (remote transport — the same proto
+    over gRPC + Arrow Flight on TCP; Decision 10 swaps the in-process
+    geometry store for a real Flight `DoGet`, format/ticket frozen at
+    M2).
 
 ## Update protocol
 
