@@ -46,6 +46,7 @@ _REDIRECT = {
     "mili.utils": milox.utils,
     "mili.projection": milox.projection,
     "mili.grizinterface": milox.grizinterface,
+    "mili.append_states": milox.append_states,
 }
 
 # Tests in redirected modules that exercise still-unported surface.
@@ -84,10 +85,12 @@ _MDB_PHASE_H_METHODS: dict[str, str] = {}
 # sub-slice) so those promoted to green; only the Phase-3 write path
 # remains here. Honest strict-xfail, never silently passed.
 _REDUCTIONS_PHASE_H_METHODS: dict[str, str] = {}
-_REDUCTIONS_WRITE_METHODS = {
-    "test_append_state": "Phase 3 write path",
-    "test_copy_non_state_data": "Phase 3 write path",
-}
+# Phase 3.1 (decision 22, planning/mili-py/phase-3.md): the on-disk
+# write path (append_state + copy_non_state_data) landed in the Rust
+# core (parity_write_append.rs bit-exact vs the upstream AFileWriter
+# golden across all 8 d3samp6 fragments). These 6 reductions write
+# methods are promoted — empty, never silently passed.
+_REDUCTIONS_WRITE_METHODS: dict[str, str] = {}
 
 
 # test_derived: the derived-variable *listing* surface landed (Phase H
@@ -223,10 +226,54 @@ _DERIVED_DBL_NODTANG_REASON = (
 )
 
 
+# Phase 3.1 (decision 22, planning/mili-py/phase-3.md): the on-disk
+# A/T/S writer landed in the Rust core, bit-exact-gated by
+# crates/mili-rs/tests/parity_write_append.rs on the parallel d3samp6
+# corpus (copy_non_state_data ×8 fragments + append_state on a
+# freshly-copied 0-state db: .A + state file byte-for-byte vs the
+# upstream AFileWriter golden). The redirected test_append_states
+# cases that exercise exactly that slice pass and are promoted; the
+# rest exercise the still-unported general write surface (append to a
+# db with existing states / multi-state / zero_out=False prev-state
+# data copy / per-file limits / the serial-sstate multi-entry-per-sname
+# directory merge) and stay honest strict-xfail → Phase 3.2.
+_APPEND_STATES_PROMOTED = {
+    ("TestAppendStateSerial", "test_serial_append_bad_time"),
+    ("TestAppendStateParallel", "test_parallel_append_bad_time"),
+    ("TestCopyNonStateDataSerial", "test_copy"),
+    ("TestCopyNonStateDataParallel", "test_copy"),
+}
+_APPEND_STATES_REASON = (
+    "Phase 3.2: append to a db with existing states / multi-state / "
+    "zero_out=False prev-state copy / per-file limits / serial-sstate "
+    "multi-entry-per-sname dir merge — the general write surface "
+    "(planning/mili-py/phase-3.md § Phase 3.2). Phase 3.1 bit-exact-"
+    "gated the 0-state copy_non_state_data + append on parallel d3samp6."
+)
+_MODIFY_DATABASE_REASON = (
+    "Phase 3.2: query(write_data=) write-half — the general state-data "
+    "scatter (planning/mili-py/phase-3.md § Phase 3.2). Not implemented "
+    "this session."
+)
+_APPEND_STATES_TOOL_REASON = (
+    "Phase 3.3: mili.append_states.AppendStatesTool — the input-dict "
+    "batch tool (planning/mili-py/phase-3.md § Phase 3.3). Not "
+    "implemented this session."
+)
+
+
 def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
     key = f"{mod}::{cls}::{meth}"
     if key in _XFAIL:
         return _XFAIL[key]
+    if mod == "test_append_states":
+        if (cls, meth) in _APPEND_STATES_PROMOTED:
+            return None
+        return _APPEND_STATES_REASON
+    if mod == "test_modify_database":
+        return _MODIFY_DATABASE_REASON
+    if mod == "test_append_states_tool":
+        return _APPEND_STATES_TOOL_REASON
     if mod == "test_milidatabase":
         # Phase I.4: the parallel handler classes (_MDB_PARALLEL_CLASSES)
         # are fully promoted — the per-proc _MiliInternal wrapper +
@@ -316,6 +363,9 @@ _REDIRECTED = [
     "test_derived",
     "test_projection",
     "test_grizinterface",
+    "test_append_states",
+    "test_modify_database",
+    "test_append_states_tool",
 ]
 
 
@@ -332,6 +382,34 @@ def _ids():
 
 
 _DATA = UPSTREAM_TESTS / "data" / "serial" / "sstate"
+
+
+@pytest.fixture(autouse=True)
+def _no_cwd_pollution():
+    """The upstream write tests (test_append_states /
+    test_modify_database / test_append_states_tool) copy the corpus
+    into cwd-relative scratch DBs and only ``os.remove`` them in
+    tearDown *on success* — an xfailed/failed case would otherwise
+    leave generated ``*.plt*`` files in the tree. Snapshot cwd before
+    each case and delete anything new after, so a redirected write
+    test never pollutes the repo."""
+    import os
+
+    before = set(os.listdir("."))
+    try:
+        yield
+    finally:
+        for name in set(os.listdir(".")) - before:
+            p = Path(name)
+            try:
+                if p.is_file():
+                    p.unlink()
+                elif p.is_dir():
+                    import shutil
+
+                    shutil.rmtree(p, ignore_errors=True)
+            except OSError:
+                pass
 
 
 @pytest.mark.skipif(

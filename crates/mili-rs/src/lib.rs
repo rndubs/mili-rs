@@ -38,6 +38,7 @@ mod srec;
 mod state;
 mod svar;
 mod ti;
+mod write;
 
 pub use adjacency::NeighborElems;
 pub use derived::{
