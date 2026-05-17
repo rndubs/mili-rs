@@ -1,6 +1,6 @@
 # Phase I — parallel per-proc-unmerged surface
 
-> **Status: I.1 + I.2 LANDED; I.3 next.** This is the self-contained
+> **Status: I.1 + I.2 + I.3 LANDED; I.4 next.** This is the self-contained
 > entry-point doc for the parallel slice. The summary + decision 20
 > live in [`m4.md`](m4.md) § "Phase I"; this file carries the
 > reproducible starting state so a fresh session can pick it up
@@ -208,18 +208,72 @@ forwarding is **`merge_results`-gated** and **scoped to the
   the `merge_results=True` re-reduce relocation is **I.3** — exactly
   the phased split this doc already prescribes.
 
-### Phase I.3 — `merge_results=True` re-reduce (highest risk)
+### Phase I.3 — `merge_results=True` re-reduce  ✅ **LANDED**
 
-Port `reductions.combine` / `merge_result_dictionaries` / `reduce_*`
-verbatim into `milox.reductions` (currently identity) and make
-`MiliDatabase.__postprocess` / the accessors re-reduce the per-proc
-lists when `merge_results=True`. **Decision point (record in I.3):**
-keep the Rust merge as the `merge_results=True` path (don't
-double-work) and only Python-merge where a test needs the per-proc
-list — re-assess against the `_REDUCTIONS_WRAPPER_CLASSES`
-serial-vs-parallel comparisons. **Net `merge_results=True` behavior
-must be unchanged** — gate behind the already-green merged suite
-staying green.
+**Decision point (recorded — the I.3/I.4 boundary):** *keep the Rust
+`DatabaseSet` merge as the `merge_results=True` path where it is
+already bit-exact (don't double-work); only Python-merge where a test
+needs the per-proc list.*
+
+**What landed.** `milox.reductions` was **already a complete verbatim
+port** (`combine` / `merge_result_dictionaries` /
+`list_concatenate*` / `reduce_*` — landed in the Phase-H reductions
+sub-slice, not identity as the pre-I.3 doc text assumed — logged as a
+state-vs-doc surprise). So I.3 is purely the **re-reduce
+relocation**: the `LoopWrapper`/`ServerWrapper` `merge_results=True`
+arm no longer passes through to the raw `PyMiliDatabase` (Set
+backend) — it forwards every read to a **`_MiliInternal` adapter over
+the Set-backed `PyMiliDatabase`**. The Rust `DatabaseSet` already
+performed upstream's per-fragment reduction bit-exactly (decision 19;
+`parity_xmilics`/`database_set` fixtures gate it) and `_MiliInternal`
+supplies the exact upstream accessor signatures + return shapes
+(`labels(class_name)`, `times()` → `ndarray`, `state_maps()` →
+`StateMap`, the return-code plumbing). **Net `merge_results=True`
+value is unchanged** (same Rust merge; upstream's
+`__postprocess`-applies-`reduce_function` maps in milox to *the Set
+backend already being reduced* + `_MiliInternal` reshaping it —
+`reductions.combine` stays identity over the single merged dict, never
+a Python re-merge of core data).
+
+**Promotions (bit-exact consequence, verified).** The genuinely
+cross-fragment-merged accessors promoted in
+`_REDUCTIONS_WRAPPER_METHODS` (×2 wrapper classes = **+18**):
+`labels`, `connectivity`, `nodes`, `times`,
+`components_of_vector_svar`, `containing_state_variables_of_class`,
+`state_variables_of_class`, `derived_variables_of_class`,
+`supported_derived_variables`. milox **546 → 564 pass / 287 → 269
+xfail** (`546+287 = 564+269 = 833`, fully accounted; nothing else
+incidentally flipped — `_MDB_PARALLEL_CLASSES` /
+`_ADJ_PARALLEL_CLASSES` / `_REDUCTIONS_COMBINE_CLASS` /
+`_REDUCTIONS_MERGEDF_CLASS` / `ParallelDerivedExpressions` all hold,
+strict-harness-verified).
+
+**Honest strict-xfail boundary (→ I.4).** The remaining
+`_REDUCTIONS_WRAPPER_METHODS` (`all_labels_of_material`,
+`class_labels_of_material`, `classes_of_state_variable`,
+`classes_of_derived_variable`, `int_points_of_state_variable`,
+`materials_of_class_name`, `nodes_of_elems`, `nodes_of_material`,
+`parts_of_class_name`, `queriable_svars`, `state_variable_titles`)
+resolve via **fragment 0 only** in the Rust core (the `db0()`
+convention — an MPI rank with no elements of a class never declares
+its class/svar/material tables), so they legitimately differ from
+upstream's per-proc `_MiliInternal` + `reduce_<X>`
+(`list_concatenate` / `dictionary_merge`). Reproducing them needs the
+I.4 per-proc-list + per-method reduce path — out of I.3 scope by the
+decision point. `append_state` / `copy_non_state_data` are
+additionally the Phase-3 write path.
+
+**One core fix required (parity-correct, not a merge change).**
+`database.rs::superclass_from_class_name` was `db0()`-only;
+`_MiliInternal.connectivity`/`int_points_of_state_variable` guard on
+it, so a class declared only on a non-rank-0 fragment (d3samp6
+`beam`) wrongly read "class does not exist". Fixed to scan fragments
+first-hit-wins — **exactly** upstream
+`reductions.reduce_superclass_from_class_names` (reductions.py:143-148:
+first non-`M_INVALID_LABEL` across procs). Decision-19-compliant
+(metadata resolution, no value math) and it kept the
+already-green merged milox parity tests green (it had regressed
+`test_connectivity_by_class[xmilics-d3samp6]`).
 
 ### Phase I.4 — promote the parallel-handler xfail buckets
 

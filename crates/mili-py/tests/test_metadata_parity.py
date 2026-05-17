@@ -139,6 +139,10 @@ def test_state_maps_rank0_parity(upstream_mili):
     wm = w.state_maps()
     assert len(gm) == len(wm)
     for i, (a, b) in enumerate(zip(gm, wm)):
-        assert a["time"] == pytest.approx(b.time), f"state {i} time"
-        assert a["file_number"] == b.file_number, f"state {i} file_number"
-        assert a["file_offset"] == b.file_offset, f"state {i} file_offset"
+        # Phase I.3: merge_results=True now routes through the
+        # _MiliInternal adapter over the Set backend, so state_maps()
+        # returns upstream-shaped StateMap objects (attribute access),
+        # not the old raw FFI dicts — matching upstream w exactly.
+        assert a.time == pytest.approx(b.time), f"state {i} time"
+        assert a.file_number == b.file_number, f"state {i} file_number"
+        assert a.file_offset == b.file_offset, f"state {i} file_offset"

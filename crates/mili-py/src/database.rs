@@ -122,8 +122,16 @@ impl PyMiliDatabase {
     }
 
     fn superclass_from_class_name(&self, class_name: &str) -> i32 {
-        self.db0()
-            .superclass_code(self.mesh, class_name)
+        // Merged-set semantics mirror upstream
+        // `reductions.reduce_superclass_from_class_names`
+        // (reductions.py:143-148): the per-proc `_MiliInternal` results
+        // reduce to the first that is not M_INVALID_LABEL. A class can
+        // be declared on a non-rank-0 fragment only (an MPI rank with no
+        // elements of that class never declares it), so scanning
+        // fragment 0 alone misses it. Scan fragments, first hit wins.
+        self.frags()
+            .iter()
+            .find_map(|db| db.superclass_code(self.mesh, class_name))
             .unwrap_or(-1)
     }
 

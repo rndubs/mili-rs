@@ -122,38 +122,46 @@ _ADJ_PARALLEL_CLASSES = (
 # no incidental pass).
 _REDUCTIONS_COMBINE_CLASS = "TestCombineFunction"
 # TestServerWrapperReductions / TestLoopWrapperReductions compare the
-# *serial* d3samp6 against the *parallel* d3samp6 (a different, per-proc
-# database) and call the ServerWrapper/LoopWrapper forwarding path
-# (per-proc-unmerged list shapes / raw PyMiliDatabase signatures); milox
-# collapses that fan-out in the Rust core, so these legitimately differ.
-# Parallel-handler scope, exactly like _MDB_PARALLEL_CLASSES — the
-# identical 22-method set fails for both wrapper classes; the remaining
-# methods incidentally agree (loose type/sorted checks) and must pass,
-# so the strict harness needs the precise per-method set, not a
-# whole-class xfail.
+# *serial* d3samp6 against the *parallel* d3samp6 through the
+# ServerWrapper/LoopWrapper forwarding path.
+#
+# Phase I.3 (the merge_results=True re-reduce relocation): the wrapper
+# now forwards every merge_results=True read to a _MiliInternal adapter
+# *over the Set-backed PyMiliDatabase*. The Rust DatabaseSet already
+# performed upstream's per-fragment reduction bit-exactly (decision 19),
+# and _MiliInternal supplies the exact upstream accessor signatures +
+# return shapes — so the genuinely cross-fragment-merged accessors
+# (labels / connectivity / nodes / times / components_of_vector_svar /
+# containing+/state_variables_of_class / derived_variables_of_class /
+# supported_derived_variables) are now bit-exact vs upstream's per-proc
+# _MiliInternal + reduce_<X> and were **promoted** (removed from this
+# set).
+#
+# The remaining methods stay honest strict-xfail: their Set-backend
+# accessor resolves via fragment 0 only in the Rust core (the db0()
+# convention — not a true cross-fragment merge: an MPI rank with no
+# elements of a class never declares its class/svar/material tables),
+# so they legitimately differ from upstream's per-proc _MiliInternal +
+# reduce_<X> (list_concatenate / dictionary_merge). Reproducing them
+# needs the Phase-I.4 per-proc-list + per-method reduce path (the full
+# per-proc surface) — out of I.3 scope by the recorded decision point
+# ("keep the Rust merge where bit-exact, don't double-work; only
+# Python-merge where a test needs the per-proc list"). test_append_state
+# / test_copy_non_state_data are additionally the Phase-3 write path.
 _REDUCTIONS_WRAPPER_METHODS = {
     "test_all_labels_of_material",
     "test_append_state",
     "test_class_labels_of_material",
     "test_classes_of_derived_variable",
     "test_classes_of_state_variable",
-    "test_components_of_vector_svar",
-    "test_connectivity",
-    "test_containing_state_variables_of_class",
     "test_copy_non_state_data",
-    "test_derived_variables_of_class",
     "test_int_points_of_state_variable",
-    "test_labels",
     "test_materials_of_class_name",
-    "test_nodes",
     "test_nodes_of_elems",
     "test_nodes_of_material",
     "test_parts_of_class_name",
     "test_queriable_svars",
     "test_state_variable_titles",
-    "test_state_variables_of_class",
-    "test_supported_derived_variables",
-    "test_times",
 }
 _REDUCTIONS_WRAPPER_CLASSES = (
     "TestServerWrapperReductions",
@@ -348,7 +356,16 @@ def _xfail_reason(mod: str, cls: str, meth: str) -> str | None:
             cls in _REDUCTIONS_WRAPPER_CLASSES
             and meth in _REDUCTIONS_WRAPPER_METHODS
         ):
-            return "parallel handler scope (serial vs per-proc parallel d3samp6; Rust DatabaseSet collapses the fan-out; Phase H)"
+            if meth in _REDUCTIONS_WRITE_METHODS:
+                return _REDUCTIONS_WRITE_METHODS[meth]
+            return (
+                "Phase I.4: merge_results=True now routes through the "
+                "_MiliInternal-over-Set adapter (I.3), but this accessor "
+                "resolves via fragment 0 only in the Rust core "
+                "(db0() — not a true cross-fragment merge), so it "
+                "differs from upstream's per-proc _MiliInternal + "
+                "reduce_<X>; needs the I.4 per-proc-list + reduce path"
+            )
         if (
             cls == _REDUCTIONS_MERGEDF_CLASS
             and meth in _REDUCTIONS_MERGEDF_METHODS

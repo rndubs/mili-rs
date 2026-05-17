@@ -76,30 +76,69 @@ _PER_FRAGMENT: Dict[str, str] = {
 class _EngineWrapper:
     """Hold the single ``PyMiliDatabase`` (``Set`` backend) and forward
     public reads either per-proc (``merge_results=False``, the
-    ``*_per_fragment()`` accessors) or merged (``merge_results=True``,
-    the Rust ``DatabaseSet`` collapse — decision 19)."""
+    ``*_per_fragment()`` accessors) or merged (``merge_results=True``).
+
+    **Phase I.3 decision (recorded — the I.3 re-reduce relocation):**
+    ``merge_results=True`` forwards every read to a ``_MiliInternal``
+    adapter *over the ``Set``-backed ``PyMiliDatabase``*. The Rust
+    ``DatabaseSet`` already performed upstream's per-fragment reduction
+    bit-exactly (decision 19; ``parity_xmilics``/``database_set``
+    fixtures gate it), and ``_MiliInternal`` supplies the exact upstream
+    accessor signatures + return shapes (``labels(class_name)``,
+    ``times()`` → ``ndarray``, the return-code plumbing, …). So the net
+    ``merge_results=True`` result is the *same merged value* as before
+    (Rust merge, untouched) now wearing the upstream
+    ``MiliDatabase``-method shape — **no Python re-merge of core data**
+    (the decision-point's "keep the Rust merge where bit-exact, don't
+    double-work"; upstream's ``__postprocess``-applies-``reduce_function``
+    maps in milox to *the Set backend already being reduced* and
+    ``_MiliInternal`` reshaping it). ``reductions.combine`` /
+    ``merge_result_dictionaries`` / ``reduce_*`` are the full verbatim
+    port (``milox.reductions``) used by the redirected
+    ``test_reductions`` collection + the ``ResultModifier`` path; they
+    are not invoked to re-reduce the already-merged Set accessors.
+
+    ``merge_results=False`` keeps the Phase-I.2 per-fragment routing
+    (scoped to the ``GrizInterface.__init__`` contract; the full
+    per-proc surface + xfail-bucket promotion is Phase I.4)."""
 
     def __init__(self, db: Any, merge_results: bool = True) -> None:
         self._db = db
         self._merge_results = merge_results
+        self._merged: Any = None
+        if merge_results:
+            # Lazy import: reader.py imports both parallel and
+            # miliinternal; importing at module scope would order-couple
+            # them. _MiliInternal(db) wraps the already-opened
+            # Set-backed PyMiliDatabase (its __init__ takes the engine
+            # directly when handed a PyMiliDatabase).
+            from .miliinternal import _MiliInternal
+
+            self._merged = _MiliInternal(db)
 
     def __getattr__(self, name: str) -> Any:
         # Reached only when the attribute is not found normally.
+        if self.__dict__["_merge_results"]:
+            return getattr(self.__dict__["_merged"], name)
         db = self.__dict__["_db"]
-        if not self.__dict__["_merge_results"]:
-            per_fragment = _PER_FRAGMENT.get(name)
-            if per_fragment is not None:
-                return getattr(db, per_fragment)
+        per_fragment = _PER_FRAGMENT.get(name)
+        if per_fragment is not None:
+            return getattr(db, per_fragment)
         return getattr(db, name)
 
     def returncode(self) -> Any:
-        """The Rust ``DatabaseSet`` collapses upstream's per-proc
-        fan-out and raises directly, so there is no per-proc return
-        code to surface — always OK for ``MiliDatabase``'s check."""
+        """``merge_results=True``: surface the inner ``_MiliInternal``'s
+        return code so its ERROR/CRITICAL codes raise through
+        ``MiliDatabase.__postprocess`` exactly as upstream. Otherwise
+        the per-fragment path raises in the Rust core directly, so there
+        is no per-proc code to surface — always OK."""
+        if self._merge_results:
+            return self._merged.returncode()
         return (ReturnCode.OK, "")
 
     def clear_return_code(self) -> None:
-        """No-op: see :meth:`returncode`."""
+        if self._merge_results:
+            self._merged.clear_return_code()
 
     def close(self) -> None:
         """No subprocesses to tear down (fan-out is in Rust)."""
