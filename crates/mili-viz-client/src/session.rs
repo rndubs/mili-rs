@@ -90,3 +90,90 @@ pub async fn fetch_server_mesh(root: &str, result: &str) -> Result<Mesh, BoxErr>
         }
     }
 }
+
+/// A live in-process session for the M3 windowed shell
+/// (`phase-5-m3.md` Decision 46): an owned `Execute` client, the
+/// in-process geometry seam, and a background task forwarding the
+/// `Subscribe` broadcast through a channel the UI drains every frame.
+/// `fetch_server_mesh` above is the M2 one-shot and is kept unchanged.
+pub struct Session {
+    client: pb::mili_viz_client::MiliVizClient<tonic::transport::Channel>,
+    svc: VizService,
+    deltas: std::sync::mpsc::Receiver<pb::StateDelta>,
+}
+
+impl Session {
+    /// Spawn an in-process server, subscribe, and (optionally)
+    /// `load <root>`. The returned session is *attached idle* if a
+    /// root was given and opened, else *not attached*.
+    ///
+    /// # Errors
+    /// Returns an error if the transport fails to connect, the
+    /// subscription cannot open, or an initial `load` is rejected.
+    pub async fn connect_in_process(root: Option<&str>) -> Result<Self, BoxErr> {
+        let svc = VizService::builder().build();
+        let (mut client, _server) = spawn_in_process(svc.clone()).await?;
+
+        let mut sub = client
+            .subscribe(Request::new(pb::SubscribeRequest::default()))
+            .await?
+            .into_inner();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            while let Ok(Some(delta)) = sub.message().await {
+                if tx.send(delta).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut s = Self {
+            client,
+            svc,
+            deltas: rx,
+        };
+        if let Some(root) = root {
+            s.execute(pb::command::Cmd::Load(pb::Load {
+                root: root.to_string(),
+            }))
+            .await?;
+            s.execute(pb::command::Cmd::Show(pb::Show {
+                result: String::new(),
+                component: String::new(),
+                opts: HashMap::new(),
+            }))
+            .await?;
+        }
+        Ok(s)
+    }
+
+    /// Send one command over the frozen `Execute` RPC.
+    ///
+    /// # Errors
+    /// Returns an error if the transport fails or the server rejects
+    /// the command.
+    pub async fn execute(&mut self, cmd: pb::command::Cmd) -> Result<(), BoxErr> {
+        exec(&mut self.client, cmd).await
+    }
+
+    /// Drain every `StateDelta` the background task has buffered.
+    #[must_use]
+    pub fn poll_deltas(&self) -> Vec<pb::StateDelta> {
+        self.deltas.try_iter().collect()
+    }
+
+    /// Resolve a broadcast `GeometryRef` through the in-process
+    /// geometry seam and decode it.
+    ///
+    /// # Errors
+    /// Returns an error if the ticket does not resolve or the blob
+    /// fails to decode.
+    pub fn resolve_geometry(&self, gref: &pb::GeometryRef) -> Result<Mesh, BoxErr> {
+        let blob = self
+            .svc
+            .fetch_geometry(&gref.flight_ticket)
+            .ok_or("GeometryRef ticket did not resolve in the in-process store")?;
+        Ok(decode_mvg(&blob)?)
+    }
+}
