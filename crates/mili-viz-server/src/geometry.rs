@@ -286,7 +286,8 @@ impl MeshTopology {
 
     /// Per-vertex scalar for `svar` at 1-based `state`, plus the finite
     /// data range `(min, max)` (phase-4-m3.md Decisions 13–15;
-    /// phase-4-m5.md Decisions 19–20 add scalar stress invariants).
+    /// phase-4-m5.md Decisions 19–20 add scalar stress invariants;
+    /// phase-4-m5b.md Decisions 22–23 add the eigenvalue families).
     /// `None` when the svar resolves to no prepped class or the query
     /// fails — the caller then falls back to the M2 bare hull.
     ///
@@ -332,6 +333,65 @@ impl MeshTopology {
                     primals.push(db.query_full(&args).ok()?);
                 }
                 let qr = mili_rs::compute_stress_invariant(inv, &primals, svar, title).ok()?;
+                component0_map(qr.values, &qr.labels)
+            });
+        }
+
+        // Derived: eigenvalue-based stress families (`prin_stress*` /
+        // `prin_dev_stress*` / `max_shear_stress`). Same routing seam as
+        // the M5 scalar invariants — only the spec/primals/compute calls
+        // change (phase-4-m5b.md Decisions 22–23; the eigensolver is
+        // already parity-exact in the `mili-rs` core suite).
+        if let Some((kind, title)) = mili_rs::principal_stress_spec(svar) {
+            let primal_names = mili_rs::principal_stress_primals();
+            let classes = db.classes_of_state_variable(primal_names[0])?;
+            if classes.is_empty() {
+                return None;
+            }
+            return self.scatter_elements(&classes, |class| {
+                let mut primals = Vec::with_capacity(primal_names.len());
+                for pn in primal_names {
+                    let args = QueryArgs {
+                        svar: pn,
+                        class,
+                        labels: None,
+                        states: &[state_idx],
+                        materials: None,
+                        ips: None,
+                        subrec: None,
+                    };
+                    primals.push(db.query_full(&args).ok()?);
+                }
+                let qr = mili_rs::compute_principal_stress(kind, &primals, svar, title).ok()?;
+                component0_map(qr.values, &qr.labels)
+            });
+        }
+
+        // Derived: strain invariants (`vol_strain` / `prin_strain*` /
+        // `prin_dev_strain*`). `vol_strain` reads only the 3 normal
+        // strains; the principals read all 6 (phase-4-m5b.md
+        // Decisions 22–23).
+        if let Some((kind, title)) = mili_rs::principal_strain_spec(svar) {
+            let primal_names = mili_rs::principal_strain_primals(kind);
+            let classes = db.classes_of_state_variable(primal_names[0])?;
+            if classes.is_empty() {
+                return None;
+            }
+            return self.scatter_elements(&classes, |class| {
+                let mut primals = Vec::with_capacity(primal_names.len());
+                for pn in primal_names {
+                    let args = QueryArgs {
+                        svar: pn,
+                        class,
+                        labels: None,
+                        states: &[state_idx],
+                        materials: None,
+                        ips: None,
+                        subrec: None,
+                    };
+                    primals.push(db.query_full(&args).ok()?);
+                }
+                let qr = mili_rs::compute_principal_strain(kind, &primals, svar, title).ok()?;
                 component0_map(qr.values, &qr.labels)
             });
         }
