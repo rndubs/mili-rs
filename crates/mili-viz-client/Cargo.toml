@@ -1,0 +1,25 @@
+[package]
+name = "mili-viz-client"
+version = "0.0.0"
+description = "Phase 5 M1 mili-viz client: wgpu renderer skeleton (window, orbit camera, hard-coded triangle)."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "mili-viz-client"
+path = "src/main.rs"
+
+[dependencies]
+wgpu = "29"
+winit = "0.30"
+glam = "0.32"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+
+[dev-dependencies]
+glam = "0.32"
+
+[lints]
+workspace = true
