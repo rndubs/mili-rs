@@ -1,7 +1,7 @@
 [package]
 name = "mili-viz-server"
 version = "0.0.0"
-description = "Phase 4 M1 mili-viz server stub: in-process MiliViz transport, dispatch + broadcast."
+description = "Phase 4 mili-viz server: in-process MiliViz transport, dispatch + broadcast, mili-rs-backed geometry."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 mili-viz-proto = { path = "../mili-viz-proto" }
+mili-rs = { path = "../mili-rs" }
 prost = "0.14"
 tonic = "0.14"
 tonic-prost = "0.14"

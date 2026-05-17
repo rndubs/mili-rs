@@ -725,6 +725,7 @@ name = "mili-viz-server"
 version = "0.0.0"
 dependencies = [
  "hyper-util",
+ "mili-rs",
  "mili-viz-proto",
  "prost",
  "tokio",
