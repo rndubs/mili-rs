@@ -169,6 +169,7 @@ class _MiliInternal:
             qty_svars,
             svar_names,
             ordinal_blocks,
+            state_byte_offset,
         ) in self._db.subrecords():
             out.append(
                 Subrecord(
@@ -179,6 +180,7 @@ class _MiliInternal:
                     qty_svars=qty_svars,
                     svar_names=list(svar_names),
                     ordinal_blocks=np.array(ordinal_blocks, dtype=np.int64),
+                    state_byte_offset=state_byte_offset,
                 )
             )
         return out

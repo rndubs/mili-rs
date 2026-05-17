@@ -357,7 +357,50 @@ _REDIRECTED = [
     "test_append_states",
     "test_modify_database",
     "test_append_states_tool",
+    # Closeout (redirect-coverage gate): the two remaining upstream
+    # read-path modules. test_utils (the result-reshape helpers) is
+    # fully promoted — `dataframe_to_result_dictionary` was the last
+    # missing verbatim port (milox.utils, decision 18/19). test_bugfixes
+    # (regression queries over the dir_version_2 / basic1 / vrt_BS /
+    # fdamp1 / beam_udi / d3samp4 / labeling / vecarray / th corpora) is
+    # fully promoted — it surfaced one real milox metadata gap, an
+    # unpopulated `Subrecord.state_byte_offset`, now derived in the Rust
+    # core (`mili_rs::reshape::subrecords`, cumulative over the
+    # flattened srec list — upstream `miliinternal.py:271-272`).
+    "test_utils",
+    "test_bugfixes",
 ]
+
+# Upstream test files deliberately NOT redirected, each with a concrete
+# justification (closeout redirect-coverage audit). The coverage-guard
+# test below asserts {every test_*.py} == set(_REDIRECTED) ∪ EXCLUDED,
+# so a future upstream submodule bump that adds a test_*.py fails the
+# suite until it is consciously redirected-and-promoted or excluded
+# here. These are non-API / non-parity surfaces, not silent xfails.
+EXCLUDED = {
+    # Pure import-smoke test: no corpus, no value assertions; just
+    # `from mili import <module>` for every submodule. It imports
+    # `mili.plotting`, the matplotlib presentation layer milox
+    # intentionally does not port (decision 18/19 scope — not a
+    # read-path/parity surface). Nothing to assert against the oracle.
+    "test_imports",
+    # Exercises upstream's internal *pure-Python* afileIO object model
+    # (`AFileReader.read`/`read_dirs`, `parse_database`,
+    # `write_database`, `AFileWriter`, `datatypes.DirectoryDecl.Type`).
+    # Decision 22 puts the A/T/S parser+writer in the Rust core
+    # (`mili_rs::write` / the mmap reader), NOT a Python
+    # re-implementation — there is no equivalent milox Python object
+    # model to redirect onto. The writer's byte-level fidelity is
+    # already gated bit-exact by crates/mili-rs/tests/parity_write_*.rs.
+    "test_afileIO",
+    # Matplotlib image-baseline rendering of query results
+    # (`mili.plotting.MatPlotLibPlotter`, PIL pixel-diff vs committed
+    # PNGs). Presentation layer, not a parity/read-path API; milox
+    # intentionally does not port `plotting` (decision 18/19 scope). The
+    # queries it plots are already covered by the redirected read-path
+    # modules.
+    "test_plotting",
+}
 
 
 def _ids():
@@ -437,3 +480,38 @@ def test_upstream_redirected(case_id):
     if failed:
         msgs = [tb for _, tb in (result.failures + result.errors)]
         pytest.fail("\n".join(msgs), pytrace=False)
+
+
+@pytest.mark.skipif(
+    not UPSTREAM_TESTS.is_dir()
+    or not (UPSTREAM_TESTS / "test_reader.py").is_file(),
+    reason="reference/mili-python submodule absent",
+)
+def test_redirect_coverage_is_exhaustive():
+    """Closeout hard gate: every ``reference/mili-python/tests/
+    test_*.py`` must be either redirected-and-promoted (``_REDIRECTED``)
+    or consciously excluded with a concrete reason (``EXCLUDED``).
+
+    With the xfail bucket empty (Phase 3 complete) the only remaining
+    way parity can silently rot is a future upstream submodule bump
+    adding a ``test_*.py`` that is in neither set — no case generated,
+    no xfail, no failure. This guard turns that into a hard failure so
+    the new file must be consciously redirected or excluded."""
+    present = {
+        p.stem
+        for p in UPSTREAM_TESTS.glob("test_*.py")
+        if p.is_file()
+    }
+    accounted = set(_REDIRECTED) | EXCLUDED
+    uncovered = sorted(present - accounted)
+    stale = sorted(accounted - present)
+    assert not uncovered, (
+        "Upstream test file(s) neither redirected nor excluded — "
+        "consciously wire each into _REDIRECTED (promote-or-honestly-"
+        "xfail per the Phase-3.x protocol) or add to EXCLUDED with a "
+        f"concrete justification: {uncovered}"
+    )
+    assert not stale, (
+        "_REDIRECTED/EXCLUDED names a test file that no longer exists "
+        f"upstream — prune it: {stale}"
+    )

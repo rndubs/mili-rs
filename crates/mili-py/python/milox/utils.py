@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
+from .datatypes import QueryDict, QueryLayout
 from .reductions import combine
 
 
@@ -129,3 +130,32 @@ def result_dictionary_to_dataframe(
             result_dataframes[svar_name] = df
 
     return result_dataframes
+
+
+def dataframe_to_result_dictionary(result_df):  # noqa: ANN001,ANN201
+  """Verbatim port of upstream ``mili.utils.dataframe_to_result_dictionary``
+  (decision 18/19 — pure non-parity pandas reshape, the inverse of
+  ``result_dictionary_to_dataframe``, over the already-parity-correct
+  ``QueryDict``)."""
+  result_dict = {}
+  for svar_name, svar_df in result_df.items():
+    if not svar_df.empty:
+      data_shape = svar_df.shape + ( svar_df.iloc[0,0].shape if svar_df.iloc[0,0].ndim else (1,) )  # type: ignore
+      data_type = svar_df.iloc[0,0].dtype  # type: ignore
+      result_dict[svar_name] = QueryDict(
+        source = "unknown",
+        class_name = "unknown",
+        title = "unknown",
+        layout = QueryLayout(
+          states = np.array(svar_df.index, dtype=np.int32),
+          labels = np.array(svar_df.columns, dtype=np.int32),
+          times = np.empty([0], dtype=np.float32),
+          components = [],
+        ),
+        data = np.empty(data_shape, dtype=data_type),
+      )
+      for i,ii in enumerate(svar_df.index):
+        for j,jj in enumerate(svar_df.columns):
+          result_dict[svar_name]['data'][i,j,:] = svar_df.loc[ii,jj]
+
+  return result_dict

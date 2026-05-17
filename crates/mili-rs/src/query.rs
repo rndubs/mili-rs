@@ -1237,7 +1237,10 @@ fn dims_product(dims: &[i32]) -> Result<usize> {
     Ok(acc)
 }
 
-fn atoms_and_widths(sub: &Subrecord, svars: &SvarTable) -> Result<(Vec<usize>, Vec<usize>)> {
+pub(crate) fn atoms_and_widths(
+    sub: &Subrecord,
+    svars: &SvarTable,
+) -> Result<(Vec<usize>, Vec<usize>)> {
     let k = sub.svar_names.len();
     let mut atoms = Vec::with_capacity(k);
     let mut widths = Vec::with_capacity(k);

@@ -9,7 +9,14 @@
 > [`../mili-rs/status.md`](../mili-rs/status.md) (the `milox` parity +
 > redirect tracker row + § "Surprises") first. The write path is the
 > last unported redirect surface — with 3.3 landed there is no
-> remaining milox redirect work.
+> remaining milox redirect work. **Closeout (decision 25, `m4.md`):**
+> the redirect-coverage audit then wired the last two read-path modules
+> (`test_utils`/`test_bugfixes`) and consciously excluded the 3 non-API
+> ones (`test_imports`/`test_afileIO`/`test_plotting`), added a
+> `test_redirect_coverage_is_exhaustive` + strict 0-xfail
+> `pytest_sessionfinish` hard gate in CI, and fixed the last latent
+> read gap it surfaced (`Subrecord.state_byte_offset`). milox 900 → 938
+> pass / 0 xfail; upstream-file coverage 16/16.
 
 ## Why this phase exists
 
