@@ -10,7 +10,24 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mili_rs::{Database, MeshId, QueryArgs, StateValues, Superclass};
+use mili_rs::{Database, MeshId, QueryArgs, QueryResult, StateValues, Superclass};
+
+/// Zero-based local node indices of each hex face, transcribed from
+/// `reference/mili-python/src/mili/miliinternal.py:675-682` — the
+/// **same** table `mili_rs::Database::surface_strain_query` indexes
+/// internally with its `face` argument, so a `face` number and the
+/// nodes `scatter_hex_faces` scatters that face's value onto
+/// correspond (phase-4-m5c.md Decision 30). This is a connectivity
+/// constant, the same category as `triangulation()` (griz `faces.c`);
+/// the surface-strain math stays solely in the parity-exact kernel.
+const HEX_FACE_NODES: [[usize; 4]; 6] = [
+    [1, 2, 6, 5],
+    [2, 3, 7, 6],
+    [0, 4, 7, 3],
+    [1, 5, 4, 0],
+    [4, 5, 6, 7],
+    [0, 3, 2, 1],
+];
 
 /// Bare-hull `GeometryRef.layout` (phase-4-m2.md Decision 11) — no
 /// scalar field. Unchanged from M2.
@@ -396,6 +413,154 @@ impl MeshTopology {
             });
         }
 
+        // Derived: nodal time-derived families (displacement /
+        // velocity / acceleration). A node-direct gather through the
+        // parity-exact `mili-rs` kernels, mirroring the
+        // `crates/mili-py` `query()` nodal dispatch for the single
+        // current state (phase-4-m5c.md Decisions 28–29). Only
+        // `reference_state == 0` (the upstream default; the viz `show`
+        // vocabulary has no reference-state arg, and a non-zero value
+        // is an upstream-rejected extension, never a silent wrong
+        // answer). The derived names are not primals, so this must
+        // resolve before the primal `classes_of_state_variable`
+        // lookup.
+        {
+            let disp_comp = mili_rs::node_disp_spec(svar);
+            let disp_mag = mili_rs::node_disp_mag_spec(svar);
+            let vel = mili_rs::node_vel_spec(svar);
+            let acc = mili_rs::node_acc_spec(svar);
+            if disp_comp.is_some() || disp_mag.is_some() || vel.is_some() || acc.is_some() {
+                let mesh = self.mesh_id;
+                let node_query = |sv: &str, st: &[usize]| -> Option<QueryResult> {
+                    let args = QueryArgs {
+                        svar: sv,
+                        class: "node",
+                        labels: None,
+                        states: st,
+                        materials: None,
+                        ips: None,
+                        subrec: None,
+                    };
+                    db.query_full(&args).ok()
+                };
+                let computed: Option<QueryResult> = if disp_comp.is_some() || disp_mag.is_some() {
+                    let dirs: Vec<usize> = match (disp_comp, disp_mag) {
+                        (Some((d, _)), _) => vec![d],
+                        (_, Some((ds, _))) => ds.to_vec(),
+                        _ => unreachable!(),
+                    };
+                    let title = disp_comp
+                        .map(|(_, t)| t)
+                        .or(disp_mag.map(|(_, t)| t))
+                        .unwrap();
+                    let (coords, dims) = db.node_coords(mesh).ok().flatten().unwrap_or_default();
+                    let node_labels = db.labels(mesh, "node").ok().flatten().unwrap_or_default();
+                    let mut primals: Vec<QueryResult> = Vec::with_capacity(dirs.len());
+                    let mut refs: Vec<Vec<f32>> = Vec::with_capacity(dirs.len());
+                    let mut ok = true;
+                    for &d in &dirs {
+                        let pname = mili_rs::node_disp_primal(d);
+                        let Some(primal) = node_query(pname, &[state_idx]) else {
+                            ok = false;
+                            break;
+                        };
+                        let Ok(reference) = mili_rs::nodal_reference_from_coords(
+                            &primal.labels,
+                            &node_labels,
+                            &coords,
+                            dims.max(1),
+                            d,
+                        ) else {
+                            ok = false;
+                            break;
+                        };
+                        primals.push(primal);
+                        refs.push(reference);
+                    }
+                    if !ok {
+                        None
+                    } else if disp_comp.is_some() {
+                        mili_rs::compute_node_displacement(
+                            primals.pop().unwrap(),
+                            &refs.pop().unwrap(),
+                            svar,
+                            title,
+                        )
+                        .ok()
+                    } else {
+                        mili_rs::compute_node_displacement_magnitude(&primals, &refs, svar, title)
+                            .ok()
+                    }
+                } else {
+                    let (dir, title, is_acc) = vel
+                        .map(|(d, t)| (d, t, false))
+                        .or(acc.map(|(d, t)| (d, t, true)))
+                        .unwrap();
+                    let pname = mili_rs::node_disp_primal(dir);
+                    let max_state = n as i64;
+                    let s = state_idx as i64 + 1;
+                    let mut needed: Vec<i64> = Vec::new();
+                    if is_acc {
+                        if s == 1 {
+                            needed.extend([1, 2, 3]);
+                        } else if s == max_state {
+                            needed.extend([max_state, max_state - 1, max_state - 2]);
+                        } else {
+                            needed.extend([s - 1, s, s + 1]);
+                        }
+                    } else {
+                        needed.push(s);
+                        if s != 1 {
+                            needed.push(s - 1);
+                        }
+                    }
+                    needed.retain(|&v| v >= 1 && v <= max_state);
+                    needed.sort_unstable();
+                    needed.dedup();
+                    let needed_idx: Vec<usize> = needed.iter().map(|&v| (v - 1) as usize).collect();
+                    match node_query(pname, &needed_idx) {
+                        None => None,
+                        Some(gathered) => {
+                            let times = db.times();
+                            if is_acc {
+                                mili_rs::compute_node_acceleration(
+                                    gathered,
+                                    &needed,
+                                    &[s],
+                                    &times,
+                                    max_state,
+                                    svar,
+                                    title,
+                                )
+                                .ok()
+                            } else {
+                                mili_rs::compute_node_velocity(
+                                    gathered,
+                                    &needed,
+                                    &[s],
+                                    &times,
+                                    svar,
+                                    title,
+                                )
+                                .ok()
+                            }
+                        }
+                    }
+                };
+                let qr = computed?;
+                let by_label = component0_map(qr.values, &qr.labels)?;
+                return self.node_direct(&by_label);
+            }
+        }
+
+        // Derived: per-face Hex surface strain (`surfstrain*`). A
+        // separate per-face connectivity gather over the parity-exact
+        // `Database::surface_strain_query`, kept distinct from the
+        // M5/M5b element-class scatter (phase-4-m5c.md Decision 30).
+        if let Some((title, jr, ic)) = mili_rs::surfstrain_spec(svar) {
+            return self.scatter_hex_faces(db, svar, title, jr, ic, state_idx);
+        }
+
         let classes = db.classes_of_state_variable(svar)?;
         if classes.is_empty() {
             return None;
@@ -417,20 +582,109 @@ impl MeshTopology {
 
         if classes.iter().any(|c| c == "node") {
             // Nodal field: map node label → vertex directly.
-            if self.node_labels.len() != self.node_count {
-                return None;
-            }
             let by_label = query("node")?;
-            let mut scalar = vec![f32::NAN; self.node_count];
-            for (i, &lab) in self.node_labels.iter().enumerate() {
-                if let Some(&val) = by_label.get(&lab) {
-                    scalar[i] = val as f32;
-                }
-            }
-            Self::finite_range(scalar)
+            self.node_direct(&by_label)
         } else {
             self.scatter_elements(&classes, query)
         }
+    }
+
+    /// Map a node-label-keyed value map onto the mesh vertices
+    /// directly (no averaging — one node, one vertex; griz nodal
+    /// shading). Extracted verbatim from M3's inline nodal branch so
+    /// the primal nodal path stays byte-identical while the M5c
+    /// nodal-time families (phase-4-m5c.md Decision 29) reuse it.
+    /// Untouched vertices stay `f32::NAN`.
+    fn node_direct(&self, by_label: &HashMap<i32, f64>) -> Option<(Vec<f32>, f64, f64)> {
+        if self.node_labels.len() != self.node_count {
+            return None;
+        }
+        let mut scalar = vec![f32::NAN; self.node_count];
+        for (i, &lab) in self.node_labels.iter().enumerate() {
+            if let Some(&val) = by_label.get(&lab) {
+                scalar[i] = val as f32;
+            }
+        }
+        Self::finite_range(scalar)
+    }
+
+    /// Per-face Hex surface strain scattered onto the mesh
+    /// (phase-4-m5c.md Decision 30). For each retained Hex element
+    /// class, the parity-exact `Database::surface_strain_query` is
+    /// evaluated for each face `1..=6`; that face's per-element value
+    /// is nodal-averaged onto the face's 4 corner nodes via
+    /// `HEX_FACE_NODES` (the same table the kernel indexes with
+    /// `face`). A separate gather from `scatter_elements` — the
+    /// M5/M5b element seam and the M3 paths are untouched. `None`
+    /// when the corpus has no Hex class or every `surface_strain_query`
+    /// fails, so the caller falls back to the M3 bare hull.
+    fn scatter_hex_faces(
+        &self,
+        db: &Database,
+        result_name: &str,
+        title: &str,
+        jr: usize,
+        ic: usize,
+        state_idx: usize,
+    ) -> Option<(Vec<f32>, f64, f64)> {
+        let mesh = self.mesh_id;
+        let mut sum = vec![0.0f64; self.node_count];
+        let mut cnt = vec![0u32; self.node_count];
+        let mut any = false;
+        for ec in &self.elem_classes {
+            if ec.n_nodes < 8 {
+                continue;
+            }
+            let is_hex = db
+                .superclass_code(mesh, &ec.name)
+                .and_then(|c| Superclass::from_code(i64::from(c)))
+                == Some(Superclass::Hex);
+            if !is_hex {
+                continue;
+            }
+            for face in 1..=6i64 {
+                let Ok(qr) = db.surface_strain_query(
+                    mesh,
+                    &ec.name,
+                    None,
+                    &[state_idx],
+                    face,
+                    jr,
+                    ic,
+                    result_name,
+                    title,
+                ) else {
+                    continue;
+                };
+                let Some(by_label) = component0_map(qr.values, &qr.labels) else {
+                    continue;
+                };
+                let fnodes = &HEX_FACE_NODES[(face - 1) as usize];
+                for (e, &lab) in ec.labels.iter().enumerate() {
+                    let Some(&val) = by_label.get(&lab) else {
+                        continue;
+                    };
+                    any = true;
+                    for &local in fnodes {
+                        let nid = ec.conns[e * ec.n_nodes + local] as usize;
+                        if nid < self.node_count {
+                            sum[nid] += val;
+                            cnt[nid] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if !any {
+            return None;
+        }
+        let mut scalar = vec![f32::NAN; self.node_count];
+        for i in 0..self.node_count {
+            if cnt[i] > 0 {
+                scalar[i] = (sum[i] / f64::from(cnt[i])) as f32;
+            }
+        }
+        Self::finite_range(scalar)
     }
 
     /// Nodal-average a per-element `label → value` map onto the mesh

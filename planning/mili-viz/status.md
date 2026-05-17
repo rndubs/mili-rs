@@ -8,7 +8,7 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families), M6 ✅ (remote transport) landed.** (The deferred derived sub-slice — `surfstrain*`/`*_alt`/nodal-time — remains a lower-priority follow-up per `phase-4-m5b.md` Decision 22.)
+- **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families; + M5 third slice ✅: `surfstrain*` per-face Hex + nodal-time families), M6 ✅ (remote transport) landed.** (Only the `*_alt` trig principal-strain variants remain deferred — they have **no** parity-exact `mili-rs` kernel, so they belong in a future `mili-rs` **core** derived sub-slice, not a viz producer slice; `phase-4-m5c.md` Decision 28.)
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
@@ -163,6 +163,7 @@
 | [`phase-4-m4.md`](phase-4-m4.md) | **The buildable Phase 4 M4 scope.** Selection + enable/disable behind the frozen contract; Decisions 16–18 (`enable`/`disable` filters the emitted triangle list by per-triangle material, default-visible, scalar/range byte-stable, composes with `MVG1`/`MVG2`; selection stays metadata-only via the existing `DELTA_SELECTION` + `Snapshot`, `clrsel` empty-class clears all; effects on next `show`, one delta per `Execute`). No proto/format change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5.md`](phase-4-m5.md) | **The buildable Phase 4 M5 scope (first slice).** Scalar stress invariants behind the frozen contract; Decisions 19–21 (the derived oracle exists — `mili-rs::derived`, bit-exact vs `mili` Python — so reuse `compute_stress_invariant`, no formula port, no griz golden, **supersedes `phase-4-m1.md` Decision 5**; resolve → per-class `query_full` → kernel → M3 nodal scatter, eigensolver/per-face/time families deferred; gating test uses the linear-pressure identity, no `parity` feature in `mili-viz-server`). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5b.md`](phase-4-m5b.md) | **The buildable Phase 4 M5 follow-up scope (eigenvalue families).** Principal stress/strain, deviatoric, max-shear, volumetric strain behind the frozen contract; Decisions 22–24 (family set = the 14 eigensolver-on-already-prepped-element-class names, `surfstrain*`/`*_alt`/time deferred; routing reuses the M5 seam verbatim — two branches before the primal lookup, only `*_spec`/`*_primals`/`compute_*` swapped, M5/M3 paths byte-stable; gating test uses only single-shared-gather invariants — ordering + relative tracelessness + max-shear — cross-cardinality "trace" checks rejected for an IP-sampling skew). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-4-m5c.md`](phase-4-m5c.md) | **The buildable Phase 4 M5 third-slice scope (`surfstrain*` + nodal-time families).** Surface strain + nodal displacement/velocity/acceleration behind the frozen contract; Decisions 28–31 (family set = nodal-time + `surfstrain{x,y,z,xy,yz,zx}`, `*_alt` re-deferred — no parity-exact `mili-rs` kernel, belongs in a core sub-slice, also corrects Decision 22's "nodal-time already M3-reachable" imprecision; nodal-time via a node-direct branch group + a factored M3 node→vertex helper, element scatter untouched; `surfstrain*` via a separate `scatter_hex_faces` per-face Hex gather over the parity-exact `surface_strain_query` + a viz-local canonical face table, M5/M5b/M3 byte-stable; gating test = the exact displacement-magnitude norm identity + structural/state-tracking, no cross-cardinality checks). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m6.md`](phase-4-m6.md) | **The buildable Phase 4 M6 scope (remote transport).** gRPC + Arrow Flight over TCP behind the frozen contract; Decisions 25–27 (real Flight + gRPC TCP transport redeems `phase-4-m2.md` Decision 10 — its tonic-version premise is now factually false but the deferral was still correct; ticket/blob/layout byte-stable; in-process seam kept. Flight via the canonical vendored `Flight.proto` on the existing protoc-free `protox` path — zero change to the frozen `mili_viz.proto`; only `DoGet` implemented, other Flight RPCs `UNIMPLEMENTED`; verbatim opaque blob in `FlightData.data_body`; heavy `arrow-flight` crate rejected for dependency surface. `serve_tcp(addr)` pre-binds a `TcpListener`, co-serves both services on one port; gating test binds a real ephemeral `127.0.0.1:0`). No `mili_viz.proto`/blob/ticket change | ✅ pinned + landed (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
@@ -271,6 +272,32 @@ expanded by `scripting.md` / `client.md`. None started.
         `derived_principal_families` (single-shared-gather invariants:
         ordering + relative tracelessness + max-shear); M1's six + M2
         + M3 + M4 + M5 tests unchanged and green.
+  - [x] **M5 third slice — `surfstrain*` + nodal-time families.**
+        ✅ **Landed.** `show disp_{x,y,z}`/`disp_mag`/
+        `disp_rad_mag_xy`/`vel_{x,y,z}`/`acc_{x,y,z}` route through the
+        parity-exact `mili_rs::compute_node_*` +
+        `nodal_reference_from_coords` kernels into M3's node-direct
+        mapping (factored into a shared helper — the M3 primal nodal
+        path byte-stable); `show surfstrain{x,y,z,xy,yz,zx}` routes
+        through the parity-exact `mili_rs::Database::
+        surface_strain_query` via a **separate** per-face Hex
+        connectivity gather (`scatter_hex_faces`, a viz-local
+        `miliinternal.py:675-682` face table — a connectivity
+        constant, not a formula re-port), kept distinct from the
+        M5/M5b element-class scatter. The `*_alt` trig
+        principal-strain variants are **re-deferred** (no parity-exact
+        `mili-rs` kernel; would breach M5 Decision 19 — they belong in
+        a future `mili-rs` core derived sub-slice). No proto change,
+        no `parity` feature; the M5/M5b element scatter, the M3
+        primal/nodal path, and the M6 transport are byte-stable.
+        Scope/decisions: [`phase-4-m5c.md`](phase-4-m5c.md) (28–31).
+        Gating test:
+        `crates/mili-viz-server/tests/m5c_derived.rs`
+        `derived_surfstrain_and_nodal_time` (single-shared-gather
+        invariants: the exact displacement-magnitude norm identity +
+        structural/state-tracking + the `vel_*`-at-state-1-zero kernel
+        fact); M1's six + M2 + M3 + M4 + M5 + M5b + M6 tests unchanged
+        and green.
 - [x] **M6 — remote transport.** ✅ **Landed.** A real **gRPC +
       Arrow Flight over TCP** transport joins the in-process one:
       `serve_tcp(svc, addr)` co-serves `MiliVizServer` + a real
@@ -379,12 +406,26 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     [`phase-4-m6.md`](phase-4-m6.md) (25–27). Gating test
     `m6_transport.rs::remote_transport_grpc_and_flight_over_tcp`.
     **Phase 4 (`mili-viz` server) is complete.**
-12. ⏭️ **NEXT:** Phase 5 (`mili-viz` client — `wgpu`/`egui`
-    renderer; M1 was its only gate and is long landed), and/or the
-    remaining derived sub-slice (`surfstrain*` per-face Hex + the
-    `*_alt` trig strains + nodal time-derived families — a different
-    gather than the already-prepped-element-class seam, a
-    lower-priority follow-up per `phase-4-m5b.md` Decision 22).
+12. ✅ **DONE (coding M5 third slice):** `surfstrain*` + nodal-time
+    families — `disp_{x,y,z}`/`disp_mag`/`disp_rad_mag_xy`/
+    `vel_{x,y,z}`/`acc_{x,y,z}` via the parity-exact
+    `mili_rs::compute_node_*` into M3's factored node-direct mapping;
+    `surfstrain{x,y,z,xy,yz,zx}` via the parity-exact
+    `mili_rs::Database::surface_strain_query` through a separate
+    per-face Hex `scatter_hex_faces` gather (kept distinct from the
+    M5/M5b element seam). `*_alt` re-deferred (no parity-exact
+    `mili-rs` kernel — a future `mili-rs` core derived sub-slice).
+    Scope/decisions in [`phase-4-m5c.md`](phase-4-m5c.md) (28–31).
+    Gating test `m5c_derived.rs::derived_surfstrain_and_nodal_time`.
+    **Phase 4 derived story is complete (modulo the `*_alt` core
+    follow-up).**
+13. ⏭️ **NEXT:** Phase 5 (`mili-viz` client — `wgpu`/`egui`
+    renderer; M1 was its only gate and is long landed), and/or a
+    future `mili-rs` **core** derived sub-slice porting +
+    parity-validating `__compute_principal_strain_alt` (the only
+    remaining deferred derived family; once it has a parity-exact
+    kernel, routing it into viz is a trivial follow-up through the
+    M5/M5b seam).
 
 ## Update protocol
 
