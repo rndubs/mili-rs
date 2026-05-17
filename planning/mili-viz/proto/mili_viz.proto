@@ -1,11 +1,17 @@
-// mili-viz-proto — DRAFT for Phase 4 M1.
+// mili-viz-proto — Phase 4 M1 wire contract.
 //
-// This is a design artifact, not a built crate yet. It pins the
-// multi-client surface that scripting.md and the live-GUI sync
-// depend on. When Phase 4 M1 starts, this file moves into
-// `crates/mili-viz-proto/proto/` and gets a tonic build.rs.
+// This is a design artifact, not a built crate yet. It is the
+// CONSOLIDATED M1 surface specified by phase-4-m1.md: the union of
+// the base griz command vocabulary (README.md), the scripting
+// multi-client surface (scripting.md), and the server-hosted agent
+// surface (client.md). It supersedes the pre-agent draft @ 5bd8195;
+// every change is enumerated as Δ1–Δ9 in phase-4-m1.md Decision 1.
+// When Phase 4 M1 starts, this file moves into
+// `crates/mili-viz-proto/proto/` and gets a tonic build.rs. The
+// agent RPCs are frozen here but return UNIMPLEMENTED until Phase
+// 4/5 M6 (phase-4-m1.md Decisions 6 & 7).
 //
-// Design rules (see scripting.md / README.md):
+// Design rules (see scripting.md / README.md / phase-4-m1.md):
 //   * The command vocabulary is the griz command set, unchanged.
 //   * Camera is server-authoritative; every client (egui window,
 //     Python script) is a peer that mutates via Execute and observes
@@ -44,7 +50,33 @@ service MiliViz {
 
   // Pull result data back to the caller. Small results inline;
   // large ones set `flight` and the client fetches via Arrow Flight.
+  // Also the data path for the client-side pick "describe" readout
+  // (phase-4-m1.md Decision 2) and time-history (Decision 3).
   rpc Query(QueryRequest) returns (QueryReply);
+
+  // --- Agent surface (phase-4-m1.md Decision 1 Δ1–Δ3) -------------
+  // Frozen in M1; server-side implementation is Phase 4/5 M6 and is
+  // gated behind the `agent` capability (Decision 6). A server with
+  // no LLM backend returns UNIMPLEMENTED here and omits `agent` from
+  // HelloReply.capabilities so a conformant client hides the panel.
+
+  // Client -> server user turn. The server runs the agent loop; the
+  // agent's commands flow through the SAME internal dispatch as
+  // Execute, so they broadcast as ordinary StateDeltas tagged with
+  // the agent's origin_client_id. Token/tool/status events ride the
+  // Subscribe stream as DELTA_AGENT (not this reply).
+  rpc AgentChat(AgentChatRequest) returns (AgentChatReply);
+
+  // Barge-in: cancel the in-flight agent turn. Always reachable
+  // (the panel's persistent Stop). Empty turn_id = current turn.
+  rpc Interrupt(InterruptRequest) returns (InterruptReply);
+
+  // Offscreen framebuffer capture: (w,h,format) -> encoded bytes.
+  // Backs BOTH the agent vision tool and Python `s.snapshot()` —
+  // one capability, two callers. Named CaptureFrame (not Snapshot)
+  // to avoid colliding with the full-state `Snapshot` delta below
+  // (phase-4-m1.md Decision 1 Δ7).
+  rpc CaptureFrame(FrameRequest) returns (FrameReply);
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +100,9 @@ message HelloReply {
   // Human-readable note when compatible == false (client warns).
   string mismatch_detail = 3;
   // Capabilities the server actually supports (intersection guidance).
+  // Reserved value `agent` (phase-4-m1.md Decision 1 Δ9): present iff
+  // an LLM backend is configured. The client keys the AI Assistant
+  // panel's existence off it — absent => panel hidden, no error.
   repeated string capabilities = 4;
   // Echoed so a script can confirm which session it attached to.
   SessionInfo session = 5;
@@ -238,6 +273,10 @@ enum DeltaKind {
   DELTA_CAMERA = 7;
   DELTA_MATERIALS = 8;
   DELTA_CLOSED = 9;
+  DELTA_AGENT = 10;       // phase-4-m1.md Decision 1 Δ4: agent
+                          // transcript/tool/status events ride the
+                          // existing Subscribe stream so every client
+                          // mirrors the conversation (camera-like).
 }
 
 message StateDelta {
@@ -255,9 +294,14 @@ message StateDelta {
     CameraState camera = 10;
     MaterialsState materials = 11;
     bool closed = 12;
+    AgentEvent agent = 13;     // phase-4-m1.md Decision 1 Δ5
   }
 }
 
+// Full session-state delta, sent once at Subscribe stream open
+// (DELTA_SNAPSHOT). NOTE: this is the *session state* snapshot, NOT a
+// framebuffer capture — pixel capture is CaptureFrame/FrameReply
+// (phase-4-m1.md Decision 1 Δ7).
 message Snapshot {
   LoadedState loaded = 1;
   uint32 state = 2;
@@ -265,6 +309,10 @@ message Snapshot {
   ResultState result = 4;
   CameraState camera = 5;
   MaterialsState materials = 6;
+  // phase-4-m1.md Decision 1 Δ8: a late-joining client gets the
+  // running agent transcript + status here, same as camera/selection.
+  // Empty in M1 (agent loop is M6, Decision 6).
+  AgentTranscript agent = 7;
 }
 
 message LoadedState {
@@ -347,4 +395,110 @@ message InlineTable {
   // Row-major [len(states) x len(labels) x components].
   repeated double values = 3;
   uint32 components = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Agent  (phase-4-m1.md Decision 1 Δ6 — server-hosted agent, client.md)
+//
+// FROZEN in M1, IMPLEMENTED in Phase 4/5 M6 (Decision 6/7). The agent
+// is a peer of the command vocabulary: every action it takes is an
+// ordinary Command producing an ordinary StateDelta, so it inherits
+// server-authoritative sync for free. These messages add the user
+// turn, barge-in, framebuffer capture, and the broadcast event stream;
+// they do NOT add a privileged subsystem or touch the geometry/Flight
+// path.
+// ---------------------------------------------------------------------------
+
+message AgentChatRequest {
+  string text = 1;
+  // Optional "[attach frame]" — the user pinned the current viewport
+  // to this message. The server already has the framebuffer; this is
+  // just the intent flag + optional pre-encoded bytes for remote.
+  bool attach_frame = 2;
+  bytes attached_frame = 3;          // optional, encoded; empty = let
+  string attached_frame_format = 4;  // server capture it ("png"/"jpeg")
+}
+
+message AgentChatReply {
+  bool ok = 1;
+  string error = 2;           // populated iff !ok (e.g. UNIMPLEMENTED
+                              // detail in M1, or no `agent` capability)
+  // Stable id for this turn; Interrupt(turn_id) cancels it and the
+  // DELTA_AGENT events carry it.
+  string turn_id = 3;
+}
+
+message InterruptRequest { string turn_id = 1; } // empty = current turn
+message InterruptReply   { bool ok = 1; string error = 2; }
+
+message FrameRequest {
+  uint32 width = 1;
+  uint32 height = 2;
+  string format = 3;          // "png" | "jpeg"
+}
+message FrameReply {
+  bool ok = 1;
+  string error = 2;
+  bytes image = 3;            // encoded frame bytes
+  string format = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+}
+
+// One agent event, broadcast to ALL subscribers as a StateDelta with
+// kind == DELTA_AGENT. Every client mirrors the conversation (shared
+// session state, like the camera).
+message AgentEvent {
+  string turn_id = 1;
+  oneof ev {
+    AgentStatus status = 2;       // thinking/running/idle/interrupted/error
+    AgentToken token = 3;         // assistant text delta (streaming)
+    AgentToolBegin tool_begin = 4;
+    AgentToolEnd tool_end = 5;
+    AgentUserTurn user_turn = 6;  // echo the human's message to all
+                                  // clients (shared transcript)
+  }
+}
+
+enum AgentStatusKind {
+  AGENT_IDLE = 0;
+  AGENT_THINKING = 1;
+  AGENT_RUNNING = 2;
+  AGENT_INTERRUPTED = 3;
+  AGENT_ERROR = 4;
+}
+message AgentStatus { AgentStatusKind kind = 1; string detail = 2; }
+
+message AgentToken { string text = 1; }
+
+// Inline collapsed transcript line, e.g. summary = "ran: state 47;
+// show sx"; expanding shows `detail` (the exact Command/Query).
+message AgentToolBegin {
+  string call_id = 1;
+  string summary = 2;
+  string detail = 3;
+}
+message AgentToolEnd {
+  string call_id = 1;
+  bool ok = 2;
+  string result_summary = 3;   // e.g. "sx -> [0, 5.2e4]"
+  // If the tool was a mutating Command, the StateDelta it produced,
+  // so the provenance journal can correlate (origin_client_id is the
+  // agent's stable id).
+  uint64 delta_seq = 4;
+}
+message AgentUserTurn { string text = 1; bool had_frame = 2; }
+
+// Transcript replay for a late-joining client, carried in the opening
+// DELTA_SNAPSHOT (Snapshot.agent). Empty in M1.
+message AgentTranscript {
+  repeated AgentMessage messages = 1;
+  AgentStatus status = 2;       // current agent status at join time
+}
+message AgentMessage {
+  string role = 1;              // "user" | "assistant"
+  string text = 2;
+  // Collapsed tool lines already rendered for this message, in order.
+  repeated string tool_lines = 3;
+  string turn_id = 4;
 }
