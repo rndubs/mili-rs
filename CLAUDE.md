@@ -23,18 +23,29 @@ cargo test --workspace --features parity
 
 `scripts/setup-parity.sh` is the single source of truth shared by CI's
 `test-parity` job, the web session-start hook, and local developers. It
-inits the `reference/mili-python` **and** `reference/mili` submodules
-and `pip install -e`s the Python oracle (deps come transitively from
-its `pyproject.toml` — don't hand-maintain a dep list). Idempotent;
-safe to re-run.
+inits the `reference/mili-python`, `reference/mili` **and**
+`reference/griz` submodules (explicitly by path — never `--recursive`
+or a bare `--init`; see below) and `pip install -e`s the Python oracle
+(deps come transitively from its `pyproject.toml` — don't hand-maintain
+a dep list). Idempotent; safe to re-run.
 
 `.claude/hooks/session-start.sh` runs the script automatically in
 Claude Code on the web (gated on `$CLAUDE_CODE_REMOTE`). Local sessions
 must run it themselves before trusting a green run — a bare
 `cargo test` without it silently skips the parity/xmilics coverage.
 
-`reference/griz` holds C reference source we cite by path only — not
-needed for any test.
+`reference/griz` holds the C reference source we cite by path (and the
+source for the post-training grammar/intent corpus —
+`planning/mili-viz/posttraining-dataset.md`). It is now checked out by
+`scripts/setup-parity.sh`.
+
+**Never `git submodule update --init --recursive` (or a bare
+`--init`).** Only the three submodules above are wanted, by path. The
+nested `reference/mili/test/mdgtest` is on an LLNL-internal SSH host
+unreachable from CI / web runners, and recursing also dirties
+`reference/mili` by bumping its vendored `cmake/blt` pin. Use
+`scripts/setup-parity.sh` (or its explicit per-path
+`git submodule update --init --depth 1 reference/<name>` commands).
 
 ## Where the implementation plan lives
 

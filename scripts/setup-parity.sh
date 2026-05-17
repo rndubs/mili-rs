@@ -8,9 +8,13 @@
 # passes in CI, and vice versa.
 #
 # What it does:
-#   1. Checks out the two submodules the suites read:
+#   1. Checks out the submodules the suites / planning work read:
 #        - reference/mili-python : the Python oracle + tests/data corpus
 #        - reference/mili        : the C-library xmilics multi-proc corpus
+#        - reference/griz        : the C reference source (interpret.c,
+#                                  viewer.c, Doc/) — cited by path and
+#                                  the source for the post-training
+#                                  grammar/intent corpus
 #   2. Installs the mili-python package editable, which pulls every
 #      Python runtime dep (numpy, pandas, dill, psutil,
 #      typing_extensions, matplotlib, ...) transitively from its
@@ -24,14 +28,18 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-# `--depth 1` keeps the corpus checkout small; both submodules are
-# data/reference only. We do NOT recurse — the nested mdgtest
-# submodule under reference/mili/test/ lives on an LLNL-internal SSH
-# host unreachable from CI / web runners.
+# `--depth 1` keeps each checkout small; all three submodules are
+# data/reference only. We init them EXPLICITLY BY PATH and do NOT use
+# `--recursive` / a bare `--init`: the nested mdgtest submodule under
+# reference/mili/test/ lives on an LLNL-internal SSH host unreachable
+# from CI / web runners, and recursing also dirties reference/mili by
+# bumping its vendored cmake/blt pin.
 echo "==> submodule: reference/mili-python"
 git submodule update --init --depth 1 reference/mili-python
 echo "==> submodule: reference/mili"
 git submodule update --init --depth 1 reference/mili
+echo "==> submodule: reference/griz"
+git submodule update --init --depth 1 reference/griz
 
 # Editable install so `import mili` resolves to the checked-out
 # submodule. Deps come from reference/mili-python/pyproject.toml.
