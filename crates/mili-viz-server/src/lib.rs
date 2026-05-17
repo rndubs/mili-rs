@@ -33,8 +33,10 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
+mod flight;
 mod geometry;
 mod raw;
+pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
 pub use raw::{parse_line, parse_raw, to_raw};
 
@@ -246,6 +248,15 @@ impl VizService {
     #[must_use]
     pub fn fetch_geometry(&self, ticket: &[u8]) -> Option<Vec<u8>> {
         self.inner.session.lock().unwrap().geom.get(ticket).cloned()
+    }
+
+    /// The Arrow Flight adapter over this service's geometry store
+    /// (phase-4-m6.md Decision 26). `serve_tcp` co-serves it next to
+    /// `MiliVizServer`; a Flight `DoGet` of a frozen ticket streams
+    /// the byte-identical blob `fetch_geometry` would return.
+    #[must_use]
+    pub fn flight_service(&self) -> FlightGeometryService {
+        FlightGeometryService::new(Arc::clone(&self.inner))
     }
 
     /// Dispatch one parsed command: mutate state, assign a seq, build
@@ -808,4 +819,74 @@ pub async fn spawn_in_process(
         .await?;
 
     Ok((pb::mili_viz_client::MiliVizClient::new(channel), handle))
+}
+
+/// Serve `MiliViz` **and** the Arrow Flight `FlightService` over a
+/// real TCP socket (Phase 4 M6 — phase-4-m6.md Decisions 26 & 27).
+/// Both services share one `Arc<Inner>` (one session, one geometry
+/// store, one broadcast bus) and are multiplexed on the one HTTP/2
+/// port by tonic's router. The listener is bound *before* serving so
+/// an ephemeral `addr` port (`127.0.0.1:0`) resolves to a concrete
+/// `SocketAddr` returned to the caller (no TOCTOU).
+///
+/// # Errors
+/// Returns an error if the TCP listener cannot bind `addr`.
+pub async fn serve_tcp(
+    svc: VizService,
+    addr: std::net::SocketAddr,
+) -> Result<
+    (std::net::SocketAddr, tokio::task::JoinHandle<()>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use mili_viz_proto::flight::flight_service_server::FlightServiceServer;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::Server;
+
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let local = listener.local_addr()?;
+    let flight = svc.flight_service();
+
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(MiliVizServer::new(svc))
+            .add_service(FlightServiceServer::new(flight))
+            .serve_with_incoming(TcpListenerStream::new(listener))
+            .await
+            .expect("tcp server terminated with error");
+    });
+
+    Ok((local, handle))
+}
+
+/// Bind a server on an ephemeral `127.0.0.1` TCP port and return
+/// connected real `MiliViz` **and** Flight clients over that TCP
+/// transport, plus the bound address and the server task handle. The
+/// remote-transport analogue of [`spawn_in_process`]; the M6
+/// acceptance-gate transport.
+///
+/// # Errors
+/// Returns a transport error if the listener cannot bind or a client
+/// channel fails to connect.
+pub async fn spawn_tcp(
+    svc: VizService,
+) -> Result<
+    (
+        std::net::SocketAddr,
+        pb::mili_viz_client::MiliVizClient<tonic::transport::Channel>,
+        mili_viz_proto::flight::flight_service_client::FlightServiceClient<
+            tonic::transport::Channel,
+        >,
+        tokio::task::JoinHandle<()>,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+    let (local, handle) = serve_tcp(svc, addr).await?;
+
+    let url = format!("http://{local}");
+    let viz = pb::mili_viz_client::MiliVizClient::connect(url.clone()).await?;
+    let flight =
+        mili_viz_proto::flight::flight_service_client::FlightServiceClient::connect(url).await?;
+
+    Ok((local, viz, flight, handle))
 }

@@ -8,7 +8,7 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families) landed.**
+- **Phase 4 (`mili-viz` server): ✅ COMPLETE — M1 ✅, M2 ✅, M3 ✅, M4 ✅, M5 ✅ (+ M5 follow-up ✅: eigenvalue families), M6 ✅ (remote transport) landed.** (The deferred derived sub-slice — `surfstrain*`/`*_alt`/nodal-time — remains a lower-priority follow-up per `phase-4-m5b.md` Decision 22.)
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
@@ -111,8 +111,36 @@
   [`phase-4-m5b.md`](phase-4-m5b.md). Gating test:
   `crates/mili-viz-server/tests/m5b_principal.rs`
   `derived_principal_families`; M1's six + M2 + M3 + M4 + M5 tests
-  still pass unchanged. Next coding milestone: M6 (remote transport —
-  gRPC + Arrow Flight over TCP).
+  still pass unchanged.
+- **✅ Phase 4 M6 is implemented (remote transport).** The
+  in-process `tokio::io::duplex` transport is joined by a real
+  **gRPC + Arrow Flight over TCP** transport: `serve_tcp(svc, addr)`
+  binds a `TcpListener` (ephemeral `:0` supported) and co-serves
+  `MiliVizServer` **and** a real `arrow.flight.protocol.
+  FlightService` on the one port via tonic's router. The frozen
+  `GeometryRef.flight_ticket` resolves through a real Flight `DoGet`
+  that streams the **byte-identical** M2/M3 `MVG1`/`MVG2` blob — the
+  ticket bytes, the `layout` string, and the encoded blob are
+  unchanged (`phase-4-m2.md` Decision 10 redeemed; that decision's
+  tonic-version premise is now factually false — `arrow-flight` 57+
+  = tonic 0.14 — and is explicitly superseded). The Flight surface
+  is the **canonical vendored `Flight.proto`** compiled through the
+  existing protoc-free `protox` path (zero change to the frozen
+  `mili_viz.proto`); only `DoGet` is implemented, every other Flight
+  RPC returns `UNIMPLEMENTED` (the frozen-stub discipline of
+  `phase-4-m1.md` Decision 7); the heavy `arrow-flight` crate was
+  rejected for dependency surface (we never build a `RecordBatch` —
+  the blob is opaque per Decision 11). `spawn_in_process` and
+  `VizService::fetch_geometry` are **kept unchanged** as the
+  in-process test/embedding seam (README run mode 1). No
+  `mili_viz.proto` change, no blob/ticket change. Scope + Decisions
+  25–27 in [`phase-4-m6.md`](phase-4-m6.md). Gating test:
+  `crates/mili-viz-server/tests/m6_transport.rs`
+  `remote_transport_grpc_and_flight_over_tcp` (real ephemeral TCP;
+  Flight `DoGet` blob byte-identical to `fetch_geometry`;
+  skip-on-absent per CLAUDE.md); M1's six + M2 + M3 + M4 + M5 + M5b
+  tests still pass unchanged. **Phase 4 is now complete; Phase 5
+  (`mili-viz` client) is the remaining work.**
 - **✅ The Phase 4 M1 surface is pinned.**
   [`phase-4-m1.md`](phase-4-m1.md) is the consolidated, buildable M1
   scope doc (the analogue of `mili-py/m1.md`): it reconciles the
@@ -135,6 +163,7 @@
 | [`phase-4-m4.md`](phase-4-m4.md) | **The buildable Phase 4 M4 scope.** Selection + enable/disable behind the frozen contract; Decisions 16–18 (`enable`/`disable` filters the emitted triangle list by per-triangle material, default-visible, scalar/range byte-stable, composes with `MVG1`/`MVG2`; selection stays metadata-only via the existing `DELTA_SELECTION` + `Snapshot`, `clrsel` empty-class clears all; effects on next `show`, one delta per `Execute`). No proto/format change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5.md`](phase-4-m5.md) | **The buildable Phase 4 M5 scope (first slice).** Scalar stress invariants behind the frozen contract; Decisions 19–21 (the derived oracle exists — `mili-rs::derived`, bit-exact vs `mili` Python — so reuse `compute_stress_invariant`, no formula port, no griz golden, **supersedes `phase-4-m1.md` Decision 5**; resolve → per-class `query_full` → kernel → M3 nodal scatter, eigensolver/per-face/time families deferred; gating test uses the linear-pressure identity, no `parity` feature in `mili-viz-server`). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-4-m5b.md`](phase-4-m5b.md) | **The buildable Phase 4 M5 follow-up scope (eigenvalue families).** Principal stress/strain, deviatoric, max-shear, volumetric strain behind the frozen contract; Decisions 22–24 (family set = the 14 eigensolver-on-already-prepped-element-class names, `surfstrain*`/`*_alt`/time deferred; routing reuses the M5 seam verbatim — two branches before the primal lookup, only `*_spec`/`*_primals`/`compute_*` swapped, M5/M3 paths byte-stable; gating test uses only single-shared-gather invariants — ordering + relative tracelessness + max-shear — cross-cardinality "trace" checks rejected for an IP-sampling skew). No proto change | ✅ pinned + landed (2026-05-17) |
+| [`phase-4-m6.md`](phase-4-m6.md) | **The buildable Phase 4 M6 scope (remote transport).** gRPC + Arrow Flight over TCP behind the frozen contract; Decisions 25–27 (real Flight + gRPC TCP transport redeems `phase-4-m2.md` Decision 10 — its tonic-version premise is now factually false but the deferral was still correct; ticket/blob/layout byte-stable; in-process seam kept. Flight via the canonical vendored `Flight.proto` on the existing protoc-free `protox` path — zero change to the frozen `mili_viz.proto`; only `DoGet` implemented, other Flight RPCs `UNIMPLEMENTED`; verbatim opaque blob in `FlightData.data_body`; heavy `arrow-flight` crate rejected for dependency surface. `serve_tcp(addr)` pre-binds a `TcpListener`, co-serves both services on one port; gating test binds a real ephemeral `127.0.0.1:0`). No `mili_viz.proto`/blob/ticket change | ✅ pinned + landed (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -242,8 +271,23 @@ expanded by `scripting.md` / `client.md`. None started.
         `derived_principal_families` (single-shared-gather invariants:
         ordering + relative tracelessness + max-shear); M1's six + M2
         + M3 + M4 + M5 tests unchanged and green.
-- [ ] **M6 — remote transport.** Same proto over gRPC + Arrow Flight
-      on TCP; validate over a real network mount.
+- [x] **M6 — remote transport.** ✅ **Landed.** A real **gRPC +
+      Arrow Flight over TCP** transport joins the in-process one:
+      `serve_tcp(svc, addr)` co-serves `MiliVizServer` + a real
+      `arrow.flight.protocol.FlightService` (canonical vendored
+      `Flight.proto` on the existing protoc-free `protox` path —
+      **zero change to the frozen `mili_viz.proto`**; only `DoGet`
+      implemented, other Flight RPCs `UNIMPLEMENTED`) on one TCP
+      port. The frozen `GeometryRef.flight_ticket` resolves through
+      a real Flight `DoGet` streaming the **byte-identical** M2/M3
+      `MVG1`/`MVG2` blob (`phase-4-m2.md` Decision 10 redeemed; its
+      tonic-version premise now superseded). `spawn_in_process` /
+      `fetch_geometry` kept unchanged as the in-process seam. No
+      proto/blob/ticket change. Scope/decisions:
+      [`phase-4-m6.md`](phase-4-m6.md) (25–27). Gating test:
+      `crates/mili-viz-server/tests/m6_transport.rs`
+      `remote_transport_grpc_and_flight_over_tcp`; M1's six + M2 +
+      M3 + M4 + M5 + M5b tests unchanged and green.
 
 ## Phase 5 — `mili-viz` client (NOT STARTED, gated on Phase 4 M1)
 
@@ -322,14 +366,25 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     Gating test `m5b_principal.rs::derived_principal_families`.
     `surfstrain*`/`*_alt`/nodal-time families remain deferred
     (Decision 22).
-11. ⏭️ **NEXT:** either the remaining derived sub-slice
-    (`surfstrain*` per-face Hex + the `*_alt` trig strains + nodal
-    time-derived families — a different gather than the
-    already-prepped-element-class seam, see `phase-4-m5b.md`
-    Decision 22) or **coding M6** (remote transport — the same proto
-    over gRPC + Arrow Flight on TCP; Decision 10 swaps the in-process
-    geometry store for a real Flight `DoGet`, format/ticket frozen at
-    M2).
+11. ✅ **DONE (coding M6):** remote transport — a real **gRPC +
+    Arrow Flight over TCP** transport (`serve_tcp`) co-serves
+    `MiliVizServer` + a real `arrow.flight.protocol.FlightService`
+    (canonical vendored `Flight.proto` on the existing protoc-free
+    `protox` path — zero change to the frozen `mili_viz.proto`; only
+    `DoGet` implemented). The frozen `GeometryRef.flight_ticket`
+    resolves through a real Flight `DoGet` streaming the
+    byte-identical M2/M3 blob (`phase-4-m2.md` Decision 10 redeemed
+    and its tonic-version premise superseded); `spawn_in_process` /
+    `fetch_geometry` kept as the in-process seam. Scope/decisions in
+    [`phase-4-m6.md`](phase-4-m6.md) (25–27). Gating test
+    `m6_transport.rs::remote_transport_grpc_and_flight_over_tcp`.
+    **Phase 4 (`mili-viz` server) is complete.**
+12. ⏭️ **NEXT:** Phase 5 (`mili-viz` client — `wgpu`/`egui`
+    renderer; M1 was its only gate and is long landed), and/or the
+    remaining derived sub-slice (`surfstrain*` per-face Hex + the
+    `*_alt` trig strains + nodal time-derived families — a different
+    gather than the already-prepped-element-class seam, a
+    lower-priority follow-up per `phase-4-m5b.md` Decision 22).
 
 ## Update protocol
 
