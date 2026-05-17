@@ -3,10 +3,10 @@
 //!
 //! The byte layout is `phase-4-m2.md` Decision 11
 //! (`MVG1:verts_f32x3+idx_u32+trimat_u32`); the M3 superset
-//! (`MVG2:...+scalar_f32`) is tolerated by **ignoring** the trailing
-//! per-vertex scalar — scalar→color is Phase 5 M3, M2 draws the bare
-//! hull. Per-vertex normals are computed on the CPU so the hull reads
-//! as a 3-D surface, not a flat silhouette.
+//! (`MVG2:...+scalar_f32`) is now **kept** — the trailing per-vertex
+//! scalar becomes vertex colour through a colormap (`phase-5-m3.md`
+//! Decision 47). Per-vertex normals are computed on the CPU so the
+//! hull reads as a 3-D surface, not a flat silhouette.
 
 use glam::Vec3;
 
@@ -19,6 +19,10 @@ pub struct Mesh {
     pub normals: Vec<[f32; 3]>,
     /// Triangle-list indices into `positions` (multiple of 3).
     pub indices: Vec<u32>,
+    /// Optional per-vertex `MVG2` scalar (`positions.len()` entries),
+    /// `None` for a bare `MVG1` hull. Drives the colormap +
+    /// legend (`phase-5-m3.md` Decision 47).
+    pub scalars: Option<Vec<f32>>,
 }
 
 /// Error decoding a geometry blob.
@@ -46,8 +50,8 @@ fn le_f32(b: &[u8], off: usize) -> f32 {
 }
 
 /// Decode an `MVG1`/`MVG2` blob (`phase-4-m2.md` Decision 11). The
-/// optional `MVG2` trailing scalar is parsed past but discarded
-/// (M2 draws the bare hull; scalar→color is M3).
+/// optional `MVG2` trailing per-vertex scalar is kept in
+/// [`Mesh::scalars`] (`phase-5-m3.md` Decision 47).
 ///
 /// # Errors
 /// Returns [`DecodeError`] if the magic is unknown or the buffer is
@@ -105,13 +109,25 @@ pub fn decode_mvg(blob: &[u8]) -> Result<Mesh, DecodeError> {
     for i in 0..n_idx {
         indices.push(le_u32(blob, idx_off + i * 4));
     }
-    // trimat + (MVG2) scalar are intentionally not read — M2 hull only.
+    // trimat is the per-triangle material — not consumed by the M3
+    // renderer (material visibility is server-side, M4).
+    let scalars = if with_scalar {
+        let scalar_off = idx_off + idx_bytes + trimat_bytes;
+        let mut s = Vec::with_capacity(n_verts);
+        for v in 0..n_verts {
+            s.push(le_f32(blob, scalar_off + v * 4));
+        }
+        Some(s)
+    } else {
+        None
+    };
 
     let normals = compute_normals(&positions, &indices);
     Ok(Mesh {
         positions,
         normals,
         indices,
+        scalars,
     })
 }
 
@@ -146,6 +162,7 @@ impl Mesh {
             positions: vec![[0.0, 0.6, 0.0], [-0.6, -0.5, 0.0], [0.6, -0.5, 0.0]],
             normals: vec![[0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
+            scalars: None,
         }
     }
 

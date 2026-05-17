@@ -1,31 +1,43 @@
-//! Phase 5 M2 `mili-viz` client — render server output.
+//! Phase 5 M3 `mili-viz` client — the `egui` shell.
 //!
-//! M1 was the `wgpu` renderer skeleton (window, orbit camera, a
-//! hard-coded triangle; `phase-5-m1.md` Decisions 38–40). M2 wires
-//! the transport in: [`fetch_server_mesh`] spawns a `mili-viz-server`
-//! over the in-process transport, drives `load`/`show`, resolves the
-//! returned `GeometryRef`, and [`decode_mvg`]s the self-describing
-//! blob into a [`Mesh`] the [`Renderer`] draws through the orbit
-//! [`Camera`]. Scope + Decisions 41–43:
-//! `planning/mili-viz/phase-5-m2.md`.
+//! M1 was the `wgpu` renderer skeleton; M2 wired the in-process
+//! transport and drew the decoded server hull
+//! (`phase-5-m1.md`/`phase-5-m2.md`). M3 grows an `egui` shell onto
+//! that renderer: the toolbar, the left dock, and the five viewport
+//! overlays in the L1 layout, and the `MVG2` per-vertex scalar now
+//! becomes vertex colour through a colormap driven by a left-dock
+//! result pick. Scope + Decisions 44–47:
+//! `planning/mili-viz/phase-5-m3.md`.
 //!
-//! The renderer stays render-to-texture-first
-//! ([`render_mesh_to_image`]); the windowed [`run`] path is a thin
-//! wrapper around the same [`Renderer`]. Remote mode (gRPC + Flight
-//! TCP) is Phase 5 M5; the `egui` controls are M3.
+//! [`build_shell_ui`] is the pure, GPU-free layout core (the
+//! always-on test weight); [`render_shell_to_image`] composites the
+//! unchanged mesh pass with the additive `egui` pass into one
+//! off-screen texture. The windowed [`run`] path drives a live
+//! [`Session`] over the in-process transport. Remote mode (gRPC +
+//! Flight TCP) is Phase 5 M5; the bottom-tabs command line is M3.5;
+//! the AI panel is M6.
 
 #![allow(clippy::pedantic)]
 
 mod app;
 mod camera;
+mod colormap;
+mod egui_layer;
 mod mesh;
 mod renderer;
 mod session;
+mod shell;
 
 pub use app::run;
 pub use camera::Camera;
+pub use colormap::{normalize as colormap_normalize, sample as colormap_sample};
 pub use mesh::{decode_mvg, DecodeError, Mesh};
 pub use renderer::{
-    headless_device, render_mesh_to_image, render_to_image, Renderer, CLEAR_COLOR, OFFSCREEN_FORMAT,
+    headless_device, render_mesh_to_image, render_shell_to_image, render_to_image, Renderer,
+    CLEAR_COLOR, OFFSCREEN_FORMAT,
 };
-pub use session::fetch_server_mesh;
+pub use session::{fetch_server_mesh, Session};
+pub use shell::{
+    build_shell_ui, LoadedInfo, Overlay, Overlays, ResultInfo, SessionPhase, ShellState, UiAction,
+    DERIVED_RESULTS,
+};

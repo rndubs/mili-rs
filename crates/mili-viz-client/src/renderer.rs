@@ -38,7 +38,14 @@ pub const CLEAR_COLOR: wgpu::Color = wgpu::Color {
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
+    color: [f32; 3],
 }
+
+/// The M2 uniform lit base colour, used when a vertex carries no
+/// `MVG2` scalar (bare hull / no result). Kept identical to the M2
+/// shader constant so `m2_render_server_output.rs` is unaffected
+/// (`phase-5-m3.md` Decision 47).
+const BASE_COLOR: [f32; 3] = [0.62, 0.68, 0.80];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -125,7 +132,7 @@ impl Renderer {
                 buffers: &[wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<Vertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
                 }],
             },
             fragment: Some(wgpu::FragmentState {
@@ -172,13 +179,39 @@ impl Renderer {
         &self.device
     }
 
-    /// Upload (or replace) the mesh this renderer draws.
-    pub fn upload_mesh(&mut self, mesh: &Mesh) {
+    /// The underlying queue — the `egui` pass writes its buffers
+    /// through it (`phase-5-m3.md` Decision 45).
+    #[must_use]
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    /// Upload (or replace) the mesh this renderer draws. When the
+    /// mesh carries an `MVG2` scalar and `range` is `Some((min,max))`
+    /// the per-vertex scalar is mapped through the cool→warm colormap
+    /// (`phase-5-m3.md` Decision 47); otherwise every vertex gets the
+    /// M2 uniform [`BASE_COLOR`] (so a bare hull renders exactly as in
+    /// M2).
+    pub fn upload_mesh(&mut self, mesh: &Mesh, range: Option<(f32, f32)>) {
+        let color_of = |i: usize| -> [f32; 3] {
+            match (&mesh.scalars, range) {
+                (Some(s), Some((lo, hi))) => {
+                    let t = crate::colormap::normalize(s[i], lo, hi);
+                    crate::colormap::sample(t)
+                }
+                _ => BASE_COLOR,
+            }
+        };
         let verts: Vec<Vertex> = mesh
             .positions
             .iter()
             .zip(&mesh.normals)
-            .map(|(&position, &normal)| Vertex { position, normal })
+            .enumerate()
+            .map(|(i, (&position, &normal))| Vertex {
+                position,
+                normal,
+                color: color_of(i),
+            })
             .collect();
         let vertex_buffer = self
             .device
@@ -320,8 +353,72 @@ pub fn render_mesh_to_image(
 ) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
-    renderer.upload_mesh(mesh);
+    renderer.upload_mesh(mesh, None);
     Some(renderer.read_back(width, height, camera))
+}
+
+/// Render `mesh` **and** the `egui` shell (`state`) into one
+/// off-screen texture and read it back as tightly-packed RGBA8 — the
+/// M3 composite seam (`phase-5-m3.md` Decision 45). The mesh pass is
+/// the unchanged [`Renderer::render`]; the `egui` pass is the
+/// additive non-clearing [`EguiPaint`] pass over the same view.
+/// `None` when no adapter is available (skip-on-absent).
+#[must_use]
+pub fn render_shell_to_image(
+    width: u32,
+    height: u32,
+    camera: &Camera,
+    mesh: &Mesh,
+    range: Option<(f32, f32)>,
+    state: &mut crate::shell::ShellState,
+) -> Option<Vec<u8>> {
+    let (device, queue) = headless_device()?;
+    let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
+    renderer.upload_mesh(mesh, range);
+    let mut egui = crate::egui_layer::EguiPaint::new(&renderer.device, OFFSCREEN_FORMAT);
+
+    let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen shell target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    // Mesh pass — unchanged Renderer::render.
+    renderer.render(&view, width, height, camera);
+
+    // Additive egui pass on the same view (load, no depth).
+    let raw_input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(width as f32, height as f32),
+        )),
+        ..Default::default()
+    };
+    egui.paint(
+        &renderer.device,
+        &renderer.queue,
+        &view,
+        &egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [width, height],
+            pixels_per_point: 1.0,
+        },
+        raw_input,
+        |ui| {
+            let _ = crate::shell::build_shell_ui(ui, state);
+        },
+    );
+
+    Some(renderer.copy_back(&texture, width, height))
 }
 
 impl Renderer {
@@ -345,7 +442,15 @@ impl Renderer {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         self.render(&view, width, height, camera);
+        self.copy_back(&texture, width, height)
+    }
 
+    /// Copy an already-rendered off-screen texture back to host
+    /// memory as tightly-packed RGBA8 (`width*height*4` bytes,
+    /// row-major, top-left origin). Shared by the mesh-only M1/M2
+    /// readback and the M3 composite path.
+    #[must_use]
+    fn copy_back(&self, texture: &wgpu::Texture, width: u32, height: u32) -> Vec<u8> {
         // copy_texture_to_buffer requires bytes_per_row aligned to
         // COPY_BYTES_PER_ROW_ALIGNMENT (256); pad and unpad on read.
         let unpadded = width * 4;
@@ -365,7 +470,7 @@ impl Renderer {
             });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
