@@ -30,5 +30,18 @@ pub mod v1 {
     pub const CAP_AGENT: &str = "agent";
 }
 
+/// The canonical Apache Arrow `arrow.flight.protocol` package: the
+/// standard `FlightService` + its messages, generated from the
+/// vendored `proto/Flight.proto` (Apache-2.0). M6's bulk-geometry
+/// transport (phase-4-m6.md Decision 26): a separate, wire-standard
+/// service co-served next to `MiliViz`. `mili-viz-server` implements
+/// only `DoGet` (the frozen `GeometryRef.flight_ticket` → the
+/// byte-stable M2/M3 blob); every other Flight RPC is `UNIMPLEMENTED`.
+pub mod flight {
+    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
+
+    tonic::include_proto!("arrow.flight.protocol");
+}
+
 pub use v1::mili_viz_client;
 pub use v1::mili_viz_server;

@@ -714,6 +714,7 @@ name = "mili-viz-proto"
 version = "0.0.0"
 dependencies = [
  "prost",
+ "prost-types",
  "protox",
  "tonic",
  "tonic-prost",
