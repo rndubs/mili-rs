@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mili-viz wireframes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="egui-style.css">
+  <style>
+    html, body, #root { margin: 0; height: 100%; }
+    body { background: #181a1f; font-family: "Source Sans 3", system-ui, sans-serif; color: #d5d7db; }
+  </style>
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" src="design-canvas.jsx"></script>
+  <script type="text/babel" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" src="chrome.jsx"></script>
+  <script type="text/babel" src="artboards.jsx"></script>
+
+  <script type="text/babel">
+    const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+      "theme": "dark",
+      "ai_panel_position": "right",
+      "left_dock_collapsed": false,
+      "show_bottom_tabs": true
+    }/*EDITMODE-END*/;
+
+    // Common props derived from tweaks; passed into every artboard
+    function useGlobalLayout() {
+      const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+      const base = {
+        theme: t.theme,
+        showLeftDock: !t.left_dock_collapsed,
+        leftRailOnly: t.left_dock_collapsed,
+        showBottomTabs: t.show_bottom_tabs,
+      };
+      // future: ai_panel_position could swap to floating overlay; right for now
+      return [base, t, setTweak];
+    }
+
+    function Root() {
+      const [base, t, setTweak] = useGlobalLayout();
+
+      return (
+        <>
+          <DesignCanvas
+            title="mili-viz · wireframes"
+            subtitle="wgpu + egui client · mid-fi · layout & state exploration"
+            bg="#13141a"
+          >
+            <DCSection id="layouts" title="Layouts" subtitle="Three configurations — minimal default, AI expanded, focus mode">
+              <DCArtboard id="L1" label="L1 · default (AI rail collapsed)" width={1280} height={800}>
+                <App {...base} showRightAI={false} bottomTabsActive="cmd" />
+              </DCArtboard>
+              <DCArtboard id="L2" label="L2 · AI panel expanded" width={1280} height={800}>
+                <App {...base} showRightAI={true} aiPanelWidth={340} bottomTabsActive="cmd" />
+              </DCArtboard>
+              <DCArtboard id="L3" label="L3 · focus mode (no panels, no tabs)" width={1280} height={800}>
+                <App
+                  {...base}
+                  leftRailOnly={true}
+                  showLeftDock={false}
+                  showRightAI={false}
+                  showBottomTabs={false}
+                />
+              </DCArtboard>
+            </DCSection>
+
+            <DCSection id="states" title="Session states" subtitle="Same canonical layout, different live conditions">
+              <DCArtboard id="S1" label="S1 · empty / not attached" width={1280} height={800}>
+                <App {...base} attached={false} showRightAI={false} bottomTabsActive="cmd" />
+              </DCArtboard>
+              <DCArtboard id="S2" label="S2 · animating through states" width={1280} height={800}>
+                <App {...base} animating={true} showRightAI={false} bottomTabsActive="plot" />
+              </DCArtboard>
+              <DCArtboard id="S3" label="S3 · agent thinking" width={1280} height={800}>
+                <App {...base} showRightAI={true} aiPanelWidth={340} agentStatus="thinking" bottomTabsActive="cmd" />
+              </DCArtboard>
+              <DCArtboard id="S4" label="S4 · agent running tool" width={1280} height={800}>
+                <App {...base} showRightAI={true} aiPanelWidth={340} agentStatus="running" bottomTabsActive="cmd" />
+              </DCArtboard>
+              <DCArtboard id="S5" label="S5 · user interrupted mid-turn" width={1280} height={800}>
+                <App {...base} showRightAI={true} aiPanelWidth={340} agentStatus="idle" interrupted={true} bottomTabsActive="cmd" />
+              </DCArtboard>
+              <DCArtboard id="S6" label="S6 · multi-client (peer attached)" width={1280} height={800}>
+                <App
+                  {...base}
+                  showRightAI={true}
+                  aiPanelWidth={340}
+                  agentStatus="idle"
+                  peers={[{ name: "alex@laptop-22", color: "oklch(0.75 0.14 60)" }]}
+                  bottomTabsActive="cmd"
+                />
+              </DCArtboard>
+            </DCSection>
+
+            <DCSection id="toolcalls" title="Tool-call rendering" subtitle="Chosen: dense one-liners — terminal-flavoured, lowest clutter">
+              <DCArtboard id="T1" label="T1 · dense one-liners (chosen)" width={400} height={560}>
+                <ToolCallStudy density="line" />
+              </DCArtboard>
+            </DCSection>
+
+            <DCSection id="provenance" title="Provenance & revert" subtitle="Two placements — inline boundary marker vs. a global timeline strip">
+              <DCArtboard id="P1" label="P1 · inline at turn boundary" width={400} height={560}>
+                <ProvenanceStudy variant="inline" />
+              </DCArtboard>
+              <DCArtboard id="P3" label="P3 · timeline strip above viewport" width={1280} height={760}>
+                <App {...base} showRightAI={false} showProvenanceTimeline={true} bottomTabsActive="cmd" />
+              </DCArtboard>
+            </DCSection>
+          </DesignCanvas>
+
+          <TweaksPanel title="Tweaks">
+            <TweakSection title="Theme">
+              <TweakRadio
+                label="mode"
+                value={t.theme}
+                options={[{value:"dark", label:"Dark"}, {value:"light", label:"Light"}]}
+                onChange={(v) => setTweak("theme", v)}
+              />
+            </TweakSection>
+            <TweakSection title="Layout">
+              <TweakToggle
+                label="Left dock collapsed"
+                value={t.left_dock_collapsed}
+                onChange={(v) => setTweak("left_dock_collapsed", v)}
+              />
+              <TweakToggle
+                label="Show bottom tabs"
+                value={t.show_bottom_tabs}
+                onChange={(v) => setTweak("show_bottom_tabs", v)}
+              />
+              <TweakRadio
+                label="AI panel position"
+                value={t.ai_panel_position}
+                options={[{value:"right", label:"Right dock"}, {value:"floating", label:"Floating"}]}
+                onChange={(v) => setTweak("ai_panel_position", v)}
+              />
+            </TweakSection>
+          </TweaksPanel>
+        </>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+  </script>
+</body>
+</html>

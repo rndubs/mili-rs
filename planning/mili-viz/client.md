@@ -73,35 +73,51 @@ owner.
 
 ## Wireframe
 
-Mirrors griz's shape so muscle memory transfers (`reference/griz/Src/`
-in parentheses), with the AI panel as a first-class citizen.
+Mid-fidelity wireframes live in
+**`planning/mili-viz/griz_wgpu_wireframes/`**. Read
+`griz_wgpu_wireframes/README.md` for the authoritative layout spec,
+panel-by-panel detail, session states, and implementation order.
+The files in that bundle (`Wireframes.html`, `chrome.jsx`,
+`artboards.jsx`, etc.) are design references — not production code.
+Recreate all layouts using `egui` native widgets.
+
+### Window shape
+
+Six regions, top to bottom / left to right:
 
 ```
-┌─ menu bar:  Control · Rendering · Picking · Results · Time · Plot · Help ─┐  (gui.c menubar)
-│ ┌─ toolbar:  |◀  ◀  ▶  ▶|   stride[ 1 ]   ⏵ animate ⏹    view⟲ reset ───┐ │  (gui.c utility panel
-├──────────────────┬──────────────────────────────────┬───────────────────┤   state-stepping)
-│ LEFT DOCK        │                                    │  AI ASSISTANT     │
-│  ▾ Runs/sessions │     3D RENDER VIEWPORT (wgpu)       │  (thin subscriber)│
-│      d3samp6 ●   │                                    │                   │
-│  ▾ Results       │   overlays: colormap legend,       │  ┌─ transcript ─┐ │
-│      derived ▸   │   title, time/state, coord axes,   │  │ you: why does│ │
-│      primal  ▸   │   bounding box                     │  │  state 47 …  │ │
-│  ▾ Materials     │                                    │  │ ▸ ran: state │ │
-│      [vis][col]  │   (server-authoritative: agent &   │  │   47; show sx│ │
-│  ▾ Surfaces      │    human edits both land here)     │  │ ▸ queried sx │ │
-│                  │                                    │  │   → [0,5.2e4]│ │
-│  (gui.c Results  │   (draw.c render engine,           │  │ ▸ captured   │ │
-│   menu + Material│    faces.c geometry)               │  │   frame      │ │
-│   /Surface mgrs) │                                    │  │ assistant: … │ │
-│                  │                                    │  └──────────────┘ │
-│                  │                                    │  [📷 attach frame]│
-│                  │                                    │  [ ask…      ][⏹]│
-├──────────────────┴──────────────────────────────────┴───────────────────┤
-│ BOTTOM TABS:  [ Command line ]   [ Scripting ]   [ Time-history plot ]    │
-│   raw griz Layer-0   Python editor+Run   egui_plot (time_hist.c)          │
-└───────────────────────────────────────────────────────────────────────────┘
- status bar:  attached <session-id>@host · proto v1 · pick: brick 4213       (scripting.md session file)
+┌─ menu bar  ──────────────────────────────────────────────────────────┐
+├─ toolbar   ──────────────────────────────────────────────────────────┤
+│            │                                          │              │
+│ left dock  │       3D render viewport (wgpu)          │  AI rail /   │
+│            │                                          │  AI panel    │
+│            │                                          │              │
+├──────────────────────────────────────────────────────────────────────┤
+│ bottom tabs (command line / scripting / time-history)                 │
+├──────────────────────────────────────────────────────────────────────┤
+│ status bar                                                            │
+└──────────────────────────────────────────────────────────────────────┘
 ```
+
+| Region        | egui mapping                                      | Default size |
+| ------------- | ------------------------------------------------- | ------------ |
+| Menu bar      | `egui::menu::bar` in `TopBottomPanel::top`        | 30 px        |
+| Toolbar       | second `TopBottomPanel::top`                      | 30 px        |
+| Left dock     | `SidePanel::left("dock").resizable(true)`         | 230 px       |
+| Viewport      | `CentralPanel` containing a `wgpu` texture        | fills        |
+| AI rail/panel | `SidePanel::right("ai").resizable(true)`          | 28 px / 340 px |
+| Bottom tabs   | `TopBottomPanel::bottom("tabs").resizable(true)`  | 200 px       |
+| Status bar    | `TopBottomPanel::bottom("status")`                | 20 px        |
+
+### Three layout configurations
+
+- **L1 — Default:** left dock open, AI as a 28 px collapsed rail on
+  the right. The AI panel is **collapsed by default**.
+- **L2 — AI expanded:** AI rail opens to 340 px right dock.
+- **L3 — Focus mode:** stripped to viewport only; left dock collapses
+  to a 28 px icon rail, AI and bottom tabs hidden. Toggle: `Ctrl+\`.
+
+### Griz command mapping
 
 Panel-by-panel mapping from griz's ~321-command Motif UI:
 
@@ -119,41 +135,50 @@ Panel-by-panel mapping from griz's ~321-command Motif UI:
 
 The ~321 commands collapse into the left dock + menus + the Layer-0
 command-line tab; nothing from the inventory is dropped, it is
-re-homed. Open question: which long-tail commands (e.g. `outvec`,
-`refave`, traction visualization) get GUI affordances vs. live
-command-line-only.
+re-homed. Long-tail commands (`outvec`, `refave`, traction
+visualization) live in menus or the command-line tab for v1 — see
+Out of scope in the wireframes README.
 
 ## AI Assistant panel
 
-The headline feature. Thin client of a server-hosted agent.
+The headline feature. Thin client of a server-hosted agent. Full panel
+spec — collapsed rail, expanded state, tool-call line format, composer,
+provenance UX, session states — is in the wireframes README
+(`griz_wgpu_wireframes/README.md` §§ "AI Assistant panel", "Session
+states").
 
-**Transcript with inline tool calls.** Every tool call the agent makes
-renders as a collapsed line in the transcript — `ran: state 47;
-show sx`, `queried sx → [0, 5.2e4]`, `captured frame`. Non-negotiable:
-the agent drives a session a human is watching, so what it did must be
-legible without scrolling a log. Expanding a line shows the exact
-`Command` / `Query` and its reply.
+**Transcript with inline tool calls.** Tool calls render as dense
+one-liners in the transcript:
+
+```
+▸ ran      state 47; show sx
+▸ queried  sx range over states 40..60      → [0, 5.2e+04]
+▸ queried  elements where sx > 4e+04 ...    → 12 elements
+▸ captured frame (state 47, view: front)    → 812 KB png
+```
+
+Non-negotiable: the agent drives a session a human is watching, so
+what it did must be legible without scrolling a log.
 
 **Autonomy + barge-in (decision 2).** Fully autonomous, so the panel
 *must* carry:
-- A persistent **⏹ Stop** that cancels the in-flight agent turn (new
-  proto: `Interrupt`). Always reachable.
-- A **provenance journal**: agent-originated `StateDelta`s are tagged
-  (`origin_client_id` already exists in the proto — the agent gets a
-  stable id). The journal lists "agent changed: state → 47, result →
-  sx" with a one-click **revert to before this turn**, implemented on
-  the existing `NamedView`/command-journal machinery (server snapshots
-  session state at each user turn boundary).
-- Agent activity is visible to *all* clients (it is shared state), so a
-  colleague attached from a laptop sees "agent is running" too.
+- A persistent **⏹ Stop** that cancels the in-flight agent turn
+  (`Interrupt` proto). Always reachable.
+- **Provenance / revert:** session state is snapshotted at each
+  user-turn boundary. A turn boundary marker in the transcript shows
+  the captured pre-turn snapshot and an `↶ revert to here` link
+  (primary surface). An optional timeline strip above the viewport
+  (off by default) colour-codes agent vs. human events and exposes a
+  `↶ revert turn` button (secondary, opt-in).
+- Agent activity is visible to *all* clients (shared state); a
+  colleague sees "agent is running" too.
 
 **Vision is deliberate but agent-initiated.** Two paths: the user
 clicks **📷 attach frame** to pin the current viewport to their next
-message; and the agent can call `Snapshot` itself mid-turn when a
-diagnosis needs it. Snapshots are server-side (cheap, next to the GPU),
-encoded PNG/JPEG, handed to the multimodal model. Default to
-agent-initiated-but-sparing to control token cost — the debugging
-stance below makes that natural.
+message; the agent can call `Snapshot` itself mid-turn when a diagnosis
+needs it. Snapshots are server-side (cheap, next to the GPU), encoded
+PNG/JPEG, handed to the multimodal model. Default to
+agent-initiated-but-sparing to control token cost.
 
 **Debugging stance: data-first, pixels-second.** The motivating use
 case ("help debug issues about the simulation"). The strong capability
@@ -216,11 +241,17 @@ README Phase 5 M1–M5 stand. Inserted:
   subprocess scripting runner. Depends on the scripting.md Python
   client existing.
 - **Phase 5 M6 — AI assistant.** After M3 controls + the M3.5 runner.
-  Sub-steps: (a) server agent loop + `AgentChat`/`DELTA_AGENT` over
-  the in-process transport; (b) `Snapshot` + multimodal; (c) provenance
-  journal + `Interrupt`; (d) `LlmProvider` trait + offline backend.
-  Server-side, so it tracks Phase 4, not blocked on the `wgpu`
-  renderer.
+  Sub-steps per wireframes README §"Implementation order":
+  - M6a — AI panel chrome (collapsed rail + expanded panel + transcript
+    renderer + composer); status pill driven by `DELTA_AGENT`
+  - M6b — agent loop wired to `AgentChat` + tool-call streaming → one-liners
+  - M6c — `Snapshot` capability + `📷 attach frame` flow
+  - M6d — provenance: per-turn snapshot, inline turn boundary marker,
+    `↶ revert to here`
+  - M6e — `Interrupt` proto + `⏹ Stop` button
+  - M6f — multi-client peer banner + status bar peer count
+
+  Server-side, so it tracks Phase 4, not blocked on the `wgpu` renderer.
 
 ## Open questions
 
@@ -228,21 +259,20 @@ README Phase 5 M1–M5 stand. Inserted:
   and `Snapshot` (pixels); it never needs raw vertex buffers. Confirm
   the agent tool surface deliberately excludes `GeometryRef`/Flight so
   it cannot foot-gun on huge buffers.
-- **Provenance granularity.** Revert per *turn* (snapshot at user-turn
-  boundary) is the proposal. Per-*command* undo is finer but needs a
-  full inverse-command journal — probably not v1.
-- **Long-tail command affordances.** Which of griz's ~321 commands get
-  dock/menu GUI vs. command-line-only. Inventory exists; triage by
-  usage is its own pass.
-- **Multi-user conflict.** Two humans + an autonomous agent on one
-  server-authoritative session: last-writer-wins is the current model
-  (camera already works this way). Is an explicit "agent has the
-  floor" lock ever wanted, or is barge-in enough? Lean: barge-in
-  enough for v1.
 - **Offline model bar.** What local model is good enough for the
   query-first debugging loop on an air-gapped cluster — affects how
   hard the `LlmProvider` boundary must work. A scoped, optional
   exploration of a *tiny* fine-tuned command-generation model (not
   the full agent) is sketched in `agent-local-llm.md` — non-priority,
   revisit before building.
-```
+
+### Resolved by wireframes (2026-05-17)
+
+- **Provenance granularity** → per-turn (snapshot at user-turn
+  boundary); per-command undo deferred past v1.
+- **Multi-user conflict** → barge-in is enough for v1; no explicit
+  "agent has the floor" lock.
+- **Long-tail command affordances** → menus + command-line tab for v1;
+  no GUI affordances for `outvec`, `refave`, traction viz, etc.
+- **AI panel default state** → collapsed (28 px rail); user opens it
+  explicitly.
