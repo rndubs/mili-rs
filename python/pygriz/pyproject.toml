@@ -1,0 +1,42 @@
+# pygriz — the `mili-viz` Python scripting client (Phase 6).
+#
+# Project (distribution) name: `pygriz`. Import namespace: `griz`
+# (`import griz; s = griz.attach()`), per planning/mili-viz/scripting.md.
+#
+# This is a SECOND, pure-Python client of the frozen `mili-viz-proto`
+# wire contract (the egui client is the first). NO maturin / pyo3 / ABI
+# coupling — generated gRPC stubs plus a thin ergonomic layer, a
+# universal wheel. See planning/mili-viz/phase-6-m1.md for the
+# milestone breakdown; this scaffold is Phase 6 pre-M1.
+
+[project]
+name = "pygriz"
+version = "0.0.0"
+description = "Python scripting client for the mili-viz server (griz replacement)"
+requires-python = ">=3.11"
+license = { text = "MIT OR Apache-2.0" }
+# Runtime deps: generated stubs need grpcio+protobuf; the query layer
+# returns the same numpy/pandas types as the milox query layer so viz
+# and analysis mix freely (scripting.md "the real payoff").
+dependencies = [
+  "grpcio>=1.60",
+  "protobuf>=4.25",
+  "numpy>=1.20.0",
+  "pandas",
+]
+
+[project.optional-dependencies]
+# `grpcio-tools` regenerates the stubs from
+# crates/mili-viz-proto/proto/mili_viz.proto (Phase 6 M1).
+dev = [
+  "grpcio-tools>=1.60",
+  "build",
+  "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
