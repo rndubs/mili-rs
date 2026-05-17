@@ -26,13 +26,16 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use mili_rs::Database;
 use mili_viz_proto::v1 as pb;
 use pb::mili_viz_server::{MiliViz, MiliVizServer};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
+mod geometry;
 mod raw;
+use geometry::MeshTopology;
 pub use raw::{parse_line, parse_raw, to_raw};
 
 /// Metadata header carrying the caller's client id. In-process
@@ -68,6 +71,64 @@ struct Session {
     camera: pb::CameraState,
     materials: BTreeMap<u32, bool>,
     named_views: BTreeMap<String, pb::CameraState>,
+    // M2: a `mili-rs`-backed run + its prepped topology. `None` until
+    // a `load` of an openable root succeeds (a non-openable root keeps
+    // the M1 stub `LoadedState`, leaving these `None`).
+    db: Option<Database>,
+    topo: Option<MeshTopology>,
+    // In-process geometry store keyed by the frozen
+    // `GeometryRef.flight_ticket` (phase-4-m2.md Decision 10). M6
+    // swaps this for an Arrow-Flight `DoGet` over TCP.
+    geom: BTreeMap<Vec<u8>, Vec<u8>>,
+    geom_order: Vec<Vec<u8>>,
+    geom_seq: u64,
+}
+
+/// Cap on retained geometry blobs (phase-4-m2.md Decision 10). Tickets
+/// stay valid until evicted FIFO; the active client always holds the
+/// freshest.
+const GEOM_STORE_CAP: usize = 16;
+
+impl Session {
+    /// 1-based state-count bound, 0 when no real run is loaded (the M1
+    /// stub `LoadedState` carries `num_states == 0`).
+    fn num_states(&self) -> u32 {
+        self.loaded.as_ref().map_or(0, |l| l.num_states)
+    }
+
+    /// Clamp the cursor to `[1, num_states]` once a real run is loaded;
+    /// leave it untouched otherwise (phase-4-m2.md Decision 12 — the
+    /// frozen M1 tests never open a database and must be unaffected).
+    fn clamp_state(&mut self) {
+        let n = self.num_states();
+        if n > 0 {
+            self.state = self.state.clamp(1, n);
+        }
+    }
+
+    /// Encode the current-state hull, file it under a fresh ticket,
+    /// and return the `GeometryRef`. `None` when no real mesh is loaded
+    /// (M1 behavior — `GeometryRef` stays empty, frozen tests green).
+    fn geometry_ref(&mut self) -> Option<pb::GeometryRef> {
+        let topo = self.topo.as_ref()?;
+        let db = self.db.as_ref()?;
+        let blob = topo.encode(db, self.state);
+        let (num_vertices, num_indices) = (topo.num_vertices(), topo.num_indices());
+        self.geom_seq += 1;
+        let ticket = format!("geom:{}", self.geom_seq).into_bytes();
+        self.geom.insert(ticket.clone(), blob);
+        self.geom_order.push(ticket.clone());
+        if self.geom_order.len() > GEOM_STORE_CAP {
+            let old = self.geom_order.remove(0);
+            self.geom.remove(&old);
+        }
+        Some(pb::GeometryRef {
+            flight_ticket: ticket,
+            layout: geometry::LAYOUT.to_string(),
+            num_vertices,
+            num_indices,
+        })
+    }
 }
 
 impl Session {
@@ -154,6 +215,16 @@ impl VizService {
         }
     }
 
+    /// Resolve a `GeometryRef.flight_ticket` to its encoded `MVG1`
+    /// blob (phase-4-m2.md Decisions 10 & 11). In M2 the in-process
+    /// client calls this directly; M6 fronts the same store with an
+    /// Arrow-Flight `DoGet` over TCP (the ticket and blob are
+    /// unchanged across that swap).
+    #[must_use]
+    pub fn fetch_geometry(&self, ticket: &[u8]) -> Option<Vec<u8>> {
+        self.inner.session.lock().unwrap().geom.get(ticket).cloned()
+    }
+
     /// Dispatch one parsed command: mutate state, assign a seq, build
     /// the `StateDelta`, broadcast it to every subscriber, return the
     /// seq. This is the single internal entry point shared by typed
@@ -211,14 +282,52 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
         Cmd::Raw(_) => unreachable!("raw is split into typed cmds before dispatch"),
 
         Cmd::Load(l) => {
-            let loaded = pb::LoadedState {
-                db: l.root,
-                num_states: 0,
-                state_times: vec![],
-                class_names: vec![],
+            // Try to open a real run. A non-openable root falls back
+            // to the M1 stub LoadedState so the frozen M1 acceptance
+            // tests (which never point at a real corpus) stay green
+            // (phase-4-m2.md Decision 12).
+            let loaded = match Database::open(&l.root) {
+                Ok(db) => {
+                    let num_states = db.state_count() as u32;
+                    let state_times =
+                        db.times().into_iter().map(f64::from).collect::<Vec<_>>();
+                    let topo = MeshTopology::build(&db);
+                    let class_names = topo
+                        .as_ref()
+                        .and_then(|t| {
+                            db.meshes()
+                                .meshes()
+                                .find(|m| m.id == t.mesh_id())
+                                .map(|m| m.classes().map(|c| c.short_name.clone()).collect())
+                        })
+                        .unwrap_or_default();
+                    let loaded = pb::LoadedState {
+                        db: l.root,
+                        num_states,
+                        state_times,
+                        class_names,
+                    };
+                    s.db = Some(db);
+                    s.topo = topo;
+                    s.state = if num_states == 0 { 0 } else { 1 };
+                    loaded
+                }
+                Err(_) => {
+                    let loaded = pb::LoadedState {
+                        db: l.root,
+                        num_states: 0,
+                        state_times: vec![],
+                        class_names: vec![],
+                    };
+                    s.db = None;
+                    s.topo = None;
+                    s.state = 0;
+                    loaded
+                }
             };
+            s.geom.clear();
+            s.geom_order.clear();
             s.loaded = Some(loaded.clone());
-            s.state = if loaded.num_states == 0 { 0 } else { 1 };
             (D::DeltaLoaded, P::Loaded(loaded))
         }
         Cmd::Close(_) => {
@@ -231,10 +340,14 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
         }
         Cmd::SetState(st) => {
             s.state = st.state;
+            // griz clamps an over-range `state` to the run bounds
+            // rather than erroring (phase-4-m2.md Decision 12);
+            // no-op when nothing is loaded (M1 behavior preserved).
+            s.clamp_state();
             (D::DeltaState, P::State(s.state))
         }
         Cmd::Step(step) => {
-            let n = s.loaded.as_ref().map_or(0, |l| l.num_states);
+            let n = s.num_states();
             s.state = match pb::step::Dir::try_from(step.dir).unwrap_or(pb::step::Dir::Next) {
                 pb::step::Dir::Next => s.state.saturating_add(1),
                 pb::step::Dir::Prev => s.state.saturating_sub(1).max(1),
@@ -247,6 +360,7 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
                     }
                 }
             };
+            s.clamp_state();
             (D::DeltaState, P::State(s.state))
         }
         Cmd::Select(sel) => {
@@ -258,23 +372,30 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             (D::DeltaSelection, P::Selection(selection_state(s)))
         }
         Cmd::Show(show) => {
+            // M2: deliver the current-state mesh hull. The `result`
+            // name is recorded but does not yet drive scalar colors
+            // (that is M3); an empty/any result yields the
+            // material-segmented hull — griz's default no-scalar view
+            // (phase-4-m2.md Decision 12).
+            let geometry = s.geometry_ref();
             let r = pb::ResultState {
                 result: show.result,
                 component: show.component,
                 min: 0.0,
                 max: 0.0,
-                geometry: None, // M2+
+                geometry,
             };
             s.result = Some(r.clone());
             (D::DeltaResult, P::Result(r))
         }
         Cmd::Contour(c) => {
+            let geometry = s.geometry_ref();
             let r = pb::ResultState {
                 result: c.result,
                 component: String::new(),
                 min: 0.0,
                 max: 0.0,
-                geometry: None,
+                geometry,
             };
             s.result = Some(r.clone());
             (D::DeltaResult, P::Result(r))

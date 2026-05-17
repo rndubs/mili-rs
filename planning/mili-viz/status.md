@@ -8,7 +8,7 @@
 
 ## TL;DR — where we are
 
-- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅ landed.**
+- **Phase 4 (`mili-viz` server): 🚧 IN PROGRESS — M1 ✅, M2 ✅ landed.**
 - **Phase 5 (`mili-viz` client): ⏳ NOT STARTED** (was gated on
   Phase 4 M1; now unblocked).
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
@@ -24,8 +24,23 @@
   `frozen_stubs_unimplemented`, `conformance_all_command_arms`.
   Two build-reality decisions were logged (`phase-4-m1.md`
   Decisions 8–9: `Command`→`DeltaKind` is many-to-one by design;
-  proto built protoc-free via `protox`). Next coding milestone: M2
-  (load + state navigation, real geometry over Arrow Flight).
+  proto built protoc-free via `protox`).
+- **✅ Phase 4 M2 is implemented.** `mili-viz-server` now links
+  `mili-rs`: `load` opens a real `Database` (real `num_states` /
+  `state_times` / element `class_names`), `state`/`next`/`prev`/
+  `first`/`last` clamp to `[1, num_states]`, and `show` delivers the
+  per-state triangulated hull through the frozen
+  `ResultState.geometry` `GeometryRef` — a real ticket resolving
+  through an in-process geometry store
+  (`VizService::fetch_geometry`), vertices from the parity-exact
+  primal `nodpos` query. **No proto change** (the M1 contract is
+  frozen; M2 is server-side only). Scope + 3 decisions pinned in
+  [`phase-4-m2.md`](phase-4-m2.md) (Decisions 10–12, continuing the
+  M1 log). Gating test:
+  `crates/mili-viz-server/tests/m2_geometry.rs`
+  `load_state_nav_and_real_geometry` (skip-on-absent per CLAUDE.md);
+  all six M1 acceptance tests still pass unchanged. Next coding
+  milestone: M3 (primal scalar → vertex colors).
 - **✅ The Phase 4 M1 surface is pinned.**
   [`phase-4-m1.md`](phase-4-m1.md) is the consolidated, buildable M1
   scope doc (the analogue of `mili-py/m1.md`): it reconciles the
@@ -43,6 +58,7 @@
 | Doc | What it pins | State |
 |---|---|---|
 | [`phase-4-m1.md`](phase-4-m1.md) | **The consolidated buildable Phase 4 M1 scope.** Frozen M1 wire contract = union of base vocab + scripting + agent; every delta from the proto draft enumerated (Decision 1 Δ1–Δ9); M1 acceptance gate (no oracle → conformance + Layer-0≡raw + fan-out); Decisions 1–7 resolving open Q3–Q8 | ✅ pinned (2026-05-17) |
+| [`phase-4-m2.md`](phase-4-m2.md) | **The buildable Phase 4 M2 scope.** `mili-rs`-backed `load`/state-nav/geometry behind the frozen contract; Decisions 10–12 (in-process geometry store keyed by the frozen `flight_ticket`, real Flight wire deferred to M6; self-describing `MVG1` blob + per-superclass corner triangulation; per-state `nodpos`, state clamping, one-delta invariant). No proto change | ✅ pinned + landed (2026-05-17) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -86,8 +102,17 @@ expanded by `scripting.md` / `client.md`. None started.
       `layer0_equals_raw`, `subscription_fanout`,
       `frozen_stubs_unimplemented`, `conformance_all_command_arms`.
       Build-reality decisions logged: `phase-4-m1.md` Decisions 8–9.
-- [ ] **M2 — load + state navigation.** `load`/`state`/`next`/`prev`;
-      stream vertex+index buffers per state.
+- [x] **M2 — load + state navigation.** ✅ **Landed.** `mili-rs`
+      wired into `mili-viz-server`: real `load` (`num_states`/
+      `state_times`/element `class_names`), state cursor clamped to
+      `[1, num_states]`, `show` delivers the per-state triangulated
+      hull via the frozen `ResultState.geometry` `GeometryRef`
+      (real ticket → in-process geometry store; vertices from the
+      primal `nodpos` query). No proto change. Scope/decisions:
+      [`phase-4-m2.md`](phase-4-m2.md) (Decisions 10–12). Gating
+      test: `crates/mili-viz-server/tests/m2_geometry.rs`
+      `load_state_nav_and_real_geometry`; M1's six acceptance tests
+      unchanged and green.
 - [ ] **M3 — primal result display.** `show <svar>`; color array from
       a `mili-rs` query.
 - [ ] **M4 — selection + enable/disable.** Mesh filtering, material
@@ -138,10 +163,15 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
    fan-out, frozen-stub `UNIMPLEMENTED`, conformance) landed; the
    `phase-4-m1.md` § "M1 acceptance gate" checklist is fully
    satisfied (six tests in `tests/acceptance.rs`).
-6. ⏭️ **NEXT (coding M2):** load + state navigation — wire
-   `mili-rs` into `mili-viz-server`, extract per-state vertex/index
-   buffers, and stream them over Arrow Flight (real `GeometryRef`,
-   today empty). See Phase 4 M2 below.
+6. ✅ **DONE (coding M2):** `mili-rs` wired into `mili-viz-server`;
+   real `load`/state-nav; per-state triangulated hull delivered via
+   the frozen `GeometryRef` (in-process geometry store, real ticket;
+   `nodpos`-driven vertices). Scope/decisions in
+   [`phase-4-m2.md`](phase-4-m2.md) (10–12). Gating test
+   `m2_geometry.rs::load_state_nav_and_real_geometry`.
+7. ⏭️ **NEXT (coding M3):** primal result display — `show <svar>`
+   colors vertices from a `mili-rs` query; the color array rides the
+   same geometry blob/`GeometryRef` path M2 froze. See Phase 4 M3.
 
 ## Update protocol
 
