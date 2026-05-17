@@ -301,8 +301,12 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
     // (1 atom)] — 14 atoms per object total. We confirm the inner
     // ordering is components-fastest, IP-slowest (per mili-python's
     // `comp_layout` in `reference/mili-python/src/mili/datatypes.py:
-    // 236-247`): an `ips=[0]` filter must return atoms [0..7] of the
-    // unfiltered read, `ips=[1]` must return atoms [7..14], and
+    // 236-247`). `ips=` for an element-set svar queried by its own
+    // name is an integration-point *label*, not a 0-based position
+    // (upstream `.index(ip)` against the element-set payload —
+    // `miliinternal.py:191,1251-1270`); `es_1a`'s IP labels are
+    // `[1, 2]`, so `ips=[1]` must return atoms [0..7] of the
+    // unfiltered read, `ips=[2]` must return atoms [7..14], and
     // requesting both must concatenate them in order.
     let path = corpus_path(&["serial", "d3samp4", "d3samp4.pltA"]);
     if !path.exists() {
@@ -328,7 +332,7 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
     };
     assert_eq!(full.len(), 14);
 
-    let ips_first = [0_usize];
+    let ips_first = [1_usize];
     let only_ip0 = db
         .query(&QueryArgs {
             svar: "es_1a",
@@ -348,7 +352,7 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
         assert_eq!(only_ip0[i].to_bits(), full[i].to_bits());
     }
 
-    let ips_second = [1_usize];
+    let ips_second = [2_usize];
     let only_ip1 = db
         .query(&QueryArgs {
             svar: "es_1a",
@@ -368,8 +372,9 @@ fn d3samp4_vec_array_ip_filter_slices_components_fastest_layout() {
         assert_eq!(only_ip1[i].to_bits(), full[7 + i].to_bits());
     }
 
-    // Requesting both IPs in reverse order: ip1-block then ip0-block.
-    let ips_rev = [1_usize, 0];
+    // Requesting both IPs in reverse label order: label-2 block then
+    // label-1 block.
+    let ips_rev = [2_usize, 1];
     let rev = db
         .query(&QueryArgs {
             svar: "es_1a",

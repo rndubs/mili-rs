@@ -207,6 +207,25 @@ class _MiliInternal:
                 comp_names=list(comp_names),
                 containing_svar_names=list(containing),
             )
+        # Populate svar.svars[] recursively from comp_names (upstream
+        # miliinternal.py:140-146) so VECTOR/VEC_ARRAY atom_qty is
+        # correct — AppendStatesTool relies on it (Phase 3.3).
+        def _populate(svar: StateVariable) -> None:
+            if (
+                svar.agg_type
+                in (
+                    StateVariable.Aggregation.VECTOR,
+                    StateVariable.Aggregation.VEC_ARRAY,
+                )
+                and len(svar.svars) == 0
+            ):
+                for comp_name in svar.comp_names:
+                    comp = out[comp_name]
+                    svar.svars.append(comp)
+                    _populate(comp)
+
+        for svar in out.values():
+            _populate(svar)
         return out
 
     def queriable_svars(

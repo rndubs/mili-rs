@@ -77,16 +77,18 @@ impl Database {
                 let path = state::tfile_path(&a_path).ok_or(MiliError::MalformedDirectory(
                     "cannot derive tfile path from .A path",
                 ))?;
-                let bytes = std::fs::read(&path).map_err(|e| {
-                    if e.kind() == std::io::ErrorKind::NotFound {
-                        MiliError::MalformedDirectory(
-                            "directory expects tfile but no <root>T sibling found",
-                        )
-                    } else {
-                        e.into()
-                    }
-                })?;
-                state::parse_tfile(&bytes, &header)?
+                // Upstream (afileIO.py:204-209) reads smaps from the
+                // `<root>T` tfile *only if it exists on disk*; otherwise
+                // it falls back to the A-file's inline (here empty, since
+                // QTY_STATES == 0) map. A state-less `copy_non_state_data`
+                // output writes smaps inline with no tfile (AFileWriter
+                // `allow_tfile=False`), so a missing tfile is a valid
+                // 0-state database, not a malformed one.
+                match std::fs::read(&path) {
+                    Ok(bytes) => state::parse_tfile(&bytes, &header)?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                    Err(e) => return Err(e.into()),
+                }
             }
         };
 
