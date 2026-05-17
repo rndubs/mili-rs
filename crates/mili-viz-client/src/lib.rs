@@ -13,8 +13,10 @@
 //! always-on test weight); [`render_shell_to_image`] composites the
 //! unchanged mesh pass with the additive `egui` pass into one
 //! off-screen texture. The windowed [`run`] path drives a live
-//! [`Session`] over the in-process transport. Remote mode (gRPC +
-//! Flight TCP) is Phase 5 M5; the bottom-tabs command line is M3.5;
+//! [`Session`] over the in-process transport. M3.5 added the bottom
+//! tabs (Layer-0 command line, the Phase-6-gated scripting
+//! placeholder, the `egui_plot` time-history — `phase-5-m3.5.md`
+//! Decisions 48–52). Remote mode (gRPC + Flight TCP) is Phase 5 M5;
 //! the AI panel is M6.
 
 #![allow(clippy::pedantic)]
@@ -38,6 +40,6 @@ pub use renderer::{
 };
 pub use session::{fetch_server_mesh, Session};
 pub use shell::{
-    build_shell_ui, LoadedInfo, Overlay, Overlays, ResultInfo, SessionPhase, ShellState, UiAction,
-    DERIVED_RESULTS,
+    build_shell_ui, BottomTab, LoadedInfo, Overlay, Overlays, ResultInfo, SessionPhase, ShellState,
+    TimeSample, TranscriptKind, TranscriptLine, UiAction, DERIVED_RESULTS,
 };

@@ -102,11 +102,56 @@ impl Overlays {
     }
 }
 
+/// The three peer bottom tabs (wireframes §"Bottom tabs";
+/// `phase-5-m3.5.md` Decision 51).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BottomTab {
+    /// Layer-0 raw griz / `grizinit` stream (Decision 48).
+    CommandLine,
+    /// Subprocess+`attach()` runner — disabled placeholder until
+    /// Phase 6 `pygriz` lands (Decision 49).
+    Scripting,
+    /// `egui_plot` host fed by the `Subscribe` stream (Decision 50).
+    TimeHistory,
+}
+
+/// How a [`TranscriptLine`] renders in the command-line tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptKind {
+    /// An echoed user command (`griz>` prompt, green).
+    Command,
+    /// A dim server outcome line (`ok`).
+    Response,
+    /// A command rejection (the `CommandReply.error`, danger colour).
+    Error,
+}
+
+/// One client-side command-line transcript row (`phase-5-m3.5.md`
+/// Decision 48). The transcript is pure client state — griz commands
+/// carry no text payload; their effect is the broadcast `StateDelta`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptLine {
+    pub kind: TranscriptKind,
+    pub text: String,
+}
+
+/// One time-history sample: the active result's data-range envelope
+/// at a visited state, accumulated from the broadcast `ResultState`
+/// (`phase-5-m3.5.md` Decision 50).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeSample {
+    pub state: u32,
+    pub t: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
 /// A client-side intent emitted by the shell. The windowed app lowers
 /// the transport-affecting variants to the **frozen** proto `Command`
-/// (`phase-5-m3.md` Decision 46); the pure-client variants
-/// (`ToggleOverlay`, `SetStride`) have already been applied to
-/// [`ShellState`] and are returned for observability/persistence.
+/// (`phase-5-m3.md` Decision 46, `phase-5-m3.5.md` Decision 48); the
+/// pure-client variants (`ToggleOverlay`, `SetStride`,
+/// `SelectBottomTab`, `CollapseBottomTabs`) have already been applied
+/// to [`ShellState`] and are returned for observability/persistence.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiAction {
     First,
@@ -120,6 +165,12 @@ pub enum UiAction {
     Fit,
     ToggleOverlay(Overlay),
     Show(String),
+    /// A verbatim Layer-0 line to send as `Command{ raw }`
+    /// (`phase-5-m3.5.md` Decision 48). The echo row is already on
+    /// [`ShellState::transcript`]; the app appends the outcome row.
+    RunCommand(String),
+    SelectBottomTab(BottomTab),
+    CollapseBottomTabs,
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -155,6 +206,17 @@ pub struct ShellState {
     pub pick: String,
     /// Currently highlighted Results-tree row.
     pub selected_result: Option<String>,
+    /// Open bottom tab, or `None` for the collapsed 22 px strip
+    /// (`phase-5-m3.5.md` Decision 51 — default-collapsed keeps the
+    /// M3 render seam byte-stable).
+    pub bottom_tab: Option<BottomTab>,
+    /// Command-line transcript (echo + outcome rows, Decision 48).
+    pub transcript: Vec<TranscriptLine>,
+    /// Command-line input buffer.
+    pub cmdline_input: String,
+    /// Time-history series accumulated from `ResultState`
+    /// (Decision 50).
+    pub time_history: Vec<TimeSample>,
 }
 
 impl Default for ShellState {
@@ -171,6 +233,10 @@ impl Default for ShellState {
             fps: 0.0,
             pick: "—".to_string(),
             selected_result: None,
+            bottom_tab: None,
+            transcript: Vec::new(),
+            cmdline_input: String::new(),
+            time_history: Vec::new(),
         }
     }
 }
@@ -191,6 +257,77 @@ impl ShellState {
     fn select_result(&mut self, name: &str) -> UiAction {
         self.selected_result = Some(name.to_string());
         UiAction::Show(name.to_string())
+    }
+
+    /// Toggle a bottom tab: open it, or collapse the body if it is
+    /// already the open tab (`phase-5-m3.5.md` Decision 51).
+    pub fn toggle_tab(&mut self, tab: BottomTab) -> UiAction {
+        if self.bottom_tab == Some(tab) {
+            self.bottom_tab = None;
+            UiAction::CollapseBottomTabs
+        } else {
+            self.bottom_tab = Some(tab);
+            UiAction::SelectBottomTab(tab)
+        }
+    }
+
+    /// Echo a submitted Layer-0 line and emit it for the app to lower
+    /// to `Command{ raw }` (`phase-5-m3.5.md` Decision 48). Returns
+    /// `None` for a blank line.
+    pub fn submit_command(&mut self) -> Option<UiAction> {
+        let line = self.cmdline_input.trim().to_string();
+        self.cmdline_input.clear();
+        if line.is_empty() {
+            return None;
+        }
+        self.transcript.push(TranscriptLine {
+            kind: TranscriptKind::Command,
+            text: line.clone(),
+        });
+        Some(UiAction::RunCommand(line))
+    }
+
+    /// Append the dim outcome row after an `Execute` returns
+    /// (`phase-5-m3.5.md` Decision 48). Called by the windowed app.
+    pub fn push_command_outcome(&mut self, ok: bool, error: &str) {
+        let (kind, text) = if ok {
+            (TranscriptKind::Response, "ok".to_string())
+        } else {
+            (TranscriptKind::Error, error.to_string())
+        };
+        self.transcript.push(TranscriptLine { kind, text });
+    }
+
+    /// Record a time-history sample for the active result at the
+    /// current state (`phase-5-m3.5.md` Decision 50). No-op without a
+    /// result or a known state time; replaces an existing sample for
+    /// the same state so scrubbing back and forth does not duplicate.
+    pub fn record_time_sample(&mut self) {
+        let Some(r) = self.result.as_ref() else {
+            return;
+        };
+        if r.name.is_empty() {
+            return;
+        }
+        let Some(t) = self.state_time() else {
+            return;
+        };
+        let sample = TimeSample {
+            state: self.state,
+            t,
+            min: r.min,
+            max: r.max,
+        };
+        if let Some(s) = self
+            .time_history
+            .iter_mut()
+            .find(|s| s.state == sample.state)
+        {
+            *s = sample;
+        } else {
+            self.time_history.push(sample);
+            self.time_history.sort_by_key(|s| s.state);
+        }
     }
 }
 
@@ -234,18 +371,7 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
             status_bar(ui, state);
         });
 
-    // Collapsed bottom-tabs stub — command line / scripting /
-    // time-history are M3.5 (`phase-5-m3.md` Goal).
-    egui::Panel::bottom("tabs")
-        .exact_size(22.0)
-        .show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_enabled(false, egui::Button::new("command line"));
-                ui.add_enabled(false, egui::Button::new("scripting"));
-                ui.add_enabled(false, egui::Button::new("time-history"));
-                ui.weak("(M3.5)");
-            });
-        });
+    bottom_tabs(ui, state, &mut actions);
 
     egui::Panel::left("dock")
         .resizable(true)
@@ -419,6 +545,149 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                 ui.weak("(surfaces: M4+)");
             });
     });
+}
+
+/// The bottom-tabs panel (`phase-5-m3.5.md` Decision 51): an
+/// always-present 22 px tab strip plus a default-collapsed body. The
+/// collapsed footprint matches the M3 stub, so `m3_egui_shell.rs`
+/// stays green and the Decision-45 composition seam is unchanged.
+fn bottom_tabs(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let panel = egui::Panel::bottom("tabs");
+    let panel = if state.bottom_tab.is_some() {
+        panel.resizable(true).default_size(200.0)
+    } else {
+        panel.resizable(false).exact_size(22.0)
+    };
+    panel.show_inside(ui, |ui| {
+        ui.horizontal(|ui| {
+            tab_button(ui, state, actions, BottomTab::CommandLine, "command line");
+            tab_button(ui, state, actions, BottomTab::Scripting, "scripting");
+            tab_button(ui, state, actions, BottomTab::TimeHistory, "time-history");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if state.bottom_tab.is_some() && ui.small_button("▾ hide").clicked() {
+                    state.bottom_tab = None;
+                    actions.push(UiAction::CollapseBottomTabs);
+                }
+            });
+        });
+        if let Some(tab) = state.bottom_tab {
+            ui.separator();
+            match tab {
+                BottomTab::CommandLine => cmdline_tab(ui, state, actions),
+                BottomTab::Scripting => scripting_tab(ui),
+                BottomTab::TimeHistory => time_history_tab(ui, state),
+            }
+        }
+    });
+}
+
+fn tab_button(
+    ui: &mut egui::Ui,
+    state: &mut ShellState,
+    actions: &mut Vec<UiAction>,
+    tab: BottomTab,
+    label: &str,
+) {
+    let active = state.bottom_tab == Some(tab);
+    if ui.selectable_label(active, label).clicked() {
+        actions.push(state.toggle_tab(tab));
+    }
+}
+
+/// Layer-0 command line (`phase-5-m3.5.md` Decision 48): green
+/// `griz>` prompt, echoed commands, dim responses. The input lowers
+/// verbatim to `Command{ raw }`; nothing is re-parsed client-side.
+fn cmdline_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let green = egui::Color32::from_rgb(120, 200, 120);
+    let dim = egui::Color32::from_gray(150);
+    let danger = egui::Color32::from_rgb(220, 110, 100);
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
+
+    let row_h = 22.0;
+    let scroll_h = (ui.available_height() - row_h).max(0.0);
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .max_height(scroll_h)
+        .show(ui, |ui| {
+            for line in &state.transcript {
+                let (txt, col) = match line.kind {
+                    TranscriptKind::Command => (format!("griz> {}", line.text), green),
+                    TranscriptKind::Response => (line.text.clone(), dim),
+                    TranscriptKind::Error => (line.text.clone(), danger),
+                };
+                ui.label(egui::RichText::new(txt).color(col).font(mono.clone()));
+            }
+        });
+
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("griz>").color(green).font(mono.clone()));
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut state.cmdline_input)
+                .font(mono.clone())
+                .desired_width(f32::INFINITY)
+                .hint_text("raw griz / grizinit line"),
+        );
+        let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if submit {
+            if let Some(a) = state.submit_command() {
+                actions.push(a);
+            }
+            resp.request_focus();
+        }
+    });
+}
+
+/// Scripting runner — a structured **disabled** placeholder
+/// (`phase-5-m3.5.md` Decision 49): the functional subprocess+
+/// `attach()` runner is blocked on the uncoded Phase 6 `pygriz`.
+fn scripting_tab(ui: &mut egui::Ui) {
+    let mut script = String::from("# import griz; s = griz.attach()\n");
+    ui.add_enabled(
+        false,
+        egui::TextEdit::multiline(&mut script)
+            .code_editor()
+            .desired_rows(4)
+            .desired_width(f32::INFINITY),
+    );
+    ui.horizontal(|ui| {
+        ui.add_enabled(false, egui::Button::new("▶ Run"));
+        ui.weak("scripting runner requires pygriz (Phase 6) — not yet available");
+    });
+    ui.add_enabled(
+        false,
+        egui::Label::new(egui::RichText::new("(no output)").weak()),
+    );
+    ui.weak("venv: — · attach: —");
+}
+
+/// Time-history plot (`phase-5-m3.5.md` Decision 50): an `egui_plot`
+/// host of the active result's data-range envelope vs. simulation
+/// time, accumulated from the broadcast `Subscribe`/`ResultState`
+/// stream. The `Query`-fed per-element series is the forward path.
+fn time_history_tab(ui: &mut egui::Ui, state: &ShellState) {
+    if state.time_history.is_empty() {
+        ui.weak("no series yet — select a result and step through states");
+        return;
+    }
+    let mins: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.min]).collect();
+    let maxs: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.max]).collect();
+    let label = state
+        .result
+        .as_ref()
+        .map_or_else(|| "result".to_string(), |r| r.name.clone());
+    egui_plot::Plot::new("time_history")
+        .legend(egui_plot::Legend::default())
+        .show(ui, |p| {
+            p.line(
+                egui_plot::Line::new(format!("{label} max"), maxs)
+                    .color(egui::Color32::from_rgb(220, 110, 100)),
+            );
+            p.line(
+                egui_plot::Line::new(format!("{label} min"), mins)
+                    .color(egui::Color32::from_rgb(110, 160, 220)),
+            );
+        });
 }
 
 fn status_bar(ui: &mut egui::Ui, state: &ShellState) {
