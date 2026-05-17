@@ -56,10 +56,16 @@ def open_database(
         )
         mili_engine: Any = _MiliInternal(engine_db)
     else:
-        engine_db = PyMiliDatabase.open_set(os.path.join(dir_name, file_base))
-        if suppress_parallel:
-            mili_engine = LoopWrapper(engine_db, merge_results)
-        else:
-            mili_engine = ServerWrapper(engine_db, merge_results)
+        # Decision 21: the wrapper holds a real per-proc list of
+        # _MiliInternal, each opening one fragment's A-file (drop the
+        # trailing "A" to get each proc's A/T/S base) — upstream's
+        # exact contract. Each per-fragment open is open_single
+        # (serial-gate bit-exact); the merge moves to
+        # MiliDatabase's per-method reduce_function table.
+        proc_bases = [afile[:-1] for afile in afiles]
+        Wrapper = LoopWrapper if suppress_parallel else ServerWrapper
+        mili_engine = Wrapper(
+            _MiliInternal, dir_name, proc_bases, merge_results, **kwargs
+        )
 
     return MiliDatabase(mili_engine, merge_results)

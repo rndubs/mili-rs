@@ -1,147 +1,126 @@
-"""milox parallel-handler wrappers — per-proc method forwarding.
+"""milox parallel-handler wrappers — faithful per-proc forwarding.
 
-Upstream (`reference/mili-python/src/mili/parallel.py:19-356`) selects
+Upstream (`reference/mili-python/src/mili/parallel.py`) selects
 ``LoopWrapper`` (serial-over-fragments, ``suppress_parallel``) or
-``ServerWrapper`` (subprocess-per-proc) as the per-database engine and
-forwards **every public read method** to the per-proc list
-``[proc.method(*a, **kw) for proc in procs]``. ``MiliDatabase`` then
-applies ``reductions.combine`` when ``merge_results=True`` and returns
-the raw per-proc list when ``False``.
+``ServerWrapper`` (subprocess-per-proc) as the per-database engine.
+Both wrap a **list of per-proc ``_MiliInternal``** and forward every
+public method as ``[proc.method(*a, **kw) for proc in procs]`` — the
+per-proc *unmerged* list. ``MiliDatabase`` then applies the
+per-accessor ``reduce_function`` when ``merge_results=True`` and
+returns the raw per-proc list when ``False``.
 
-In milox the MPI fan-out **and** the ``merge_results=True`` merge live
-in the Rust ``DatabaseSet`` (decision 19); these wrappers hold the
-single already-opened ``PyMiliDatabase`` (the ``Set`` backend) and
-adapt the upstream forwarding contract onto the Phase-I.1
-``*_per_fragment()`` FFI accessors — the *direct* per-proc primitive
-chosen for exactly this purpose (decision 20, shape option (a):
-``db.<m>_per_fragment(...)`` *is* upstream's
-``[proc.<m>(...) for proc in procs]``).
+**Phase I.4 decision 21 (recorded — the I.4 architecture point).**
+I.4 adopts the upstream contract verbatim: the wrapper holds a real
+per-proc list of milox ``_MiliInternal``, each opening **one
+fragment's A-file** via ``open_single`` (already serial-gate
+bit-exact), and forwards every callable as the per-proc list (the
+``geometry`` property rewrapped as a per-proc geometry sub-wrapper,
+mirroring upstream's ``LoopWrapper`` property rewrap). The
+``merge_results=True`` reduction moves to ``MiliDatabase``'s
+per-method ``reduce_function`` table over ``milox.reductions`` (the
+existing verbatim port). This **supersedes** the Phase-I.3
+``_MiliInternal``-over-Set mechanism for the wrapper path: the
+per-proc list + verbatim ``reductions.*`` *is* upstream's exact
+algorithm over per-fragment engines that are each individually
+serial-gate bit-exact, so it is bit-exact by construction wherever
+upstream is — including the ``db0()``-only accessors the Rust
+``DatabaseSet`` merge could not reproduce (I.3's honest-xfail
+boundary). Decision 19 invariant intact: Phase I adds **no new value
+math** (per-proc *list assembly* + the verbatim ``reductions.py`` /
+``adjacency.py`` merges are non-parity plumbing over already-parity-
+correct per-fragment ``Database`` outputs — decision 20). The Rust
+``DatabaseSet`` merge is unchanged and still backs the direct
+``_MiliInternal(set_db)`` consumers (e.g. ``test_miliinternal``
+opening a parallel base).
 
-Forwarding is ``merge_results``-gated:
-
-* ``merge_results=True`` → forward to the **merged** single-``Set``
-  accessor (the Rust ``DatabaseSet`` already performed upstream's
-  per-fragment reduction; the Python ``__postprocess`` combine is
-  identity — decision 19). Unchanged from the prior marker behavior,
-  so every already-green ``merge_results=True`` parallel test (e.g.
-  ``test_reductions``'s ``TestServerWrapperReductions`` /
-  ``TestLoopWrapperReductions``, opened with ``merge_results=True``)
-  stays exactly as before.
-* ``merge_results=False`` → forward the methods the
-  ``merge_results=False`` per-proc contract requires to their
-  ``*_per_fragment()`` sibling (the upstream per-proc list shape).
-
-**Phase I.2 scope boundary (per `planning/mili-py/phase-i.md` —
-promotion is I.4):** I.2's green target is the redirected
-``test_grizinterface`` (4 cases) + the ``grizinterface`` port.
-``GrizInterface.__init__`` consumes the per-proc shape for exactly
-``class_names`` (``processor_count = len(...)`` + flatten),
-``state_maps``/``mesh_dimensions``/``srec_fmt_qty`` (``[0]``),
-``parameters`` (per-proc iteration in ``merge_parameters`` /
-``load_free_node_data``) and ``connectivity_ids`` /
-``mesh_object_classes`` / ``subrecords`` (``db._mili.*`` direct
-reads); every other ``GrizInterface`` field is merely stored, so the
-merged shape satisfies it. Methods outside that set keep the merged
-shape under ``merge_results=False`` too — so the standing
-``_MDB_PARALLEL_CLASSES`` xfail bucket (``merge_results=False``) does
-**not** incidentally flip (its ``state_maps`` / ``mesh_object_classes``
-assertions still legitimately differ — raw per-proc dicts/tuples are
-not the upstream ``StateMap`` / ``Dict[str,MeshObjectClass]`` shape).
-The full per-proc surface + bucket promotion is Phase I.4; the
-``merge_results=True`` re-reduce is Phase I.3.
+``ServerWrapper`` is a single-process identity (no real subprocess
+spawner) — same behavior as ``LoopWrapper``; genuinely
+subprocess-only semantics (``use_shared_memory``) have no serial
+oracle and stay honestly xfailed with a concrete reason.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, List
 
-from .datatypes import ReturnCode
 
-# Wrapper method name -> the Phase-I.1 ``*_per_fragment()`` accessor
-# that yields the upstream ``[proc.method() for proc in procs]`` list.
-# Scoped to the ``GrizInterface.__init__`` per-proc contract (I.2);
-# the remaining accessors land + their xfail buckets promote in I.4.
-_PER_FRAGMENT: Dict[str, str] = {
-    "class_names": "class_names_per_fragment",
-    "state_maps": "state_maps_per_fragment",
-    "mesh_dimensions": "mesh_dimensions_per_fragment",
-    "srec_fmt_qty": "srec_fmt_qty_per_fragment",
-    "parameters": "parameters_per_fragment",
-    "connectivity_ids": "connectivity_ids_per_fragment",
-    "mesh_object_classes": "mesh_object_classes_per_fragment",
-    "subrecords": "subrecords_per_fragment",
-}
+class _GeometryWrapper:
+    """Per-proc rewrap of the ``_MiliInternal.geometry`` property.
+
+    Upstream's ``LoopWrapper`` rewraps each property as a
+    ``LoopWrapper`` over the per-proc property objects; a call then
+    fans out to ``[obj.geometry.method(...) for obj in procs]``. milox
+    mirrors that exactly so ``MiliDatabase.geometry.compute_centroid``
+    et al. yield the per-proc list the verbatim ``adjacency.py`` /
+    ``test_adjacency`` parallel paths consume."""
+
+    def __init__(self, geoms: List[Any]) -> None:
+        self._geoms = geoms
+
+    def __getattr__(self, name: str) -> Any:
+        geoms = self.__dict__["_geoms"]
+
+        def _forward(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return [getattr(g, name)(*args, **kwargs) for g in geoms]
+            except Exception as e:  # noqa: BLE001 — upstream __loop_caller
+                return [e]
+
+        return _forward
 
 
 class _EngineWrapper:
-    """Hold the single ``PyMiliDatabase`` (``Set`` backend) and forward
-    public reads either per-proc (``merge_results=False``, the
-    ``*_per_fragment()`` accessors) or merged (``merge_results=True``).
+    """Hold the per-proc ``_MiliInternal`` list and forward public
+    reads as the upstream per-proc list (decision 21)."""
 
-    **Phase I.3 decision (recorded — the I.3 re-reduce relocation):**
-    ``merge_results=True`` forwards every read to a ``_MiliInternal``
-    adapter *over the ``Set``-backed ``PyMiliDatabase``*. The Rust
-    ``DatabaseSet`` already performed upstream's per-fragment reduction
-    bit-exactly (decision 19; ``parity_xmilics``/``database_set``
-    fixtures gate it), and ``_MiliInternal`` supplies the exact upstream
-    accessor signatures + return shapes (``labels(class_name)``,
-    ``times()`` → ``ndarray``, the return-code plumbing, …). So the net
-    ``merge_results=True`` result is the *same merged value* as before
-    (Rust merge, untouched) now wearing the upstream
-    ``MiliDatabase``-method shape — **no Python re-merge of core data**
-    (the decision-point's "keep the Rust merge where bit-exact, don't
-    double-work"; upstream's ``__postprocess``-applies-``reduce_function``
-    maps in milox to *the Set backend already being reduced* and
-    ``_MiliInternal`` reshaping it). ``reductions.combine`` /
-    ``merge_result_dictionaries`` / ``reduce_*`` are the full verbatim
-    port (``milox.reductions``) used by the redirected
-    ``test_reductions`` collection + the ``ResultModifier`` path; they
-    are not invoked to re-reduce the already-merged Set accessors.
-
-    ``merge_results=False`` keeps the Phase-I.2 per-fragment routing
-    (scoped to the ``GrizInterface.__init__`` contract; the full
-    per-proc surface + xfail-bucket promotion is Phase I.4)."""
-
-    def __init__(self, db: Any, merge_results: bool = True) -> None:
-        self._db = db
+    def __init__(
+        self,
+        internal_cls: Any,
+        dir_name: Any,
+        proc_bases: List[Any],
+        merge_results: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        self._procs = [
+            internal_cls(dir_name, base, **kwargs) for base in proc_bases
+        ]
         self._merge_results = merge_results
-        self._merged: Any = None
-        if merge_results:
-            # Lazy import: reader.py imports both parallel and
-            # miliinternal; importing at module scope would order-couple
-            # them. _MiliInternal(db) wraps the already-opened
-            # Set-backed PyMiliDatabase (its __init__ takes the engine
-            # directly when handed a PyMiliDatabase).
-            from .miliinternal import _MiliInternal
 
-            self._merged = _MiliInternal(db)
+    @property
+    def geometry(self) -> _GeometryWrapper:
+        return _GeometryWrapper([p.geometry for p in self._procs])
 
     def __getattr__(self, name: str) -> Any:
-        # Reached only when the attribute is not found normally.
-        if self.__dict__["_merge_results"]:
-            return getattr(self.__dict__["_merged"], name)
-        db = self.__dict__["_db"]
-        per_fragment = _PER_FRAGMENT.get(name)
-        if per_fragment is not None:
-            return getattr(db, per_fragment)
-        return getattr(db, name)
+        # Reached only when the attribute is not found normally — the
+        # full read accessor surface fans out per proc (upstream
+        # LoopWrapper.__loop_caller).
+        procs = self.__dict__["_procs"]
+
+        def _forward(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return [getattr(p, name)(*args, **kwargs) for p in procs]
+            except Exception as e:  # noqa: BLE001 — upstream __loop_caller
+                return [e]
+
+        return _forward
 
     def returncode(self) -> Any:
-        """``merge_results=True``: surface the inner ``_MiliInternal``'s
-        return code so its ERROR/CRITICAL codes raise through
-        ``MiliDatabase.__postprocess`` exactly as upstream. Otherwise
-        the per-fragment path raises in the Rust core directly, so there
-        is no per-proc code to surface — always OK."""
-        if self._merge_results:
-            return self._merged.returncode()
-        return (ReturnCode.OK, "")
+        """Per-proc return codes (a list of ``(code, msg)``).
+        ``MiliDatabase`` feeds the list to ``parse_return_codes``,
+        which raises only when *all* procs error or any is CRITICAL —
+        exactly upstream's behavior for a per-proc ``_MiliInternal``
+        that declares a class/svar on only some ranks."""
+        return [p.returncode() for p in self._procs]
 
     def clear_return_code(self) -> None:
-        if self._merge_results:
-            self._merged.clear_return_code()
+        for p in self._procs:
+            p.clear_return_code()
 
     def close(self) -> None:
-        """No subprocesses to tear down (fan-out is in Rust)."""
+        for p in self._procs:
+            close = getattr(p, "close", None)
+            if callable(close):
+                close()
 
 
 class LoopWrapper(_EngineWrapper):
@@ -149,5 +128,8 @@ class LoopWrapper(_EngineWrapper):
 
 
 class ServerWrapper(_EngineWrapper):
-    """Parallel handler identity. ``close()`` is the documented
-    teardown hook upstream callers invoke."""
+    """Parallel handler identity (single-process; ``close()`` is the
+    documented teardown hook upstream callers invoke)."""
+
+
+__all__ = ["LoopWrapper", "ServerWrapper"]

@@ -1,130 +1,447 @@
-"""milox ``adjacency`` — the serial ``AdjacencyMapping``.
+"""milox ``adjacency`` — verbatim port of upstream ``mili.adjacency``.
 
 Upstream ``AdjacencyMapping``
-(`reference/mili-python/src/mili/adjacency.py`) is a wrapper around
-``MiliDatabase`` exposing mesh-neighbour / connectivity-graph queries.
-The value/topology computation is **parity-sensitive**, so it lives in
-the Rust core (`mili_rs::adjacency`); this class is the thin
-upstream-API-compatible adapter. The upstream ``if not self.serial``
-branches (per-proc fan-out) collapse to identity here — the Rust
-``DatabaseSet`` already merges — so serial == the core result. Matches
-upstream's public surface exactly. See ``planning/mili-py/m4.md``
-Phase H.
+(``reference/mili-python/src/mili/adjacency.py``) is **pure non-parity
+plumbing**: every value/topology computation it performs is delegated
+to ``self.mili.geometry.*`` (the parity-sensitive
+``GeometricMeshInfo`` — milox keeps that in the Rust core, decision
+19) and to ``MiliDatabase`` accessors; ``AdjacencyMapping`` itself only
+merges per-proc results (``np.unique`` / ``min`` /
+``dictionary_merge_concat_unique`` / ``reduce_superclass_from_class_names``
+/ ``list_concatenate_unique_str``).
+
+Phase I.4 decision 21: with the per-proc ``_MiliInternal`` wrapper +
+the per-proc ``geometry`` rewrap, ``self.mili.geometry.X(...)`` yields
+the upstream ``[proc.X(...) for proc in procs]`` list and the
+``MiliDatabase`` accessors honor the per-method ``reduce_function`` /
+``merge_results`` contract. So porting upstream's ``adjacency.py``
+**verbatim** (imports rebased ``mili.*`` → ``.``; bodies byte-for-byte)
+is bit-exact by construction for both the serial (1-proc) and parallel
+cases — the per-fragment geometry is each serial-gate bit-exact and
+the merges are upstream's own code. This is the decision-18/19
+precedent one level out (non-parity plumbing over already-parity-
+correct per-fragment core outputs — decision 20). See
+``planning/mili-py/m4.md`` § Phase I.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+from numpy.typing import NDArray, ArrayLike
 
-from .mdg_defines import mdg_enum_to_string
+from .reductions import (
+    dictionary_merge_concat_unique,
+    list_concatenate_unique_str,
+    reduce_superclass_from_class_names,
+)
+from .mdg_defines import mdg_enum_to_string, EntityType
+from .datatypes import Superclass
+from .utils import argument_to_ndarray
 
 
 class AdjacencyMapping:
-    """Thin adapter over a milox ``MiliDatabase`` (Rust core)."""
+    """A wrapper around MiliDatabase that handles adjacency queries.
 
-    def __init__(self, mili: Any) -> None:
-        self.mili = mili
+    Args:
+        mili (MiliDatabase): The Mili database.
+    """
+
+    def __init__(self, mili: Any):
+        self.mili: Any = mili
         self.serial = mili.serial
 
-    @property
-    def _db(self) -> Any:
-        # MiliDatabase -> _MiliInternal -> Rust PyMiliDatabase.
-        return self.mili._mili._db
-
     def compute_centroid(
-        self, entity_type: Any, label: int, state: int
-    ) -> np.ndarray:
+        self, entity_type: Union[str, EntityType], label: int, state: int
+    ) -> NDArray[np.float32]:
+        """Compute the centroid of a given mesh entity at a given state.
+
+        Args:
+            entity_type (Union[str,EntityType]): The entity type ("brick", "node", etc.).
+            labels (int): The element label.
+            state (int): The state at which to calculate the centroid
+
+        Returns:
+            NDArray[np.float32]. The coordinates of the centroid.
+        """
         entity_type_str = mdg_enum_to_string(entity_type)
         centroid = self.mili.geometry.compute_centroid(
             entity_type_str, label, state
         )
+        if not self.serial:
+            centroid = np.unique(
+                [c for c in centroid if c is not None], axis=0
+            )
+            centroid = centroid[0] if len(centroid) == 1 else None
         if centroid is None:
             raise ValueError(
-                f"Could not calculate centroid for entity_type={entity_type_str}, "
-                f"label={label} at state {state}.\n"
-                f"Make sure that the specified entity type, label and state all exist."
+                (
+                    f"Could not calculate centroid for entity_type={entity_type_str}, label={label} at state {state}.\n"
+                    f"Make sure that the specified entity type, label and state all exist."
+                )
             )
         return centroid
 
     def mesh_entities_within_radius(
         self,
-        entity_type: Any,
+        entity_type: Union[str, EntityType],
         label: int,
         state: int,
         radius: float,
-        material: Any = None,
-    ) -> Dict[str, np.ndarray]:
-        # Upstream: compute_centroid (raises on None) -> near_coordinate.
-        centroid = self.compute_centroid(entity_type, label, state)
+        material: Optional[
+            Union[Union[str, int], List[Union[str, int]]]
+        ] = None,
+    ) -> Dict[str, NDArray[np.int32]]:
+        """Get all mesh entities within a specified radius from a specified mesh entity at a specified state.
+
+        Args:
+            entity_type (Union[str,EntityType]): The entity type ("brick", "node", etc.).
+            label (str): The element label.
+            state (int): The state number.
+            radius (float): The radius within which to search.
+            material (Optional[Union[Union[str,int],List[Union[str,int]]]], default=None): Limit search to specific material(s).
+        """
+        entity_type_str = mdg_enum_to_string(entity_type)
+        centroid = self.compute_centroid(entity_type_str, label, state)
         return self.mesh_entities_near_coordinate(
             centroid, state, radius, material
         )
 
     def mesh_entities_near_coordinate(
         self,
-        coordinate: Any,
+        coordinate: Union[List[float], NDArray[np.floating]],
         state: int,
         radius: float,
-        material: Any = None,
-    ) -> Dict[str, np.ndarray]:
-        return self._db.adj_mesh_entities_near_coordinate(
-            list(np.asarray(coordinate, dtype=np.float64)),
-            state,
-            radius,
-            material,
+        material: Optional[
+            Union[Union[str, int], List[Union[str, int]]]
+        ] = None,
+    ) -> Dict[str, NDArray[np.int32]]:
+        """Get all mesh entities within a specified radius from a specified coordinate at a given state.
+
+        Args:
+            coordinate (List[float]): The coordinate.
+            state (int): The state number.
+            radius (float): The radius within which to search.
+            material (Optional[Union[Union[str,int],List[Union[str,int]]]], default=None): Limit search to specific material(s).
+        """
+        nodes_in_radius = self.mili.geometry.nodes_within_radius(
+            coordinate, radius, state, material
         )
+        if not self.serial:
+            nodes_in_radius = np.unique(np.concatenate(nodes_in_radius))
+        elems_in_radius = self.elems_of_nodes(nodes_in_radius, material)
+        elems_in_radius["node"] = nodes_in_radius
+        return elems_in_radius
 
     def elems_of_nodes(
-        self, node_labels: Any, material: Any = None
-    ) -> Dict[str, np.ndarray]:
-        # Serial AdjacencyMapping.elems_of_nodes == geometry.elems_of_nodes.
-        return self.mili.geometry.elems_of_nodes(node_labels, material)
+        self,
+        node_labels: ArrayLike,
+        material: Optional[
+            Union[Union[str, int], List[Union[str, int]]]
+        ] = None,
+    ) -> Dict[str, NDArray[np.int32]]:
+        """Find elements associated with the specified nodes.
+
+        Args:
+            node_labels (ArrayLike): List of node labels.
+            material (Optional[Union[Union[str,int],List[Union[str,int]]]], default=None): Limit search to specific material(s).
+
+        Returns:
+            Dict[str,NDArray[np.int32]]: Keys are element entity types. Values are numpy arrays of element labels.
+        """
+        elems = self.mili.geometry.elems_of_nodes(node_labels, material)
+        if not self.serial:
+            elems = dictionary_merge_concat_unique(elems)
+        return elems
 
     def nearest_node(
-        self, point: Any, state: int, material: Any = None
+        self,
+        point: Union[List[float], NDArray[np.floating]],
+        state: int,
+        material: Optional[
+            Union[Union[str, int], List[Union[str, int]]]
+        ] = None,
     ) -> Tuple[int, float]:
-        return self.mili.geometry.nearest_node(point, state, material)
+        """Get the nearest node to a specified point.
+
+        Args:
+            point (List[float]): The coordinates of the point.
+            state (int): The state number.
+            material (Optional[Union[Union[str,int],List[Union[str,int]]]] = None): Limit gathered elements to a specific material(s).
+
+        Returns:
+            Tuple[int,float]: The node label and distance.
+        """
+        if isinstance(point, list):
+            point = np.array(point)
+        if isinstance(material, (str, int)):
+            material = [material]
+
+        nearest_node = self.mili.geometry.nearest_node(
+            point, state, material
+        )
+        if not self.serial:
+            nearest_node = min(nearest_node, key=lambda x: x[1])
+        return nearest_node
 
     def nearest_element(
         self,
-        point: Any,
+        point: Union[List[float], NDArray[np.floating]],
         state: int,
-        material: Any = None,
-        entity_type: Any = None,
-        superclass: Any = None,
+        material: Optional[
+            Union[Union[str, int], List[Union[str, int]]]
+        ] = None,
+        entity_type: Optional[Union[EntityType, str]] = None,
+        superclass: Optional[Superclass] = None,
     ) -> Tuple[str, int, float]:
-        return self.mili.geometry.nearest_element(
+        """Get the nearest element to a specified point.
+
+        Args:
+            point (List[float]): The coordinates of the point.
+            state (int): The state number.
+            material (Optional[Union[Union[str,int],List[Union[str,int]]]] = None): Limit gathered elements to a specific material(s).
+            entity_type (Optional[Union[EntityType,str]], default=None): Limit search to specific entity type (e.g 'shell', 'brick', etc.).
+            superclass (Optional[Superclass], default=None): Limit search to a specific super class.
+
+        Returns:
+            Tuple[str,int,float]: The element entity type, label, and distance.
+        """
+        if isinstance(point, list):
+            point = np.array(point)
+        if isinstance(material, (str, int)):
+            material = [material]
+
+        nearest_per_proc = self.mili.geometry.nearest_element(
             point, state, material, entity_type, superclass
         )
+        if not self.serial:
+            nearest_per_proc = min(nearest_per_proc, key=lambda x: x[2])
+        return nearest_per_proc
 
     def neighbor_elements(
         self,
-        entity_type: Any,
+        entity_type: Union[str, EntityType],
         label: int,
-        material: Any = None,
+        material: Optional[
+            Union[Union[str, int], List[Union[str, int]]]
+        ] = None,
         neighbor_radius: int = 1,
-    ) -> Dict[str, np.ndarray]:
+    ) -> Dict[str, NDArray[np.int32]]:
+        """Gather all neighbor elements to a specified element.
+
+        NOTE: A neighbor element is defined as any element that shares a node with the specified element.
+
+        Args:
+            entity_type (Union[str,EntityType]): The entity type ("brick", "node", etc.).
+            label (int): The element label.
+            material (Optional[Union[Union[str,int],List[Union[str,int]]]] = None): Limit gathered elements to a specific material(s).
+            neighbor_radius (int, default=1): The number of neighbors to go out from the specified element.
+
+        Returns:
+            Dict[str,NDArray[np.int32]]: Keys are element entity types. Values are numpy arrays of element labels.
+        """
         entity_type_str = mdg_enum_to_string(entity_type)
-        code, elements = self._db.adj_neighbor_elements(
-            entity_type_str, label, material, neighbor_radius
-        )
-        if code == 1:
+        labels = self.mili.labels(entity_type_str)
+        if labels is None:
             raise ValueError(
                 f"No labels found for entity_type '{entity_type_str}'"
             )
-        if code == 2:
-            raise ValueError(
-                f"The label '{label}' was not found for the entity type "
-                f"'{entity_type_str}'"
+        if not self.serial and not self.mili.merge_results:
+            labels = np.unique(
+                np.concatenate(
+                    list(filter(lambda x: x is not None, labels))
+                )
             )
+        if label not in labels:
+            raise ValueError(
+                f"The label '{label}' was not found for the entity type '{entity_type_str}'"
+            )
+
+        entity_sclass = self.mili.superclass_from_class_name(
+            entity_type_str
+        )
+        if not self.serial and not self.mili.merge_results:
+            entity_sclass = reduce_superclass_from_class_names(
+                entity_sclass
+            )
+
+        def nodes_of_elems(
+            entity_type: str, element_labels: ArrayLike
+        ) -> NDArray[np.int32]:
+            """Wrap call to MiliDatabase.nodes_of_elems to handle serial vs parallel."""
+            nodes_of_elems = self.mili.nodes_of_elems(
+                entity_type, element_labels
+            )
+            if not self.serial and not self.mili.merge_results:
+                nodes = np.concatenate(
+                    [n[0] for n in nodes_of_elems if n[0].size > 0],
+                    dtype=np.int32,
+                ).ravel()
+            else:
+                nodes = nodes_of_elems[0].ravel()
+            return nodes
+
+        def material_classes(
+            material: Union[Union[str, int], List[Union[str, int]]],
+        ) -> List[str]:
+            """Wrap call to MiliDatabase.material_classes to handle serial vs parallel."""
+            if isinstance(material, (str, int)):
+                material = [material]
+            class_names = []
+            for mat in material:
+                classes_of_material = self.mili.material_classes(mat)
+                if not self.serial and not self.mili.merge_results:
+                    classes_of_material = list_concatenate_unique_str(
+                        classes_of_material
+                    )
+                class_names.extend(classes_of_material)
+            class_names = list(set(class_names))
+            return class_names
+
+        def class_labels_of_material(
+            material: Union[Union[str, int], List[Union[str, int]]],
+            entity_type: str,
+        ) -> NDArray[np.int32]:
+            """Wrap call to MiliDatabase.class_labels_of_material to handle serial vs parallel."""
+            if isinstance(material, (str, int)):
+                material = [material]
+            class_labels = np.empty([0], dtype=np.int32)
+            for mat in material:
+                elems_of_material = self.mili.class_labels_of_material(
+                    mat, entity_type
+                )
+                if not self.serial and not self.mili.merge_results:
+                    elems_of_material = np.unique(
+                        np.concatenate(elems_of_material)
+                    )
+                class_labels = np.unique(
+                    np.concatenate((class_labels, elems_of_material))
+                )
+            return class_labels
+
+        elements: Dict[str, NDArray[np.int32]] = {}
+
+        if entity_sclass == Superclass.M_NODE:
+            nodes = np.array([label])
+        else:
+            nodes = nodes_of_elems(entity_type_str, label)
+        nodes_processed = set()
+        nodes_to_process = set(nodes)
+        steps_from_elem = 0
+        while (
+            len(nodes_to_process) > 0
+            and steps_from_elem < neighbor_radius
+        ):
+            # Get all elements associated with the nodes we are currently processing
+            nodes_processed.update(nodes_to_process)
+            elems = self.elems_of_nodes(list(nodes_to_process))
+            elements = dictionary_merge_concat_unique([elements, elems])
+
+            nodes_to_process.clear()
+            steps_from_elem += 1
+
+            # Get the nodes of the elements we just found and mark them as needing to be processed
+            # filter out nodes that have already been processed
+            if steps_from_elem < neighbor_radius:
+                for elem_class, elem_labels in elems.items():
+                    nodes = nodes_of_elems(elem_class, elem_labels)
+                    nodes_to_process.update(nodes)
+                nodes_to_process = nodes_to_process.difference(
+                    nodes_processed
+                )
+
+        if material:
+            # Filter out elements not of the specified material
+            classes_of_material = material_classes(material)
+            elements = {
+                k: v
+                for k, v in elements.items()
+                if k in classes_of_material
+            }
+
+            for elem_class in elements:
+                elems_of_material = class_labels_of_material(
+                    material, elem_class
+                )
+                where = np.where(
+                    np.isin(elements[elem_class], elems_of_material)
+                )
+                elements[elem_class] = elements[elem_class][where]
+
         return elements
 
-    def neighbor_nodes(self, entity_type: Any, label: int) -> np.ndarray:
-        return np.array(
-            self._db.adj_neighbor_nodes(
-                mdg_enum_to_string(entity_type), label
-            ),
-            dtype=np.int32,
+    def neighbor_nodes(self, entity_type: Union[str, EntityType], label: int):
+        """Given an entity_type + label, find all neighboring nodes.
+
+        NOTE: A neighboring node is defined as any node that shares an element edge with one of the nodes
+              associated with the entity_type + label combination.
+
+        Args:
+            entity_type (Union[str,EntityType]): The entity type ("brick", "node", etc.).
+            label (int): The element label.
+
+        Returns:
+            NDArray[np.int32]: A list of neighboring node labels.
+        """
+        neighbor_nodes = np.empty([0], dtype=np.int32)
+        entity_type_str = mdg_enum_to_string(entity_type)
+        entity_sclass = self.mili.superclass_from_class_name(
+            entity_type_str
         )
+        if not self.serial and not self.mili.merge_results:
+            entity_sclass = reduce_superclass_from_class_names(
+                entity_sclass
+            )
+
+        def nodes_of_elems(
+            entity_type: str, element_label: ArrayLike
+        ) -> NDArray[np.int32]:
+            """Wrap call to MiliDatabase.nodes_of_elems to handle serial vs parallel."""
+            nodes_of_elems = self.mili.nodes_of_elems(
+                entity_type, element_label
+            )
+            if not self.serial and not self.mili.merge_results:
+                nodes = np.concatenate(
+                    [n[0] for n in nodes_of_elems if n[0].size > 0],
+                    dtype=np.int32,
+                )
+            else:
+                nodes = nodes_of_elems[0]
+            return nodes
+
+        if entity_sclass == Superclass.M_NODE:
+            node_labels = np.array([label])
+        else:
+            node_labels = nodes_of_elems(entity_type_str, label).ravel()
+            if entity_sclass == Superclass.M_BEAM:
+                node_labels = node_labels[:-1]
+
+        elems_of_nodes_by_class = self.elems_of_nodes(node_labels)
+
+        for class_name, class_labels in elems_of_nodes_by_class.items():
+            superclass = self.mili.superclass_from_class_name(class_name)
+            if not self.serial and not self.mili.merge_results:
+                superclass = reduce_superclass_from_class_names(
+                    superclass
+                )
+            n_connects = superclass.node_connections()
+
+            nodal_connectivity_by_element = nodes_of_elems(
+                class_name, class_labels
+            )
+
+            idx1, idx2 = np.where(
+                np.isin(nodal_connectivity_by_element, node_labels)
+            )
+            conn_matches = nodal_connectivity_by_element[idx1]
+            conn_indexes = n_connects[idx2]
+            rows = np.arange(conn_matches.shape[0])[:, None]
+            neighbor_nodes = conn_matches[rows, conn_indexes]
+
+        # Remove the searched nodes from the results
+        neighbor_nodes = np.setdiff1d(
+            np.unique(neighbor_nodes), node_labels
+        )
+
+        return neighbor_nodes
