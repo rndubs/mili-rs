@@ -8,10 +8,29 @@
 //! the parity-exact primal `nodpos` query. The encoded blob layout is
 //! frozen by `planning/mili-viz/phase-4-m2.md` Decision 11.
 
+use std::collections::HashMap;
+
 use mili_rs::{Database, MeshId, QueryArgs, StateValues, Superclass};
 
-/// Stable `GeometryRef.layout` string (phase-4-m2.md Decision 11).
+/// Bare-hull `GeometryRef.layout` (phase-4-m2.md Decision 11) — no
+/// scalar field. Unchanged from M2.
 pub const LAYOUT: &str = "MVG1:verts_f32x3+idx_u32+trimat_u32";
+
+/// Scalar-hull `GeometryRef.layout` (phase-4-m3.md Decision 14): the
+/// M2 blob plus a trailing per-vertex `f32` scalar array.
+pub const LAYOUT_SCALAR: &str = "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32";
+
+/// One prepped element class kept for M3 nodal scatter: the element →
+/// corner-node-id rows and the parallel element label list (same row
+/// order as `connectivity_ids` / `labels`).
+struct ElemClass {
+    name: String,
+    n_nodes: usize,
+    /// Flat `[elem * n_nodes]` 0-based node ids.
+    conns: Vec<u32>,
+    /// Element label per row (`conns.len() / n_nodes` entries).
+    labels: Vec<i32>,
+}
 
 /// State-invariant mesh topology, built once per `load`.
 pub struct MeshTopology {
@@ -28,6 +47,8 @@ pub struct MeshTopology {
     indices: Vec<u32>,
     /// Material id per triangle (`indices.len() / 3` entries).
     tri_material: Vec<u32>,
+    /// Per element class, kept for M3 nodal scatter.
+    elem_classes: Vec<ElemClass>,
 }
 
 /// Per-`Superclass` corner-node triangulation (phase-4-m2.md
@@ -108,6 +129,7 @@ impl MeshTopology {
 
         let mut indices: Vec<u32> = Vec::new();
         let mut tri_material: Vec<u32> = Vec::new();
+        let mut elem_classes: Vec<ElemClass> = Vec::new();
 
         // Collect class metadata first (immutable borrow of the mesh
         // table) so the connectivity decode below is a fresh borrow.
@@ -139,8 +161,12 @@ impl MeshTopology {
             if n_nodes <= max_local {
                 continue; // connectivity too short for this scheme
             }
+            let mut conns: Vec<u32> = Vec::with_capacity((rows.len() / ncols) * n_nodes);
             for row in rows.chunks_exact(ncols) {
                 let material = row[n_nodes].max(0) as u32;
+                for &nid in &row[..n_nodes] {
+                    conns.push(nid.max(0) as u32);
+                }
                 for tri in tris {
                     let mut ok = true;
                     let mut v = [0u32; 3];
@@ -158,6 +184,23 @@ impl MeshTopology {
                     }
                 }
             }
+            let labels = db
+                .labels(mesh_id, &name)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            // Only keep the class for scatter if the label list lines
+            // up with the connectivity rows (the query→element join
+            // key); otherwise it still contributes triangles, just no
+            // scalar.
+            if labels.len() == conns.len() / n_nodes {
+                elem_classes.push(ElemClass {
+                    name,
+                    n_nodes,
+                    conns,
+                    labels,
+                });
+            }
         }
 
         Some(MeshTopology {
@@ -167,6 +210,7 @@ impl MeshTopology {
             ref_coords,
             indices,
             tri_material,
+            elem_classes,
         })
     }
 
@@ -220,17 +264,144 @@ impl MeshTopology {
         out
     }
 
-    /// Encode the current-state hull as the frozen `MVG1` blob
-    /// (phase-4-m2.md Decision 11).
-    pub fn encode(&self, db: &Database, state: u32) -> Vec<u8> {
+    /// Per-vertex scalar for `svar` at 1-based `state`, plus the finite
+    /// data range `(min, max)` (phase-4-m3.md Decisions 13–15).
+    /// `None` when the svar resolves to no prepped class or the query
+    /// fails — the caller then falls back to the M2 bare hull.
+    ///
+    /// Element results are nodal-averaged (mean of incident elements,
+    /// griz smooth shading); nodal results map node→vertex directly.
+    /// Untouched vertices are `f32::NAN`. A multi-component svar
+    /// (vector) colors by component 0.
+    pub fn vertex_scalar(
+        &self,
+        db: &Database,
+        svar: &str,
+        state: u32,
+    ) -> Option<(Vec<f32>, f64, f64)> {
+        let n = db.state_count();
+        if svar.is_empty() || n == 0 || state == 0 {
+            return None;
+        }
+        let state_idx = (state as usize - 1).min(n - 1);
+        let classes = db.classes_of_state_variable(svar)?;
+        if classes.is_empty() {
+            return None;
+        }
+
+        let query = |class: &str| -> Option<HashMap<i32, f64>> {
+            let args = QueryArgs {
+                svar,
+                class,
+                labels: None,
+                states: &[state_idx],
+                materials: None,
+                ips: None,
+                subrec: None,
+            };
+            let (vals, labels) = db.query_with_labels(&args).ok()?;
+            if labels.is_empty() {
+                return None;
+            }
+            let v: Vec<f64> = match vals {
+                StateValues::F32(v) => v.into_iter().map(f64::from).collect(),
+                StateValues::F64(v) => v,
+                StateValues::I32(v) => v.into_iter().map(f64::from).collect(),
+                StateValues::I64(v) => v.into_iter().map(|x| x as f64).collect(),
+            };
+            let comps = v.len() / labels.len();
+            if comps == 0 {
+                return None;
+            }
+            // Component 0 of each object (phase-4-m3.md Decision 14).
+            Some(
+                labels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &lab)| (lab, v[i * comps]))
+                    .collect(),
+            )
+        };
+
+        let mut scalar = vec![f32::NAN; self.node_count];
+
+        if classes.iter().any(|c| c == "node") {
+            // Nodal field: map node label → vertex directly.
+            if self.node_labels.len() != self.node_count {
+                return None;
+            }
+            let by_label = query("node")?;
+            for (i, &lab) in self.node_labels.iter().enumerate() {
+                if let Some(&val) = by_label.get(&lab) {
+                    scalar[i] = val as f32;
+                }
+            }
+        } else {
+            // Element field: nodal-average onto vertices.
+            let mut sum = vec![0.0f64; self.node_count];
+            let mut cnt = vec![0u32; self.node_count];
+            let mut any = false;
+            for ec in &self.elem_classes {
+                if !classes.iter().any(|c| c == &ec.name) {
+                    continue;
+                }
+                let Some(by_label) = query(&ec.name) else {
+                    continue;
+                };
+                any = true;
+                for (e, &lab) in ec.labels.iter().enumerate() {
+                    let Some(&val) = by_label.get(&lab) else {
+                        continue;
+                    };
+                    for &nid in &ec.conns[e * ec.n_nodes..(e + 1) * ec.n_nodes] {
+                        let nid = nid as usize;
+                        if nid < self.node_count {
+                            sum[nid] += val;
+                            cnt[nid] += 1;
+                        }
+                    }
+                }
+            }
+            if !any {
+                return None;
+            }
+            for i in 0..self.node_count {
+                if cnt[i] > 0 {
+                    scalar[i] = (sum[i] / f64::from(cnt[i])) as f32;
+                }
+            }
+        }
+
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for &s in &scalar {
+            if s.is_finite() {
+                lo = lo.min(f64::from(s));
+                hi = hi.max(f64::from(s));
+            }
+        }
+        if !lo.is_finite() {
+            return None; // no finite samples
+        }
+        Some((scalar, lo, hi))
+    }
+
+    /// Encode the current-state hull. `scalar` (per-vertex, phase-4-m3
+    /// Decision 14) yields the `MVG2` layout; `None` is the M2 `MVG1`
+    /// bare hull, byte-identical to before.
+    pub fn encode(&self, db: &Database, state: u32, scalar: Option<&[f32]>) -> Vec<u8> {
         let verts = self.coords_at_state(db, state);
         let n_verts = (verts.len() / 3) as u64;
         let n_idx = self.indices.len() as u64;
+        let with_scalar =
+            scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
 
         let mut buf = Vec::with_capacity(
-            4 + 4 + 8 + 8 + verts.len() * 4 + self.indices.len() * 4 + self.tri_material.len() * 4,
+            24 + verts.len() * 4
+                + self.indices.len() * 4
+                + self.tri_material.len() * 4
+                + if with_scalar { verts.len() / 3 * 4 } else { 0 },
         );
-        buf.extend_from_slice(b"MVG1");
+        buf.extend_from_slice(if with_scalar { b"MVG2" } else { b"MVG1" });
         buf.extend_from_slice(&3u32.to_le_bytes());
         buf.extend_from_slice(&n_verts.to_le_bytes());
         buf.extend_from_slice(&n_idx.to_le_bytes());
@@ -242,6 +413,11 @@ impl MeshTopology {
         }
         for m in &self.tri_material {
             buf.extend_from_slice(&m.to_le_bytes());
+        }
+        if with_scalar {
+            for v in scalar.unwrap() {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
         }
         buf
     }

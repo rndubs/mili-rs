@@ -107,12 +107,25 @@ impl Session {
     }
 
     /// Encode the current-state hull, file it under a fresh ticket,
-    /// and return the `GeometryRef`. `None` when no real mesh is loaded
-    /// (M1 behavior — `GeometryRef` stays empty, frozen tests green).
-    fn geometry_ref(&mut self) -> Option<pb::GeometryRef> {
+    /// and return the `GeometryRef` plus the scalar `(min, max)`
+    /// range. A non-empty `svar` that resolves adds the per-vertex
+    /// scalar field (`MVG2`, phase-4-m3.md Decisions 13–15);
+    /// otherwise the M2 bare hull (`MVG1`, range `(0, 0)`). `None`
+    /// when no real mesh is loaded (M1 behavior — `GeometryRef` stays
+    /// empty, frozen tests green).
+    fn geometry_ref(&mut self, svar: &str) -> Option<(pb::GeometryRef, f64, f64)> {
         let topo = self.topo.as_ref()?;
         let db = self.db.as_ref()?;
-        let blob = topo.encode(db, self.state);
+        let scalar = topo.vertex_scalar(db, svar, self.state);
+        let (blob, layout, min, max) = match &scalar {
+            Some((s, lo, hi)) => (
+                topo.encode(db, self.state, Some(s)),
+                geometry::LAYOUT_SCALAR,
+                *lo,
+                *hi,
+            ),
+            None => (topo.encode(db, self.state, None), geometry::LAYOUT, 0.0, 0.0),
+        };
         let (num_vertices, num_indices) = (topo.num_vertices(), topo.num_indices());
         self.geom_seq += 1;
         let ticket = format!("geom:{}", self.geom_seq).into_bytes();
@@ -122,12 +135,16 @@ impl Session {
             let old = self.geom_order.remove(0);
             self.geom.remove(&old);
         }
-        Some(pb::GeometryRef {
-            flight_ticket: ticket,
-            layout: geometry::LAYOUT.to_string(),
-            num_vertices,
-            num_indices,
-        })
+        Some((
+            pb::GeometryRef {
+                flight_ticket: ticket,
+                layout: layout.to_string(),
+                num_vertices,
+                num_indices,
+            },
+            min,
+            max,
+        ))
     }
 }
 
@@ -372,29 +389,39 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             (D::DeltaSelection, P::Selection(selection_state(s)))
         }
         Cmd::Show(show) => {
-            // M2: deliver the current-state mesh hull. The `result`
-            // name is recorded but does not yet drive scalar colors
-            // (that is M3); an empty/any result yields the
-            // material-segmented hull — griz's default no-scalar view
-            // (phase-4-m2.md Decision 12).
-            let geometry = s.geometry_ref();
+            // M3: the queried svar is `component` if set, else
+            // `result` (griz leaf-scalar semantics, phase-4-m3.md
+            // Decision 13). An unresolvable result falls back to the
+            // M2 bare hull; an empty result is the no-scalar mesh view.
+            let svar = if show.component.is_empty() {
+                show.result.clone()
+            } else {
+                show.component.clone()
+            };
+            let (geometry, min, max) = match s.geometry_ref(&svar) {
+                Some((g, lo, hi)) => (Some(g), lo, hi),
+                None => (None, 0.0, 0.0),
+            };
             let r = pb::ResultState {
                 result: show.result,
                 component: show.component,
-                min: 0.0,
-                max: 0.0,
+                min,
+                max,
                 geometry,
             };
             s.result = Some(r.clone());
             (D::DeltaResult, P::Result(r))
         }
         Cmd::Contour(c) => {
-            let geometry = s.geometry_ref();
+            let (geometry, min, max) = match s.geometry_ref(&c.result) {
+                Some((g, lo, hi)) => (Some(g), lo, hi),
+                None => (None, 0.0, 0.0),
+            };
             let r = pb::ResultState {
                 result: c.result,
                 component: String::new(),
-                min: 0.0,
-                max: 0.0,
+                min,
+                max,
                 geometry,
             };
             s.result = Some(r.clone());
