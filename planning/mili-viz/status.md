@@ -929,6 +929,16 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       node/tri/scalar the cached `GeometryRef` actually has, not the
       wireframe's aspirational `class N` — a viewport highlight glyph
       and a label mapping remain (wireframe-parity Picking row).
+    - **Materials enable/disable affordance (MVP-cut 3).** The
+      server side was already done (item 8); this wires the GUI. Each
+      left-dock Materials row is now a toggle (● shown / ○ hidden,
+      weak label when off) emitting `UiAction::SetMaterialVisible`,
+      lowered to the frozen `Command::Material`
+      (`MaterialVisibility{ enable, class_name }`, whole class).
+      Visibility is tracked client-authoritatively by class name
+      (`ShellState::hidden_materials`, default empty → composite gate
+      unchanged) since the broadcast `MaterialsState` is keyed by
+      material id with no client-side class catalog.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

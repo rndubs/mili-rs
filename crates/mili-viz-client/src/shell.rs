@@ -216,6 +216,14 @@ pub enum UiAction {
     /// [`ShellState`]; client-side ray-cast against the cached hull,
     /// no proto command.
     TogglePicking,
+    /// Enable/disable a class's materials. Lowered to the frozen
+    /// `Command::Material` (`MaterialVisibility{ enable, class_name }`,
+    /// no `material` id — whole class). The server is already done
+    /// (status 8); this is the GUI affordance.
+    SetMaterialVisible {
+        class_name: String,
+        visible: bool,
+    },
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -253,6 +261,13 @@ pub struct ShellState {
     /// Whether left-click does a client-side ray-cast pick instead of
     /// starting an orbit. Default off, driven by the `Picking` menu.
     pub picking: bool,
+    /// Classes whose materials are toggled **off** in the left-dock
+    /// Materials section. Empty = all visible (the default, so the M3
+    /// composite gate is unchanged). The proto's `MaterialsState` is
+    /// keyed by material id with no client-side class catalog, so
+    /// visibility is tracked client-authoritatively by class name and
+    /// pushed to the server via the typed command.
+    pub hidden_materials: std::collections::BTreeSet<String>,
     /// Currently highlighted Results-tree row.
     pub selected_result: Option<String>,
     /// Open bottom tab, or `None` for the collapsed 22 px strip
@@ -302,6 +317,7 @@ impl Default for ShellState {
             fps: 0.0,
             pick: "—".to_string(),
             picking: false,
+            hidden_materials: std::collections::BTreeSet::new(),
             selected_result: None,
             bottom_tab: None,
             transcript: Vec::new(),
@@ -364,6 +380,27 @@ impl ShellState {
                 None => format!("node {} · tri {}", p.node, p.tri),
             },
         };
+    }
+
+    /// Whether a class's materials are currently shown.
+    #[must_use]
+    pub fn material_visible(&self, class_name: &str) -> bool {
+        !self.hidden_materials.contains(class_name)
+    }
+
+    /// Flip a class's material visibility and emit the typed command
+    /// for the app to lower to the frozen `Command::Material`.
+    pub fn toggle_material(&mut self, class_name: &str) -> UiAction {
+        let visible = if self.hidden_materials.remove(class_name) {
+            true
+        } else {
+            self.hidden_materials.insert(class_name.to_string());
+            false
+        };
+        UiAction::SetMaterialVisible {
+            class_name: class_name.to_string(),
+            visible,
+        }
     }
 
     /// Toggle a bottom tab: open it, or collapse the body if it is
@@ -729,16 +766,31 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                 }
             });
 
-        let n_classes = state.loaded.as_ref().map_or(0, |l| l.class_names.len());
-        egui::CollapsingHeader::new(format!("Materials · {n_classes}"))
+        let classes: Vec<String> = state
+            .loaded
+            .as_ref()
+            .map(|l| l.class_names.clone())
+            .unwrap_or_default();
+        egui::CollapsingHeader::new(format!("Materials · {}", classes.len()))
             .default_open(false)
             .show(ui, |ui| {
-                if let Some(l) = &state.loaded {
-                    for c in &l.class_names {
-                        ui.horizontal(|ui| {
-                            ui.label("●");
-                            ui.label(c);
-                        });
+                for c in &classes {
+                    // A row toggles the class's materials: filled dot +
+                    // normal label when visible, hollow dot + weak
+                    // label when hidden. The whole row is the button.
+                    let visible = state.material_visible(c);
+                    let dot = if visible { "●" } else { "○" };
+                    let text = if visible {
+                        egui::RichText::new(format!("{dot} {c}"))
+                    } else {
+                        egui::RichText::new(format!("{dot} {c}")).weak()
+                    };
+                    if ui
+                        .selectable_label(false, text)
+                        .on_hover_text("toggle material visibility")
+                        .clicked()
+                    {
+                        actions.push(state.toggle_material(c));
                     }
                 }
             });

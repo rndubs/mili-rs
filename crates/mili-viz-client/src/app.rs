@@ -387,6 +387,14 @@ impl App {
                     max: *max,
                 }))
             }
+            UiAction::SetMaterialVisible {
+                class_name,
+                visible,
+            } => Some(pb::command::Cmd::Material(pb::MaterialVisibility {
+                enable: *visible,
+                class_name: class_name.clone(),
+                material: None,
+            })),
             UiAction::SetRenderMode(m) => {
                 // Pure-client (VB-003): retarget the renderer; no
                 // proto command (the frozen set is untouched).

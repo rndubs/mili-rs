@@ -57,7 +57,7 @@ started.
 | Results → `derived` | 🟡 partial | hard-coded 7-name `DERIVED_RESULTS`, not a real catalog | phase-5-m3 Dec 47 |
 | Results → `primal` / `time-indep` | 🔴 placeholder | literal `"(catalog: M4+)"`; frozen proto has no svar catalog | phase-5-m3 Dec 47 |
 | Colormap (ramp picker + manual legend limits) | ✅ done | extra vs wireframe but functional | phase-5-m4 Dec 66 |
-| Materials section | 🟡 partial | lists class names w/ static `●`; **no enable/disable, no dots, no row interaction** | status 8 (server-side done) |
+| Materials section | ✅ done | per-class row toggles visibility (● shown / ○ hidden, weak when off) → `UiAction::SetMaterialVisible` → frozen `Command::Material` | status 8 / 23 |
 | Surfaces section | 🔴 placeholder | `"(surfaces: M4+)"` | — |
 | Per-section row-count badges; Picking glyph row | ⬜ missing | only Results/Materials have a count | — |
 
@@ -126,8 +126,8 @@ leverage:
    `Control`, `Picking`, the View/Preferences host.
 2. ✅ **Wireframe / element-edge render mode** (VB-003) + its
    `Rendering` toggle — done.
-3. **Materials enable/disable affordance** (server side already done,
-   status 8 — GUI only).
+3. ✅ **Materials enable/disable affordance** (server side already
+   done, status 8 — GUI only) — done.
 4. 🟡 **Picking** + live status-bar readout — ray-cast + readout
    landed; a viewport highlight glyph + label-catalog mapping remain.
 5. **Real bbox overlay + camera-tracking axes gizmo.**
