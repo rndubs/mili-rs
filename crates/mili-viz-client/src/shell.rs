@@ -212,6 +212,10 @@ pub enum UiAction {
     /// [`ShellState`]; the windowed app retargets the renderer. No
     /// proto change — the frozen `Command` set is untouched.
     SetRenderMode(RenderMode),
+    /// Pure-client picking-mode toggle. Already applied to
+    /// [`ShellState`]; client-side ray-cast against the cached hull,
+    /// no proto command.
+    TogglePicking,
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -243,8 +247,12 @@ pub struct ShellState {
     pub stride: u32,
     pub overlays: Overlays,
     pub fps: f32,
-    /// Status-bar pick readout (`—` until picking lands, M4+).
+    /// Status-bar pick readout (`—` when nothing picked / picking
+    /// off).
     pub pick: String,
+    /// Whether left-click does a client-side ray-cast pick instead of
+    /// starting an orbit. Default off, driven by the `Picking` menu.
+    pub picking: bool,
     /// Currently highlighted Results-tree row.
     pub selected_result: Option<String>,
     /// Open bottom tab, or `None` for the collapsed 22 px strip
@@ -293,6 +301,7 @@ impl Default for ShellState {
             overlays: Overlays::default(),
             fps: 0.0,
             pick: "—".to_string(),
+            picking: false,
             selected_result: None,
             bottom_tab: None,
             transcript: Vec::new(),
@@ -330,6 +339,31 @@ impl ShellState {
     pub fn set_render_mode(&mut self, mode: RenderMode) -> UiAction {
         self.render_mode = mode;
         UiAction::SetRenderMode(mode)
+    }
+
+    /// Toggle client-side picking. Turning it off clears the readout
+    /// back to `—`. Pure client state; the action is observability-only
+    /// (no proto command).
+    pub fn toggle_picking(&mut self) -> UiAction {
+        self.picking = !self.picking;
+        if !self.picking {
+            self.pick = "—".to_string();
+        }
+        UiAction::TogglePicking
+    }
+
+    /// Fold a ray-cast result into the status-bar readout. The frozen
+    /// proto has no label catalog, so a hit shows the node/triangle
+    /// indices the cached hull actually carries (plus the `MVG2`
+    /// scalar when present); a miss reads `(no hit)`.
+    pub fn apply_pick(&mut self, hit: Option<&crate::mesh::Pick>) {
+        self.pick = match hit {
+            None => "(no hit)".to_string(),
+            Some(p) => match p.scalar {
+                Some(v) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
+                None => format!("node {} · tri {}", p.node, p.tri),
+            },
+        };
     }
 
     /// Toggle a bottom tab: open it, or collapse the body if it is
@@ -458,7 +492,13 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                         }
                     }
                 });
-                for m in ["Picking", "Results", "Time", "Plot", "Help"] {
+                ui.menu_button("Picking", |ui| {
+                    let mark = if state.picking { "● " } else { "○ " };
+                    if ui.button(format!("{mark}enable picking")).clicked() {
+                        actions.push(state.toggle_picking());
+                    }
+                });
+                for m in ["Results", "Time", "Plot", "Help"] {
                     let _ = ui.menu_button(m, |_| {});
                 }
             });

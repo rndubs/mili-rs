@@ -37,8 +37,9 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Control · Picking · Results · Time · Plot · Help` items | 🔴 placeholder | the other 6 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Control · Results · Time · Plot · Help` items | 🔴 placeholder | the other 5 are still `ui.menu_button(m, |_| {})` — open but empty | — |
 | `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
+| `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
 | View / Preferences (theme, layout tweaks) | ⬜ missing | no menu to host the Tweaks set | — |
 
 ## Toolbar
@@ -89,7 +90,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| attached / proto / pick / fps row | 🟡 partial | `proto v1` hard-coded; `pick:` permanently `—`; no peer count | — |
+| attached / proto / pick / fps row | 🟡 partial | `proto v1` hard-coded, no peer count; `pick:` now **live** (client-side ray-cast readout, off by default) | status 23 |
 
 ## Tweaks / Preferences
 
@@ -109,7 +110,7 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | File → Open / `rfd` picker | ⏸️ deferred | own milestone (maintainer decision); load via CLI `-i` / Layer-0 `load` only | status 21 |
-| Picking (client-side from cached `GeometryRef`) | ⬜ missing | status-bar pick readout is dead | README "Open questions" (resolved-in-design) |
+| Picking (client-side from cached `GeometryRef`) | 🟡 partial | ray-cast vs. cached hull → live status-bar readout (node/tri/scalar). Frozen proto has no label catalog, so no `class N` mapping; no highlight glyph yet | status 23 |
 | Agent / multi-client session states | ⬜ missing | thinking/running/interrupted/peer | M6 |
 | Remote mode (gRPC+Flight wired to `connect`/`attach`) | ⏸️ deferred | server transport done (status 11); client wiring is Phase 5 M5 | status 22 |
 
@@ -127,7 +128,8 @@ leverage:
    `Rendering` toggle — done.
 3. **Materials enable/disable affordance** (server side already done,
    status 8 — GUI only).
-4. **Picking** + live status-bar readout.
+4. 🟡 **Picking** + live status-bar readout — ray-cast + readout
+   landed; a viewport highlight glyph + label-catalog mapping remain.
 5. **Real bbox overlay + camera-tracking axes gizmo.**
 6. **File → Open** (lift the deferral if MVP needs it).
 7. **L3 focus mode + theme/tweaks surface.**

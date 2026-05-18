@@ -7,7 +7,7 @@
 //! conversion
 //! (`phase-5-m1.md` Decision 40).
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 
 /// An orbit camera looking at a focus point from a distance, rotated
 /// by `azimuth` (about world +Y) and `elevation` (toward world +Y).
@@ -93,6 +93,37 @@ impl Camera {
     #[must_use]
     pub fn view_projection(&self, width: u32, height: u32) -> Mat4 {
         self.projection(width, height) * self.view()
+    }
+
+    /// World-space pick ray `(origin, dir)` (dir normalized) through a
+    /// normalized device coordinate (`x,y ∈ -1..1`, y up — the
+    /// `wgpu`/glam clip convention). Unprojects the near and far clip
+    /// points through `inverse(view_proj)`. Pure math (no GPU), so the
+    /// picking test core is always-on.
+    #[must_use]
+    pub fn ray_from_ndc(&self, ndc_x: f32, ndc_y: f32, width: u32, height: u32) -> (Vec3, Vec3) {
+        let inv = self.view_projection(width, height).inverse();
+        let unproject = |z: f32| -> Vec3 {
+            let p: Vec4 = inv * Vec4::new(ndc_x, ndc_y, z, 1.0);
+            p.truncate() / p.w
+        };
+        // wgpu clip depth is 0 (near) .. 1 (far).
+        let near = unproject(0.0);
+        let far = unproject(1.0);
+        (near, (far - near).normalize_or_zero())
+    }
+
+    /// World-space pick ray through a pixel `(px, py)` of a
+    /// `width`x`height` viewport, top-left origin (the egui / window
+    /// convention). Thin wrapper over [`Self::ray_from_ndc`] that flips
+    /// y and maps pixels to NDC.
+    #[must_use]
+    pub fn ray_from_screen(&self, px: f32, py: f32, width: u32, height: u32) -> (Vec3, Vec3) {
+        let w = width.max(1) as f32;
+        let h = height.max(1) as f32;
+        let ndc_x = 2.0 * px / w - 1.0;
+        let ndc_y = 1.0 - 2.0 * py / h;
+        self.ray_from_ndc(ndc_x, ndc_y, width, height)
     }
 
     /// A default-orientation orbit camera framed on a bounding sphere

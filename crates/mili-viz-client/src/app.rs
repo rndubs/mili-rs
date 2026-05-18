@@ -297,6 +297,30 @@ impl App {
         let _ = self.rt.block_on(self.session.execute(cmd));
     }
 
+    /// Client-side pick: ray-cast the window cursor (mapped into the
+    /// scene sub-rect the egui panels leave, matching the renderer's
+    /// projection) against the cached hull and fold the hit into the
+    /// status-bar readout. No transport — the frozen proto carries no
+    /// label catalog, so the readout is whatever the cached
+    /// `GeometryRef` geometry actually has.
+    fn pick_at(&mut self, cursor: glam::Vec2) {
+        let Some(ws) = &self.state else { return };
+        let (sw, sh) = (ws.config.width as f32, ws.config.height as f32);
+        let (sx, sy, scw, sch) = match self.shell.scene_frac {
+            Some([fx, fy, fw, fh]) => (fx * sw, fy * sh, (fw * sw).max(1.0), (fh * sh).max(1.0)),
+            None => (0.0, 0.0, sw, sh),
+        };
+        let (rx, ry) = (cursor.x - sx, cursor.y - sy);
+        if rx < 0.0 || ry < 0.0 || rx > scw || ry > sch {
+            return;
+        }
+        let (o, d) = self
+            .camera
+            .ray_from_screen(rx, ry, scw as u32, sch as u32);
+        let hit = self.mesh.as_ref().and_then(|m| m.pick(o, d));
+        self.shell.apply_pick(hit.as_ref());
+    }
+
     fn apply_action(&mut self, a: &UiAction) {
         let cmd = match a {
             UiAction::First => Some(step(pb::step::Dir::First)),
@@ -375,7 +399,8 @@ impl App {
             UiAction::SetStride(_)
             | UiAction::ToggleOverlay(_)
             | UiAction::SelectBottomTab(_)
-            | UiAction::CollapseBottomTabs => None,
+            | UiAction::CollapseBottomTabs
+            | UiAction::TogglePicking => None,
         };
         if let Some(cmd) = cmd {
             let _ = self.rt.block_on(self.session.execute(cmd));
@@ -508,11 +533,20 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed {
                     if !egui_consumed {
-                        self.drag = match button {
-                            MouseButton::Left => Some(DragKind::Orbit),
-                            MouseButton::Right | MouseButton::Middle => Some(DragKind::Pan),
-                            _ => None,
-                        };
+                        // In picking mode a left press ray-casts the
+                        // cached hull instead of starting an orbit;
+                        // pan (right/middle) is unchanged.
+                        if self.shell.picking && button == MouseButton::Left {
+                            if let Some(c) = self.last_cursor {
+                                self.pick_at(c);
+                            }
+                        } else {
+                            self.drag = match button {
+                                MouseButton::Left => Some(DragKind::Orbit),
+                                MouseButton::Right | MouseButton::Middle => Some(DragKind::Pan),
+                                _ => None,
+                            };
+                        }
                     }
                 } else {
                     self.drag = None;

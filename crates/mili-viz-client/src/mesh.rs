@@ -25,6 +25,26 @@ pub struct Mesh {
     pub scalars: Option<Vec<f32>>,
 }
 
+/// A client-side pick hit against the cached hull. The frozen proto's
+/// `GeometryRef` carries no node/element label catalog (only
+/// verts/idx/trimat), so picking reports what the cached geometry
+/// actually has: the hit triangle, the nearest node (vertex index),
+/// the world-space hit point and, for an `MVG2` result, the scalar at
+/// that node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pick {
+    /// Triangle index (`indices[3*tri..]`).
+    pub tri: usize,
+    /// Nearest vertex of the hit triangle (node-array index).
+    pub node: usize,
+    /// Ray parameter (world-unit distance along the ray).
+    pub distance: f32,
+    /// World-space hit point.
+    pub point: [f32; 3],
+    /// Result scalar at `node` for an `MVG2` hull, else `None`.
+    pub scalar: Option<f32>,
+}
+
 /// Error decoding a geometry blob.
 #[derive(Debug)]
 pub struct DecodeError(pub String);
@@ -185,6 +205,66 @@ impl Mesh {
             }
         }
         edges
+    }
+
+    /// Nearest ray/hull intersection (Möller–Trumbore, two-sided to
+    /// match the renderer's no-cull, two-sided shading). `dir` need not
+    /// be unit; only positive-`t` hits count. Returns the closest
+    /// triangle, its nearest vertex to the hit point, and the `MVG2`
+    /// scalar there if any. `None` if the ray misses the hull.
+    #[must_use]
+    pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<Pick> {
+        let eps = 1e-7_f32;
+        let mut best: Option<Pick> = None;
+        for (t_i, tri) in self.indices.chunks_exact(3).enumerate() {
+            let (i0, i1, i2) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let v0 = Vec3::from(self.positions[i0]);
+            let v1 = Vec3::from(self.positions[i1]);
+            let v2 = Vec3::from(self.positions[i2]);
+            let e1 = v1 - v0;
+            let e2 = v2 - v0;
+            let p = dir.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < eps {
+                continue;
+            }
+            let inv = 1.0 / det;
+            let tvec = origin - v0;
+            let u = tvec.dot(p) * inv;
+            if !(0.0..=1.0).contains(&u) {
+                continue;
+            }
+            let q = tvec.cross(e1);
+            let v = dir.dot(q) * inv;
+            if v < 0.0 || u + v > 1.0 {
+                continue;
+            }
+            let t = e2.dot(q) * inv;
+            if t <= eps {
+                continue;
+            }
+            if best.is_none_or(|b| t < b.distance) {
+                let hit = origin + dir * t;
+                // Nearest of the three triangle corners to the hit.
+                let node = [(i0, v0), (i1, v1), (i2, v2)]
+                    .into_iter()
+                    .min_by(|a, b| {
+                        (a.1 - hit)
+                            .length_squared()
+                            .total_cmp(&(b.1 - hit).length_squared())
+                    })
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(i0);
+                best = Some(Pick {
+                    tri: t_i,
+                    node,
+                    distance: t,
+                    point: hit.to_array(),
+                    scalar: self.scalars.as_ref().map(|s| s[node]),
+                });
+            }
+        }
+        best
     }
 
     /// Bounding-sphere `(center, radius)` of the vertex cloud — the

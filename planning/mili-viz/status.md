@@ -918,6 +918,17 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       menu-bar `Rendering` menu now hosts the three-way toggle,
       emitting the pure-client `UiAction::SetRenderMode` (no proto
       change). See `bug-tracker.md` VB-003.
+    - **Client-side picking + live status-bar readout (MVP-cut 4).**
+      `Camera::ray_from_screen` unprojects the cursor; `Mesh::pick`
+      (two-sided Möller–Trumbore over the cached hull) returns the hit
+      triangle, nearest node and `MVG2` scalar. The previously-empty
+      `Picking` menu toggles it (`UiAction::TogglePicking`); a
+      left-click in picking mode ray-casts instead of orbiting and the
+      status bar's permanently-`—` `pick:` field goes live. The frozen
+      proto carries **no label catalog**, so the readout is the
+      node/tri/scalar the cached `GeometryRef` actually has, not the
+      wireframe's aspirational `class N` — a viewport highlight glyph
+      and a label mapping remain (wireframe-parity Picking row).
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
