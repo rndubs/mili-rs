@@ -194,34 +194,35 @@ render seam is unchanged.** The colormap ramp stays a client concern
 `Mesh.scalars`); a `LegendLimits` change re-runs `upload_mesh` with
 the new range, no new geometry round-trip.
 
-## Open question (needs a decision before coding M4)
+## Resolved: File→Open / interactive load deferred (Part-1 item 3)
 
-**File→Open / interactive load (Part-1 item 3 — usability gap, not a
-bug).** `shell.rs:347–359`'s menu buttons are empty stubs
-(`ui.menu_button(m, |_| {})`) and there is no file dialog, so a run is
-only loadable via argv or the Layer-0 `load` command in the bottom
-tab. A real `Control → Open…` needs a native file picker; the
-idiomatic `egui` choice is the `rfd` crate (≈ one small dep, pulls a
-platform dialog backend). This is **not** in the wireframes' M4 scope
-("local view manipulation"); recorded here as an explicit gap with a
-recommendation to **defer** to its own tiny milestone (or fold into
-M5, where remote `connect`/`attach` already reworks the load path)
-rather than add a GUI-dialog dependency mid-M4. **Pending the
-maintainer's call** (do not add `rfd` without it).
+**File→Open / interactive load (usability gap, not a bug).**
+`shell.rs`'s menu buttons are empty stubs (`ui.menu_button(m, |_| {})`)
+and there is no file dialog, so a run is only loadable via argv (now
+`-i`, Decision 63) or the Layer-0 `load` command in the bottom tab. A
+real `Control → Open…` needs a native file picker (`rfd`, ≈ one small
+dep + a platform dialog backend) and is **not** in the wireframes' M4
+scope ("local view manipulation"). **Maintainer decision: defer to
+its own milestone** (or fold into M5, where remote `connect`/`attach`
+already reworks the load path) — `rfd` is **not** added in M4.
 
-## Acceptance gate
+## Acceptance gate — ✅ all green
 
-- `cli::parse_args` unit tests (always-on): `-i`/bare positional set
-  the root, `-V` → version, `-b`/`-w` parse not error, unknown flag
-  errors, missing value errors, two-roots errors. ✅ landed.
-- A pure `ShellState`/`Camera` reconcile test (always-on): a
-  `CameraState` broadcast overwrites a predicted `Camera`
-  field-for-field; a `LegendLimits` override changes the effective
-  range while the autoscale path is unchanged when unset.
-- Skip-on-absent composite render unchanged (the `egui`/mesh seam,
-  Decision 45, byte-stable — M4 adds input handling and a delta arm,
-  not a render-path change).
-- `cargo test --workspace --exclude mili-py` green; the frozen Phase 4
-  server suite + Phase 5 M1/M2/M3/M3.5 + Phase 6 M1/M2/M3 gates green;
-  `cargo fmt --check` + `cargo clippy` clean; `mili_viz.proto`
-  byte-untouched.
+- ✅ `cli::parse_args` unit tests (always-on, in `cli.rs`): `-i`/bare
+  positional set the root, `-V` → version, `-b`/`-w` parse not error,
+  unknown flag errors, missing value errors, two-roots errors.
+- ✅ `tests/m4_view_manipulation.rs` (always-on): `Camera::from_orbit`
+  overwrites a predicted camera field-for-field and is idempotent
+  (last-broadcast-wins reconcile); `Camera::basis` orthonormal;
+  `ShellState::effective_range` autoscales then a `LegendLimits`
+  override replaces only the set bound and clearing reverts; the
+  named-colormap table is distinct, clamped, and `cool` is the
+  default + unknown-name fallback.
+- ✅ Skip-on-absent composite render unchanged (the `egui`/mesh seam,
+  Decision 45, byte-stable — M4 adds input handling + a delta arm +
+  a recolor, not a render-path change); `m1_renderer.rs`,
+  `m2_render_server_output.rs`, `m3_egui_shell.rs`,
+  `m3_5_bottom_tabs.rs` unchanged and green.
+- ✅ `cargo test --workspace --exclude mili-py` green (51 suites);
+  `cargo fmt --check` + `cargo clippy --tests` clean for the touched
+  crate; `mili_viz.proto` byte-untouched.

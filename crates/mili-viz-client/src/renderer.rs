@@ -192,12 +192,12 @@ impl Renderer {
     /// (`phase-5-m3.md` Decision 47); otherwise every vertex gets the
     /// M2 uniform [`BASE_COLOR`] (so a bare hull renders exactly as in
     /// M2).
-    pub fn upload_mesh(&mut self, mesh: &Mesh, range: Option<(f32, f32)>) {
+    pub fn upload_mesh(&mut self, mesh: &Mesh, range: Option<(f32, f32)>, colormap: &str) {
         let color_of = |i: usize| -> [f32; 3] {
             match (&mesh.scalars, range) {
                 (Some(s), Some((lo, hi))) => {
                     let t = crate::colormap::normalize(s[i], lo, hi);
-                    crate::colormap::sample(t)
+                    crate::colormap::sample_named(colormap, t)
                 }
                 _ => BASE_COLOR,
             }
@@ -363,7 +363,7 @@ pub fn render_mesh_to_image(
 ) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
-    renderer.upload_mesh(mesh, None);
+    renderer.upload_mesh(mesh, None, "cool");
     Some(renderer.read_back(width, height, camera))
 }
 
@@ -384,7 +384,7 @@ pub fn render_shell_to_image(
 ) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
-    renderer.upload_mesh(mesh, range);
+    renderer.upload_mesh(mesh, range, "cool");
     let mut egui = crate::egui_layer::EguiPaint::new(&renderer.device, OFFSCREEN_FORMAT);
 
     let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {

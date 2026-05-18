@@ -64,6 +64,22 @@ impl Camera {
         Mat4::look_at_rh(self.eye(), self.focus, Vec3::Y)
     }
 
+    /// Orthonormal camera basis `(right, up, forward)` in world space,
+    /// `forward` pointing from the eye toward the focus. Used by M4's
+    /// screen-space pan to translate the focus in the view plane
+    /// (`phase-5-m4.md` Decision 64).
+    #[must_use]
+    pub fn basis(&self) -> (Vec3, Vec3, Vec3) {
+        let forward = (self.focus - self.eye()).normalize_or_zero();
+        let mut right = forward.cross(Vec3::Y);
+        if right.length_squared() < 1e-12 {
+            right = Vec3::X;
+        }
+        let right = right.normalize();
+        let up = right.cross(forward);
+        (right, up, forward)
+    }
+
     /// Perspective projection for a `width`/`height` viewport.
     /// `wgpu` clip space has depth in `0..1`, so this uses the
     /// reverse-GL (`_rh`, not `_rh_gl`) variant.
@@ -92,6 +108,35 @@ impl Camera {
         Self {
             focus: center,
             distance,
+            z_near: (distance - r).max(r * 1e-3),
+            z_far: distance + r * 4.0,
+            ..base
+        }
+    }
+
+    /// Reconstruct an orbit camera from explicit orbit parameters
+    /// (the M4 reconcile core — `phase-5-m4.md` Decision 64). The
+    /// server's `CameraState` maps field-for-field onto the first
+    /// four args (Decision 40 shaped them 1:1; radians per Decision
+    /// 65); `fov_y`/`z_near`/`z_far` are client-only projection params
+    /// the proto does not carry, re-bracketed around `distance` and
+    /// the cached model `radius` exactly like [`Self::looking_at`].
+    /// Proto-free so it is the always-on reconcile test core.
+    #[must_use]
+    pub fn from_orbit(
+        azimuth: f32,
+        elevation: f32,
+        distance: f32,
+        focus: Vec3,
+        radius: f32,
+    ) -> Self {
+        let base = Self::default();
+        let r = radius.max(1e-3);
+        Self {
+            azimuth,
+            elevation,
+            distance,
+            focus,
             z_near: (distance - r).max(r * 1e-3),
             z_far: distance + r * 4.0,
             ..base

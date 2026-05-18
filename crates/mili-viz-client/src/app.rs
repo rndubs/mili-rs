@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use mili_viz_proto::v1 as pb;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::window::{Window, WindowId};
 
@@ -39,16 +39,29 @@ struct WindowState {
     max_dim: u32,
 }
 
+/// Which mouse-drag gesture is in progress over the viewport
+/// (`phase-5-m4.md` Decision 64).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragKind {
+    /// Left-drag → orbit (azimuth/elevation).
+    Orbit,
+    /// Right/middle-drag → pan (focus translate in the view plane).
+    Pan,
+}
+
 struct App {
     rt: tokio::runtime::Runtime,
     session: Session,
     shell: ShellState,
     camera: Camera,
     mesh: Option<Mesh>,
-    range: Option<(f32, f32)>,
     bounds: Option<(glam::Vec3, f32)>,
     state: Option<WindowState>,
     last_anim: Instant,
+    /// In-progress viewport drag + the last cursor position, the M4
+    /// predict half (`phase-5-m4.md` Decision 64).
+    drag: Option<DragKind>,
+    last_cursor: Option<glam::Vec2>,
 }
 
 impl App {
@@ -65,10 +78,14 @@ impl App {
                     if let Some(r) = s.result {
                         self.apply_result(&r);
                     }
+                    if let Some(c) = s.camera {
+                        self.apply_camera(&c);
+                    }
                 }
                 Some(pb::state_delta::Payload::Loaded(l)) => self.apply_loaded(&l),
                 Some(pb::state_delta::Payload::State(n)) => self.shell.state = n,
                 Some(pb::state_delta::Payload::Result(r)) => self.apply_result(&r),
+                Some(pb::state_delta::Payload::Camera(c)) => self.apply_camera(&c),
                 Some(pb::state_delta::Payload::Closed(_)) => {
                     self.shell.phase = SessionPhase::NotAttached;
                     self.shell.loaded = None;
@@ -81,6 +98,7 @@ impl App {
     }
 
     fn apply_loaded(&mut self, l: &pb::LoadedState) {
+        let new_run = self.shell.loaded.as_ref().is_none_or(|p| p.db != l.db);
         self.shell.loaded = Some(crate::shell::LoadedInfo {
             db: l.db.clone(),
             num_states: l.num_states,
@@ -89,6 +107,32 @@ impl App {
         });
         if !l.db.is_empty() && self.shell.phase == SessionPhase::NotAttached {
             self.shell.phase = SessionPhase::AttachedIdle;
+        }
+        // A new run must re-frame on its first geometry; clearing the
+        // cached bounds is the trigger (`phase-5-m4.md` Decision 64).
+        if new_run {
+            self.bounds = None;
+        }
+    }
+
+    /// Reconcile the predicted camera against the server-authoritative
+    /// broadcast — last-broadcast-wins, unconditional, including
+    /// self-caused echoes (`phase-5-m4.md` Decision 64). `azimuth`/
+    /// `elevation`/`distance`/focus map field-for-field; the
+    /// client-only projection planes are re-bracketed around the
+    /// reconciled distance and the cached model radius.
+    fn apply_camera(&mut self, c: &pb::CameraState) {
+        let radius = self.bounds.map_or(1.0, |(_, r)| r);
+        self.camera = camera_from_state(c, radius);
+    }
+
+    /// Re-colour the uploaded mesh from the current colormap +
+    /// effective range without a geometry round-trip (the server
+    /// treats `colormap`/`legend` as a recolor no-op — Decision 66).
+    fn reupload(&mut self) {
+        if let (Some(mesh), Some(ws)) = (&self.mesh, &mut self.state) {
+            ws.renderer
+                .upload_mesh(mesh, self.shell.effective_range(), &self.shell.colormap);
         }
     }
 
@@ -110,20 +154,113 @@ impl App {
         self.shell.record_time_sample();
         if let Some(g) = &r.geometry {
             if let Ok(mesh) = self.session.resolve_geometry(g) {
-                self.range = if r.result.is_empty() {
-                    None
-                } else {
-                    Some((r.min as f32, r.max as f32))
-                };
                 let b = mesh.bounds();
+                // Frame once per run (Decision 64): the first geometry
+                // after a `load` proposes the auto-frame to the
+                // server via an absolute `SetCamera` so the
+                // server-authoritative camera *is* the framed one;
+                // subsequent results (state steps, recolours) keep
+                // the user's orbit. Predict locally for this frame;
+                // the `DELTA_CAMERA` echo reconciles it.
+                let first_geometry = self.bounds.is_none();
                 self.bounds = Some(b);
-                self.camera = Camera::looking_at(b.0, b.1);
+                if first_geometry {
+                    let framed = Camera::looking_at(b.0, b.1);
+                    self.camera = framed;
+                    self.send_set_camera(&framed);
+                }
+                let range = self.shell.effective_range();
                 if let Some(ws) = &mut self.state {
-                    ws.renderer.upload_mesh(&mesh, self.range);
+                    ws.renderer.upload_mesh(&mesh, range, &self.shell.colormap);
                 }
                 self.mesh = Some(mesh);
             }
         }
+    }
+
+    /// Lower the framed orbit camera to the frozen absolute
+    /// `View::SetCamera` so the server's authoritative state becomes
+    /// the auto-frame (`phase-5-m4.md` Decision 64).
+    fn send_set_camera(&mut self, cam: &Camera) {
+        let cmd = pb::command::Cmd::View(pb::View {
+            op: Some(pb::view::Op::Set(pb::SetCamera {
+                azimuth: f64::from(cam.azimuth),
+                elevation: f64::from(cam.elevation),
+                distance: f64::from(cam.distance),
+                fx: Some(f64::from(cam.focus.x)),
+                fy: Some(f64::from(cam.focus.y)),
+                fz: Some(f64::from(cam.focus.z)),
+            })),
+        });
+        let _ = self.rt.block_on(self.session.execute(cmd));
+    }
+
+    /// Current viewport size in physical pixels (≥ 1), or a 1×1
+    /// fallback before the surface exists.
+    fn viewport(&self) -> (f32, f32) {
+        self.state.as_ref().map_or((1.0, 1.0), |ws| {
+            (
+                ws.config.width.max(1) as f32,
+                ws.config.height.max(1) as f32,
+            )
+        })
+    }
+
+    /// Left-drag orbit: a full viewport width = π rad azimuth, a full
+    /// height = π rad elevation. Predict locally, emit `View::Rotate`
+    /// in radians (`phase-5-m4.md` Decisions 64–65; the pole guard is
+    /// `Camera::eye`).
+    fn orbit(&mut self, dx: f32, dy: f32) {
+        let (w, h) = self.viewport();
+        let daz = -(dx / w) * std::f32::consts::PI;
+        let del = -(dy / h) * std::f32::consts::PI;
+        self.camera.azimuth += daz;
+        self.camera.elevation += del;
+        let cmd = pb::command::Cmd::View(pb::View {
+            op: Some(pb::view::Op::Rotate(pb::Rotate {
+                x: f64::from(daz),
+                y: f64::from(del),
+                z: 0.0,
+            })),
+        });
+        let _ = self.rt.block_on(self.session.execute(cmd));
+    }
+
+    /// Right/middle-drag pan: translate the focus in the view plane so
+    /// the grabbed point tracks the cursor. Predict locally, emit
+    /// `View::Translate` in world units (Decision 64).
+    fn pan(&mut self, dx: f32, dy: f32) {
+        let (_, h) = self.viewport();
+        let half = (self.camera.fov_y * 0.5).tan();
+        let per_px = 2.0 * self.camera.distance * half / h;
+        let (right, up, _) = self.camera.basis();
+        let delta = right * (-dx * per_px) + up * (dy * per_px);
+        self.camera.focus += delta;
+        let cmd = pb::command::Cmd::View(pb::View {
+            op: Some(pb::view::Op::Translate(pb::Translate {
+                dx: f64::from(delta.x),
+                dy: f64::from(delta.y),
+                dz: f64::from(delta.z),
+            })),
+        });
+        let _ = self.rt.block_on(self.session.execute(cmd));
+    }
+
+    /// Scroll-wheel zoom: a geometric distance scale. Predict locally,
+    /// emit `View::Zoom` (the server divides distance by `factor`,
+    /// matching the prediction — Decision 64).
+    fn zoom(&mut self, scroll: f32) {
+        let factor = 1.1_f32.powf(scroll);
+        if factor <= 0.0 {
+            return;
+        }
+        self.camera.distance = (self.camera.distance / factor).max(f32::MIN_POSITIVE);
+        let cmd = pb::command::Cmd::View(pb::View {
+            op: Some(pb::view::Op::Zoom(pb::Zoom {
+                factor: f64::from(factor),
+            })),
+        });
+        let _ = self.rt.block_on(self.session.execute(cmd));
     }
 
     fn apply_action(&mut self, a: &UiAction) {
@@ -133,12 +270,18 @@ impl App {
             UiAction::Next => Some(step(pb::step::Dir::Next)),
             UiAction::Last => Some(step(pb::step::Dir::Last)),
             UiAction::ViewReset | UiAction::Fit => {
+                // `reset`/`fit` mean *re-frame to the model*. The
+                // proto `View::reset` lowers server-side to a
+                // distance-1 default with no knowledge of the model
+                // bounds, so both lower to an absolute `SetCamera` of
+                // the client's auto-frame instead (`phase-5-m4.md`
+                // Decision 64); predict now, the echo reconciles.
                 if let Some((c, r)) = self.bounds {
-                    self.camera = Camera::looking_at(c, r);
+                    let framed = Camera::looking_at(c, r);
+                    self.camera = framed;
+                    self.send_set_camera(&framed);
                 }
-                Some(pb::command::Cmd::View(pb::View {
-                    op: Some(pb::view::Op::Reset(true)),
-                }))
+                None
             }
             UiAction::Show(name) => Some(pb::command::Cmd::Show(pb::Show {
                 result: name.clone(),
@@ -170,6 +313,22 @@ impl App {
                 }
                 None
             }
+            UiAction::SetColormap(name) => {
+                // State already set by the UI; recolour the cached
+                // mesh client-side and notify the server (a recolor
+                // no-op there) for observability (Decision 66).
+                self.reupload();
+                Some(pb::command::Cmd::Colormap(pb::Colormap {
+                    name: name.clone(),
+                }))
+            }
+            UiAction::SetLegendLimits(min, max) => {
+                self.reupload();
+                Some(pb::command::Cmd::Legend(pb::LegendLimits {
+                    min: *min,
+                    max: *max,
+                }))
+            }
             // Client-only: already applied to ShellState by the UI.
             UiAction::SetStride(_)
             | UiAction::ToggleOverlay(_)
@@ -184,6 +343,23 @@ impl App {
 
 fn step(dir: pb::step::Dir) -> pb::command::Cmd {
     pb::command::Cmd::Step(pb::Step { dir: dir as i32 })
+}
+
+/// Map a server `CameraState` onto the client orbit [`Camera`]
+/// (`phase-5-m4.md` Decision 64). `azimuth`/`elevation`/`distance`
+/// and focus copy field-for-field (Decision 40 shaped them 1:1, in
+/// radians per Decision 65); `fov_y`/`z_near`/`z_far` are client-only
+/// projection params the proto does not carry — bracketed around the
+/// reconciled distance and the cached model `radius`, mirroring
+/// [`Camera::looking_at`].
+fn camera_from_state(c: &pb::CameraState, radius: f32) -> Camera {
+    Camera::from_orbit(
+        c.azimuth as f32,
+        c.elevation as f32,
+        c.distance as f32,
+        glam::Vec3::new(c.fx as f32, c.fy as f32, c.fz as f32),
+        radius,
+    )
 }
 
 impl ApplicationHandler for App {
@@ -240,7 +416,7 @@ impl ApplicationHandler for App {
 
         let mut renderer = Renderer::new(device, queue, format);
         if let Some(mesh) = &self.mesh {
-            renderer.upload_mesh(mesh, self.range);
+            renderer.upload_mesh(mesh, self.shell.effective_range(), &self.shell.colormap);
         }
         let egui = EguiPaint::new(renderer.device(), format);
         let egui_winit = egui_winit::State::new(
@@ -266,9 +442,11 @@ impl ApplicationHandler for App {
         if self.state.is_none() {
             return;
         }
-        if let Some(ws) = &mut self.state {
-            let _ = ws.egui_winit.on_window_event(&ws.window, &event);
-        }
+        let egui_consumed = self
+            .state
+            .as_mut()
+            .map(|ws| ws.egui_winit.on_window_event(&ws.window, &event).consumed)
+            .unwrap_or(false);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -277,6 +455,47 @@ impl ApplicationHandler for App {
                     ws.config.height = size.height.clamp(1, ws.max_dim);
                     ws.surface.configure(ws.renderer.device(), &ws.config);
                     ws.window.request_redraw();
+                }
+            }
+            // M4 predict half (`phase-5-m4.md` Decision 64): a drag
+            // mutates the local camera *now* and emits the matching
+            // `View` op; the `DELTA_CAMERA` echo reconciles it. A
+            // gesture only *starts* off an egui-unconsumed press (not
+            // over a panel/widget) but, once begun, tracks the cursor
+            // until release so dragging over a panel still orbits.
+            WindowEvent::MouseInput { state, button, .. } => {
+                if state == ElementState::Pressed {
+                    if !egui_consumed {
+                        self.drag = match button {
+                            MouseButton::Left => Some(DragKind::Orbit),
+                            MouseButton::Right | MouseButton::Middle => Some(DragKind::Pan),
+                            _ => None,
+                        };
+                    }
+                } else {
+                    self.drag = None;
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let p = glam::vec2(position.x as f32, position.y as f32);
+                if let (Some(kind), Some(prev)) = (self.drag, self.last_cursor) {
+                    let d = p - prev;
+                    match kind {
+                        DragKind::Orbit => self.orbit(d.x, d.y),
+                        DragKind::Pan => self.pan(d.x, d.y),
+                    }
+                }
+                self.last_cursor = Some(p);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if !egui_consumed {
+                    let s = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => (p.y as f32) / 50.0,
+                    };
+                    if s != 0.0 {
+                        self.zoom(s);
+                    }
                 }
             }
             WindowEvent::RedrawRequested => self.redraw(),
@@ -375,10 +594,11 @@ pub fn run(root: Option<String>) -> Result<(), Box<dyn std::error::Error + Send 
         shell,
         camera: Camera::default(),
         mesh: None,
-        range: None,
         bounds: None,
         state: None,
         last_anim: Instant::now(),
+        drag: None,
+        last_cursor: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
