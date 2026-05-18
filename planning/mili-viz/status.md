@@ -57,7 +57,7 @@
   `m2_render_server_output.rs` unchanged and green. (M3.5 ✅ landed
   — see the M3.5 entry above; M4–M6 ⏳ not started.)
 - **Phase 6 (`pygriz` scripting client): 🟢 IN PROGRESS — M1 ✅,
-  M2 ✅ landed.** A third pure-Python client of the frozen contract,
+  M2 ✅, M3 ✅ landed.** A third pure-Python client of the frozen contract,
   gated only on Phase 4 M1, independent of Phase 5. M1 = the
   gitignored stub generator (`scripts/gen-pygriz-stubs.sh` — the
   Python analogue of the Rust `protox` `build.rs`, off the one
@@ -93,7 +93,26 @@
   `test_m2_attach.py` (always-on pure logic; skip-on-absent vs a
   spawned `mili-viz-server` TCP binary, per CLAUDE.md);
   `cargo test --workspace --exclude mili-py` + the frozen Phase 4/5
-  suites unchanged and green. M3–M6 ⏳ not started.
+  suites unchanged and green. **M3 = the Layer-1 object API:**
+  `s.open/state/next/prev/first/last/select/show/isosurface/contour/
+  cutplane/colormap` + `s.selection`/`s.materials`/`s.legend` helpers +
+  `s.view.*` (server-authoritative), the typed handles
+  (`Result.range`, `Isosurface.remove()`, minimal `Database`/
+  `Contour`). Every Layer-1 call lowers to a **typed `Command` oneof
+  variant, never `raw`** (Decision 59 — no second griz parser *or*
+  emitter in Python; the M1 single-parser invariant generalizes);
+  server-authoritative read-backs (`Result.range`, `s.state`,
+  `legend.limits`) use a one-shot `Subscribe` snapshot, never client
+  prediction (Decision 61 — that is Phase 5 M4). The **Layer-0 ≡
+  Layer-1** invariant is pinned two ways (Decision 60): an always-on
+  fake-stub lowering pin + a skip-on-absent identical-`DELTA_SNAPSHOT`
+  leg (typed call vs the hand-written equivalent raw line, two
+  freshly-`launch()`ed real servers, against `basic1.pltA`). Scope +
+  Decisions 59–61: [`phase-6-m3.md`](phase-6-m3.md). No proto change;
+  **`crates/` byte-for-byte untouched** (`cargo test --workspace
+  --exclude mili-py` green by construction); the frozen Phase 4/5
+  suites + the M1 & M2 gates unchanged and green. Gating test
+  `python/pygriz/tests/test_m3_layer1.py`. M4–M6 ⏳ not started.
 - **✅ Phase 4 M1 is implemented.** `crates/mili-viz-proto`
   (protoc-free `protox`+`tonic` codegen of the frozen Δ1–Δ9
   contract) and `crates/mili-viz-server` (in-process `tokio::io::
@@ -255,6 +274,7 @@
 | [`phase-5-m3.5.md`](phase-5-m3.5.md) | **The buildable Phase 5 M3.5 scope (bottom tabs).** The Layer-0 command line + scripting runner + `egui_plot` time-history behind the frozen contract; Decisions 48–52 (command line = verbatim `Execute(Command{raw})` over the live `Session`, client-side `griz>` transcript; scripting tab = structured **disabled placeholder**, the subprocess+`attach()` runner blocked on the uncoded Phase 6 `pygriz`; time-history fed by the already-implemented `Subscribe`/`ResultState` stream — the server `Query` RPC is a shape-only stub, so the `Query`-fed per-element series is the documented forward path; bottom panel = always-present 22 px strip + default-collapsed body so the M3 footprint / `m3_egui_shell.rs` / Decision-45 seam stay byte-stable; `egui_plot` 0.35.0 pinned, sparse-index-verified vs the frozen `egui` 0.34.2). No proto change; no Phase 4 crate touched | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m1.md`](phase-6-m1.md) | **The buildable Phase 6 M1 scope (`pygriz` scaffold + stubs + connect/handshake) — landed.** A third pure-Python client of the frozen contract, gated only on Phase 4 M1 (independent of the Phase 5 renderer). Decisions 35–37 (top-level `python/` tree, dist `pygriz` / import `griz`, pure-Python no-pyo3; stubs are gitignored build output from the one canonical proto; M1 is Layer-0-only — reuse the server's `parse_raw`, Layer-1 + the Layer-0≡Layer-1 test is M3) + 53–55 (the `grpc_tools.protoc` generator + package-relative import rewrite, stale gitignore citation fixed; `run_script` = one verbatim `Command{raw}`, no Python line-split; the gate spawns the real `mili-viz-server` TCP binary, corpus-independent `load`). Unblocks `phase-5-m3.5.md` Decision 49. No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m2.md`](phase-6-m2.md) | **The buildable Phase 6 M2 scope (`pygriz` connection model + server-side session file) — landed.** `griz.attach()` (priority: newest live `~/.griz/sessions/<id>.json`), `attach(id=)`, `attach(host=,port=)`, `launch(gui=)`, `list_sessions()`. Decisions 56–58 (the server writes the Jupyter-style session/connection file from the **binary's `main`**, never the frozen library transport / frozen proto — `lib.rs`/`mili_viz.proto` byte-untouched, `Hello` echo unchanged; token written for the Jupyter contract but **not** enforced so the frozen tokenless M1 gate stays green; staleness handled read-side via dead-pid skip; `$GRIZ_SESSIONS_DIR` redirect for a hermetic gate. `attach()` precedence explicit-endpoint > `id` > newest-live, all lowering to the one M1 `connect()` transport — no parallel client. `launch()` spawns the binary + attaches via the file it wrote; `gui=True` warns + proceeds headless — the renderer is the independent Phase 5 track). **Fully discharges `phase-5-m3.5.md` Decision 49** (M1 half-closed it at `connect()`; `attach()` now exists). No proto change; frozen Phase 4/5 suites + the M1 gate unchanged and green | ✅ pinned + landed (2026-05-18) |
+| [`phase-6-m3.md`](phase-6-m3.md) | **The buildable Phase 6 M3 scope (`pygriz` Layer-1 object API + the Layer-0 ≡ Layer-1 test) — landed.** `s.open/state/next/prev/first/last/select/show/isosurface/contour/cutplane/colormap` + `s.selection`/`s.materials`/`s.legend` + `s.view.*` (server-authoritative), typed handles (`Result.range`, `Isosurface.remove()`, minimal `Database`/`Contour`). Decisions 59–61 (every Layer-1 call lowers to a **typed `Command` oneof variant, never `raw`** — no second griz parser *or* emitter in Python, the M1 single-parser invariant generalized; the **Layer-0 ≡ Layer-1** invariant pinned two ways — an always-on fake-stub lowering pin + a skip-on-absent identical-`DELTA_SNAPSHOT` leg against two freshly-`launch()`ed real servers, hand-written griz line in the test only; server-authoritative read-backs via a one-shot `Subscribe` snapshot, never client prediction — that is Phase 5 M4). `query`/`render`/`@s.on` deferred (M5/M6/M4). No proto change; **`crates/` byte-for-byte untouched**; frozen Phase 4/5 suites + the M1 & M2 gates unchanged and green | ✅ pinned + landed (2026-05-18) |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` is authoritative) |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake. **Implementation home: Phase 6** ([`phase-6-m1.md`](phase-6-m1.md)) | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -786,12 +806,35 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     M3.5 scripting-tab placeholder (`phase-5-m3.5.md` Decision 49) is
     now unblocked at the **`attach()`** level — M1 only half-closed it
     at `connect()`.
-20. ⏭️ **NEXT:** independent tracks, all gated only on the
-    long-landed Phase 4 M1 — pick any:
-    - **Phase 6 M3** (`pygriz` Layer-1 object API + the
-      **Layer-0 ≡ Layer-1** equivalence test — `show()`→`Result`,
-      `s.view.*` server-authoritative, typed handles; builds on the
-      landed `connect()`/`attach()`/Layer-0).
+20. ✅ **DONE (coding Phase 6 M3 — `pygriz` Layer-1 object API + the
+    Layer-0 ≡ Layer-1 test):** the object API on the landed `Session`
+    — `s.open/state/next/prev/first/last/select/show/isosurface/
+    contour/cutplane/colormap` + `s.selection`/`s.materials`/
+    `s.legend` helpers + `s.view.*` (server-authoritative), the typed
+    handles (`Result.range`, `Isosurface.remove()`, minimal
+    `Database`/`Contour`). Every Layer-1 call lowers to a **typed
+    `Command` oneof variant, never `raw`** (Decision 59 — no second
+    griz parser *or* emitter in Python; the M1 single-parser invariant
+    generalized); server-authoritative read-backs use a one-shot
+    `Subscribe` snapshot, never client prediction (Decision 61 — that
+    is Phase 5 M4). The **Layer-0 ≡ Layer-1** invariant is pinned two
+    ways (Decision 60): an always-on fake-stub lowering pin + a
+    skip-on-absent identical-`DELTA_SNAPSHOT` leg (typed call vs the
+    hand-written equivalent raw line, two freshly-`launch()`ed real
+    servers, against `basic1.pltA`). Scope/decisions in
+    [`phase-6-m3.md`](phase-6-m3.md) (59–61). Gating test
+    `python/pygriz/tests/test_m3_layer1.py` (always-on lowering +
+    snapshot-read; skip-on-absent Layer-0 ≡ Layer-1 vs spawned
+    servers); no proto change; **`crates/` byte-for-byte untouched**
+    (`cargo test --workspace --exclude mili-py` green by
+    construction); the frozen Phase 4/5 suites + the M1 & M2 gates
+    unchanged and green.
+21. ⏭️ **NEXT:** independent tracks, all gated only on the
+    long-landed Phase 4 M1 — pick either:
+    - **Phase 6 M4** (`pygriz` live sync — `Subscribe` stream →
+      `@s.on("state_changed")` callbacks; the open GUI and a script
+      stay in sync; camera prediction/reconciliation. Builds on the
+      landed M1–M3 `Session`/Layer-1 + the one-shot snapshot read).
     - **Phase 5 M4** (`mili-viz` client — local view manipulation:
       client-side rotate/zoom prediction reconciled against the
       server-authoritative broadcast `DELTA_CAMERA`; `Colormap` /

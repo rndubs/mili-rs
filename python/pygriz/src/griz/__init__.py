@@ -42,6 +42,10 @@ __all__ = [
     "GuiUnavailableWarning",
     "Session",
     "SessionInfo",
+    "Database",
+    "Result",
+    "Isosurface",
+    "Contour",
     "connect",
     "attach",
     "launch",
@@ -144,6 +148,175 @@ class Session:
         with open(path, "r", encoding="utf-8") as fh:
             return self.command(fh.read())
 
+    # --- Layer-1 object API (phase-6-m3.md Decisions 59–61) ----------
+    #
+    # Every Layer-1 call lowers to a *typed* ``Command`` oneof variant
+    # (Decision 59) — never the ``raw`` arm, which stays exclusively the
+    # Layer-0 escape hatch above. No griz string is ever formatted in
+    # Python: the single-parser invariant (the server's ``parse_raw`` is
+    # the one parser; M1 Decision 37) generalizes to "no second emitter
+    # either". Camera/view is server-authoritative (scripting.md
+    # Decision 1): these calls *emit*; the authoritative state is read
+    # back from a one-shot ``Subscribe`` snapshot (Decision 61), never
+    # client-predicted (prediction/reconciliation is Phase 5 M4).
+
+    def _exec(self, command):
+        return self._stub.Execute(command)
+
+    def _snapshot(self) -> "_pb.Snapshot":
+        """The authoritative session state, read once from the opening
+        ``DELTA_SNAPSHOT`` of a short-lived ``Subscribe`` (Decision 61).
+        No local model, no prediction — just the server's current truth
+        on demand (the continuous ``@s.on(...)`` stream is Phase 6 M4)."""
+        pb, _ = _stubs()
+        stream = self._stub.Subscribe(pb.SubscribeRequest())
+        try:
+            delta = next(iter(stream))
+        finally:
+            stream.cancel()
+        return delta.snapshot
+
+    def open(self, root) -> "Database":
+        """``load <root>`` → :class:`Database` handle. The ``db.query``
+        payoff is Phase 6 M5; M3's handle carries only ``.root``."""
+        pb, _ = _stubs()
+        self._exec(pb.Command(load=pb.Load(root=str(root))))
+        return Database(self, str(root))
+
+    @property
+    def state(self) -> int:
+        """The authoritative 1-based state index (one-shot snapshot
+        read; Decision 61). Set it to navigate: ``s.state = 10``."""
+        return int(self._snapshot().state)
+
+    @state.setter
+    def state(self, n: int) -> None:
+        pb, _ = _stubs()
+        self._exec(pb.Command(set_state=pb.SetState(state=int(n))))
+
+    def _step(self, which: str) -> None:
+        pb, _ = _stubs()
+        dir_ = {
+            "next": pb.Step.NEXT,
+            "prev": pb.Step.PREV,
+            "first": pb.Step.FIRST,
+            "last": pb.Step.LAST,
+        }[which]
+        self._exec(pb.Command(step=pb.Step(dir=dir_)))
+
+    def next(self) -> None:
+        self._step("next")
+
+    def prev(self) -> None:
+        self._step("prev")
+
+    def first(self) -> None:
+        self._step("first")
+
+    def last(self) -> None:
+        self._step("last")
+
+    def select(self, class_name: str, range: str) -> None:
+        """``select <class> <range>`` (griz-style range string, e.g.
+        ``"1-100,150"``). Clear via ``s.selection.clear(class_name)``."""
+        pb, _ = _stubs()
+        self._exec(
+            pb.Command(select=pb.Select(class_name=class_name, range=range))
+        )
+
+    @property
+    def selection(self) -> "_Selection":
+        return _Selection(self)
+
+    def show(self, result: str, component: str = "", **opts) -> "Result":
+        """``show <result> [component] [k=v...]`` → :class:`Result`
+        handle (``.range`` is the authoritative ``(min, max)``)."""
+        pb, _ = _stubs()
+        msg = pb.Show(result=result, component=component)
+        for k, v in opts.items():
+            msg.opts[str(k)] = str(v)
+        self._exec(pb.Command(show=msg))
+        return Result(self, result, component)
+
+    def isosurface(
+        self,
+        result: str,
+        *,
+        levels=None,
+        count: int | None = None,
+        vmin: float | None = None,
+        vmax: float | None = None,
+        on: bool = True,
+    ) -> "Isosurface":
+        """``iso on/off <result>`` → :class:`Isosurface` handle
+        (``.remove()`` emits ``iso off``)."""
+        pb, _ = _stubs()
+        msg = pb.Isosurface(result=result, on=on)
+        lv = [float(x) for x in levels] if levels else []
+        if lv:
+            msg.levels.extend(lv)
+        if count is not None:
+            msg.count = int(count)
+        if vmin is not None:
+            msg.min = float(vmin)
+        if vmax is not None:
+            msg.max = float(vmax)
+        self._exec(pb.Command(iso=msg))
+        return Isosurface(self, result, lv)
+
+    def contour(self, result: str, *, count: int = 0) -> "Contour":
+        """``contour <result> <count>`` → :class:`Contour` handle."""
+        pb, _ = _stubs()
+        self._exec(
+            pb.Command(contour=pb.Contour(result=result, count=int(count)))
+        )
+        return Contour(self, result, int(count))
+
+    @property
+    def materials(self) -> "_Materials":
+        return _Materials(self)
+
+    def cutplane(
+        self,
+        *,
+        origin=(0.0, 0.0, 0.0),
+        normal=(1.0, 0.0, 0.0),
+        relative: bool = False,
+    ) -> None:
+        """``cutpln``/``cutrpln`` (``relative=True`` → ``cutrpln``)."""
+        pb, _ = _stubs()
+        ox, oy, oz = (float(c) for c in origin)
+        nx, ny, nz = (float(c) for c in normal)
+        self._exec(
+            pb.Command(
+                cutplane=pb.CutPlane(
+                    ox=ox,
+                    oy=oy,
+                    oz=oz,
+                    nx=nx,
+                    ny=ny,
+                    nz=nz,
+                    relative=bool(relative),
+                )
+            )
+        )
+
+    def colormap(self, name: str) -> None:
+        """``cmap <name>`` (e.g. ``"cool"``, ``"jet"``)."""
+        pb, _ = _stubs()
+        self._exec(pb.Command(colormap=pb.Colormap(name=name)))
+
+    @property
+    def legend(self) -> "_Legend":
+        return _Legend(self)
+
+    @property
+    def view(self) -> "_View":
+        """The server-authoritative camera (scripting.md Decision 1).
+        ``s.view.*`` *emits* the command; the GUI mirrors the broadcast
+        — M3 does not predict (that is Phase 5 M4)."""
+        return _View(self)
+
     # --- lifecycle ---------------------------------------------------
     def close(self) -> None:
         if self._channel is not None:
@@ -163,6 +336,227 @@ class Session:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+
+# ---------------------------------------------------------------------
+# Layer-1 typed handles + server-authoritative view/selection helpers
+# (phase-6-m3.md Decisions 59–61). Handles are thin: they re-emit typed
+# Commands through their owning Session and read authoritative state
+# from the one-shot Subscribe snapshot — no client-side scene model.
+# query()/to_dataframe() is Phase 6 M5; render() is M6 (out of M3).
+# ---------------------------------------------------------------------
+
+
+class Database:
+    """The loaded run (``s.open(root)``). M3 carries only ``.root``;
+    ``db.query(...)`` is the Phase 6 M5 payoff."""
+
+    def __init__(self, session: "Session", root: str):
+        self._session = session
+        self.root = root
+
+    def __repr__(self) -> str:
+        return f"Database({self.root!r})"
+
+
+class Result:
+    """An active result (``s.show(...)``). ``.range`` is the
+    authoritative ``(min, max)`` from the server's ``ResultState``,
+    read on demand (Decision 61) — not a cached client guess."""
+
+    def __init__(self, session: "Session", result: str, component: str = ""):
+        self._session = session
+        self.result = result
+        self.component = component
+
+    @property
+    def range(self) -> tuple[float, float]:
+        r = self._session._snapshot().result
+        return (r.min, r.max)
+
+    def __repr__(self) -> str:
+        c = f", component={self.component!r}" if self.component else ""
+        return f"Result({self.result!r}{c})"
+
+
+class Isosurface:
+    """An isosurface (``s.isosurface(...)``). ``.remove()`` emits the
+    typed ``iso off <result>`` (Decision 59 — never a raw string)."""
+
+    def __init__(self, session: "Session", result: str, levels: list[float]):
+        self._session = session
+        self.result = result
+        self.levels = levels
+
+    def remove(self) -> None:
+        pb, _ = _stubs()
+        self._session._exec(
+            pb.Command(iso=pb.Isosurface(result=self.result, on=False))
+        )
+
+    def __repr__(self) -> str:
+        return f"Isosurface({self.result!r}, levels={self.levels})"
+
+
+class Contour:
+    """A contour (``s.contour(...)``)."""
+
+    def __init__(self, session: "Session", result: str, count: int):
+        self._session = session
+        self.result = result
+        self.count = count
+
+    def __repr__(self) -> str:
+        return f"Contour({self.result!r}, count={self.count})"
+
+
+class _Selection:
+    """``s.selection.clear(class_name)`` → typed ``clrsel <class>``."""
+
+    def __init__(self, session: "Session"):
+        self._session = session
+
+    def clear(self, class_name: str) -> None:
+        pb, _ = _stubs()
+        self._session._exec(
+            pb.Command(clrsel=pb.ClearSelection(class_name=class_name))
+        )
+
+
+class _Materials:
+    """``s.materials.disable(3)`` / ``.enable("brick", mat=2)`` → typed
+    ``MaterialVisibility``. A positional ``int`` is a material id, a
+    positional ``str`` is a class name (the scripting.md sketch)."""
+
+    def __init__(self, session: "Session"):
+        self._session = session
+
+    def _emit(self, enable: bool, target, mat) -> None:
+        pb, _ = _stubs()
+        class_name = ""
+        material = mat
+        if isinstance(target, str):
+            class_name = target
+        elif target is not None:
+            material = target
+        msg = pb.MaterialVisibility(enable=enable, class_name=class_name)
+        if material is not None:
+            msg.material = int(material)
+        self._session._exec(pb.Command(material=msg))
+
+    def enable(self, target=None, *, mat: int | None = None) -> None:
+        self._emit(True, target, mat)
+
+    def disable(self, target=None, *, mat: int | None = None) -> None:
+        self._emit(False, target, mat)
+
+
+class _Legend:
+    """``s.legend.limits = (lo, hi)`` → typed ``LegendLimits``. A
+    ``None`` bound autoscales that end (the proto's unset semantics)."""
+
+    def __init__(self, session: "Session"):
+        self._session = session
+
+    @property
+    def limits(self) -> tuple[float, float]:
+        r = self._session._snapshot().result
+        return (r.min, r.max)
+
+    @limits.setter
+    def limits(self, lohi) -> None:
+        pb, _ = _stubs()
+        lo, hi = lohi
+        msg = pb.LegendLimits()
+        if lo is not None:
+            msg.min = float(lo)
+        if hi is not None:
+            msg.max = float(hi)
+        self._session._exec(pb.Command(legend=msg))
+
+
+class _View:
+    """The server-authoritative camera (scripting.md Decision 1). Every
+    method *emits* a typed ``View``/``NamedView`` command; the server
+    broadcasts the authoritative ``DELTA_CAMERA`` to all peers. M3 does
+    not predict locally — that is Phase 5 M4."""
+
+    def __init__(self, session: "Session"):
+        self._session = session
+
+    def _emit(self, view) -> None:
+        pb, _ = _stubs()
+        self._session._exec(pb.Command(view=view))
+
+    def rotate(self, x: float = 0.0, y: float = 0.0, z: float = 0.0) -> None:
+        pb, _ = _stubs()
+        self._emit(
+            pb.View(rotate=pb.Rotate(x=float(x), y=float(y), z=float(z)))
+        )
+
+    def translate(self, dx: float, dy: float, dz: float) -> None:
+        pb, _ = _stubs()
+        self._emit(
+            pb.View(
+                translate=pb.Translate(
+                    dx=float(dx), dy=float(dy), dz=float(dz)
+                )
+            )
+        )
+
+    def scale(self, factor: float) -> None:
+        pb, _ = _stubs()
+        self._emit(pb.View(scale=pb.Scale(factor=float(factor))))
+
+    def zoom(self, factor: float) -> None:
+        pb, _ = _stubs()
+        self._emit(pb.View(zoom=pb.Zoom(factor=float(factor))))
+
+    def set(
+        self,
+        *,
+        azimuth: float,
+        elevation: float,
+        distance: float,
+        fx: float | None = None,
+        fy: float | None = None,
+        fz: float | None = None,
+    ) -> None:
+        pb, _ = _stubs()
+        cam = pb.SetCamera(
+            azimuth=float(azimuth),
+            elevation=float(elevation),
+            distance=float(distance),
+        )
+        if fx is not None:
+            cam.fx = float(fx)
+        if fy is not None:
+            cam.fy = float(fy)
+        if fz is not None:
+            cam.fz = float(fz)
+        self._emit(pb.View(set=cam))
+
+    def reset(self) -> None:
+        pb, _ = _stubs()
+        self._emit(pb.View(reset=True))
+
+    def _named(self, op, name: str = "") -> None:
+        pb, _ = _stubs()
+        self._session._exec(
+            pb.Command(named_view=pb.NamedView(op=op, name=name))
+        )
+
+    def save(self, name: str) -> None:
+        pb, _ = _stubs()
+        self._named(pb.NamedView.SAVE, name)
+
+    def restore(self, name: str) -> None:
+        pb, _ = _stubs()
+        self._named(pb.NamedView.RESTORE, name)
+
+    def list(self) -> None:
+        pb, _ = _stubs()
+        self._named(pb.NamedView.LIST)
 
 
 def connect(
