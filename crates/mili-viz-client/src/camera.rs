@@ -7,7 +7,7 @@
 //! conversion
 //! (`phase-5-m1.md` Decision 40).
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 
 /// An orbit camera looking at a focus point from a distance, rotated
 /// by `azimuth` (about world +Y) and `elevation` (toward world +Y).
@@ -124,6 +124,22 @@ impl Camera {
         let ndc_x = 2.0 * px / w - 1.0;
         let ndc_y = 1.0 - 2.0 * py / h;
         self.ray_from_ndc(ndc_x, ndc_y, width, height)
+    }
+
+    /// Project a world point to a viewport-space **fraction**
+    /// (`x` right, `y` down, origin top-left; `0..1` is on-screen but
+    /// the result is unclamped so callers can cull). `None` when the
+    /// point is at/behind the eye (clip `w ≤ 0`). The aspect comes
+    /// from `width`/`height`, matching the renderer's scene sub-rect.
+    /// Pure math — the always-on bbox/gizmo test core.
+    #[must_use]
+    pub fn project(&self, p: Vec3, width: u32, height: u32) -> Option<Vec2> {
+        let clip: Vec4 = self.view_projection(width, height) * Vec4::new(p.x, p.y, p.z, 1.0);
+        if clip.w <= 1e-6 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        Some(Vec2::new(0.5 + 0.5 * ndc.x, 0.5 - 0.5 * ndc.y))
     }
 
     /// A default-orientation orbit camera framed on a bounding sphere

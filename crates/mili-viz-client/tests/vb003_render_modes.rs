@@ -25,7 +25,10 @@ fn render_mode_default_is_shaded_and_labels_are_distinct() {
     ];
     // All three labels are distinct (the menu rows must be readable).
     assert_eq!(
-        labels.iter().collect::<std::collections::HashSet<_>>().len(),
+        labels
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
         3
     );
 }

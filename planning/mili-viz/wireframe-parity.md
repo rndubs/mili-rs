@@ -66,8 +66,8 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | title / state / legend | ✅ done | data-driven | status 16 |
-| axes gizmo | 🟡 partial | static triad — does **not** track camera orientation | — |
-| bbox | 🔴 placeholder | fixed 18% dashed inset, not the real projected bbox | — |
+| axes gizmo | ✅ done | world X/Y/Z projected through the live camera basis (tracks orbit); static triad only on the headless/not-attached fallback | status 23 |
+| bbox | ✅ done | real per-state world AABB projected through the live camera (12 edges, tracks orbit/pan/zoom + deform); placeholder inset only when no live camera | status 23 |
 | Multi-client peer banner | ⬜ missing | — | M6 |
 | Not-attached card | ✅ done | — | status 16 |
 
@@ -130,7 +130,7 @@ leverage:
    done, status 8 — GUI only) — done.
 4. 🟡 **Picking** + live status-bar readout — ray-cast + readout
    landed; a viewport highlight glyph + label-catalog mapping remain.
-5. **Real bbox overlay + camera-tracking axes gizmo.**
+5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. **File → Open** (lift the deferral if MVP needs it).
 7. **L3 focus mode + theme/tweaks surface.**
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto

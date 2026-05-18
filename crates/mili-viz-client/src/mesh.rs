@@ -267,6 +267,25 @@ impl Mesh {
         best
     }
 
+    /// Axis-aligned bounding box `(min, max)` of the vertex cloud at
+    /// the current state — the input to the projected-bbox overlay
+    /// (it deforms per state because the hull does). Empty hull → a
+    /// unit box at the origin.
+    #[must_use]
+    pub fn aabb(&self) -> ([f32; 3], [f32; 3]) {
+        if self.positions.is_empty() {
+            return ([-0.5; 3], [0.5; 3]);
+        }
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for p in &self.positions {
+            let p = Vec3::from(*p);
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        (lo.to_array(), hi.to_array())
+    }
+
     /// Bounding-sphere `(center, radius)` of the vertex cloud — the
     /// input to [`crate::Camera::looking_at`] so the gating render
     /// frames a real corpus regardless of its coordinate scale.

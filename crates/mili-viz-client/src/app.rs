@@ -314,9 +314,7 @@ impl App {
         if rx < 0.0 || ry < 0.0 || rx > scw || ry > sch {
             return;
         }
-        let (o, d) = self
-            .camera
-            .ray_from_screen(rx, ry, scw as u32, sch as u32);
+        let (o, d) = self.camera.ray_from_screen(rx, ry, scw as u32, sch as u32);
         let hit = self.mesh.as_ref().and_then(|m| m.pick(o, d));
         self.shell.apply_pick(hit.as_ref());
     }
@@ -633,6 +631,12 @@ impl App {
             (fx * sw, fy * sh, (fw * sw).max(1.0), (fh * sh).max(1.0))
         });
         ws.renderer.render_in(&view, w, h, &self.camera, scene);
+
+        // Publish the live camera + current-state AABB so the bbox /
+        // axes overlays project against the real view (pure read of
+        // distinct fields; `ws` only borrows `self.state`).
+        self.shell.camera = Some(self.camera);
+        self.shell.model_aabb = self.mesh.as_ref().map(crate::mesh::Mesh::aabb);
 
         // Additive egui pass; collect the frame's actions.
         let raw_input = ws.egui_winit.take_egui_input(&ws.window);

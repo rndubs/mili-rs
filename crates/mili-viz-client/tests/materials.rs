@@ -13,7 +13,7 @@ fn loaded(classes: &[&str]) -> ShellState {
             db: "bar71".into(),
             num_states: 1,
             state_times: vec![0.0],
-            class_names: classes.iter().map(|s| s.to_string()).collect(),
+            class_names: classes.iter().copied().map(String::from).collect(),
         }),
         ..ShellState::default()
     }

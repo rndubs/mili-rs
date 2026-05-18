@@ -11,6 +11,8 @@
 
 use egui::Ui;
 
+use crate::camera::Camera;
+
 /// The three non-agent session states M3 must render visibly
 /// (wireframes §"Session states"; the agent states are M6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +303,14 @@ pub struct ShellState {
     /// Resolution-independent (a fraction, not pixels) so no
     /// `pixels_per_point` plumbing is needed.
     pub scene_frac: Option<[f32; 4]>,
+    /// The live windowed camera, published each frame so the bbox /
+    /// axes overlays project against the real view. `None` (the
+    /// default, and the headless composite path) keeps the M3
+    /// placeholder bbox/gizmo so that gate stays byte-stable.
+    pub camera: Option<Camera>,
+    /// World-space AABB `(min, max)` of the current-state hull, for
+    /// the projected-bbox overlay. `None` → placeholder.
+    pub model_aabb: Option<([f32; 3], [f32; 3])>,
 }
 
 impl Default for ShellState {
@@ -328,6 +338,8 @@ impl Default for ShellState {
             legend_max: None,
             render_mode: RenderMode::default(),
             scene_frac: None,
+            camera: None,
+            model_aabb: None,
         }
     }
 }
@@ -510,21 +522,14 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
             egui::MenuBar::new().ui(ui, |ui| {
                 let _ = ui.menu_button("Control", |_| {});
                 ui.menu_button("Rendering", |ui| {
-                    for mode in [
-                        RenderMode::Shaded,
-                        RenderMode::Edges,
-                        RenderMode::Wireframe,
-                    ] {
+                    for mode in [RenderMode::Shaded, RenderMode::Edges, RenderMode::Wireframe] {
                         let mark = if state.render_mode == mode {
                             "● "
                         } else {
                             "○ "
                         };
                         // A `Button` click auto-closes the egui menu.
-                        if ui
-                            .button(format!("{mark}{}", mode.label()))
-                            .clicked()
-                        {
+                        if ui.button(format!("{mark}{}", mode.label())).clicked() {
                             actions.push(state.set_render_mode(mode));
                         }
                     }
@@ -1021,16 +1026,77 @@ fn overlays(ui: &mut egui::Ui, rect: egui::Rect, state: &ShellState) {
     }
 
     if state.overlays.axes {
-        axes_gizmo(&painter, rect);
+        axes_gizmo(&painter, rect, state.camera.as_ref());
     }
 
     if state.overlays.bbox {
-        // Dashed inset rectangle standing in for the model bbox; the
-        // true projected box is M4 (needs the live camera).
-        let inset = rect.shrink2(egui::vec2(rect.width() * 0.18, rect.height() * 0.18));
-        let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
-        dashed_rect(&painter, inset, stroke);
+        match state
+            .camera
+            .as_ref()
+            .zip(state.model_aabb)
+            .and_then(|(c, aabb)| project_bbox(c, aabb, rect))
+        {
+            // Real world-space AABB projected through the live camera:
+            // its 12 edges track orbit/pan/zoom and per-state deform.
+            Some(corners) => {
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110));
+                for &(a, b) in BBOX_EDGES {
+                    painter.line_segment([corners[a], corners[b]], stroke);
+                }
+            }
+            // No live camera (headless composite / not attached) — the
+            // M3 placeholder inset, byte-stable for that gate.
+            None => {
+                let inset = rect.shrink2(egui::vec2(rect.width() * 0.18, rect.height() * 0.18));
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
+                dashed_rect(&painter, inset, stroke);
+            }
+        }
     }
+}
+
+/// The 12 edges of a box as index pairs into the 8-corner array laid
+/// out as `bit0=x bit1=y bit2=z` (`min`=0, `max`=1 per axis).
+const BBOX_EDGES: &[(usize, usize)] = &[
+    (0, 1),
+    (2, 3),
+    (4, 5),
+    (6, 7), // x-dir
+    (0, 2),
+    (1, 3),
+    (4, 6),
+    (5, 7), // y-dir
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7), // z-dir
+];
+
+/// Project the 8 AABB corners to viewport pixels via the live camera.
+/// `None` if any corner is at/behind the eye (a partially-clipped box
+/// would draw garbage edges — fall back to the placeholder instead).
+fn project_bbox(
+    camera: &Camera,
+    aabb: ([f32; 3], [f32; 3]),
+    rect: egui::Rect,
+) -> Option<[egui::Pos2; 8]> {
+    let (lo, hi) = aabb;
+    let w = rect.width().max(1.0) as u32;
+    let h = rect.height().max(1.0) as u32;
+    let mut out = [egui::Pos2::ZERO; 8];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let p = glam::Vec3::new(
+            if i & 1 == 0 { lo[0] } else { hi[0] },
+            if i & 2 == 0 { lo[1] } else { hi[1] },
+            if i & 4 == 0 { lo[2] } else { hi[2] },
+        );
+        let f = camera.project(p, w, h)?;
+        *slot = egui::pos2(
+            rect.min.x + f.x * rect.width(),
+            rect.min.y + f.y * rect.height(),
+        );
+    }
+    Some(out)
 }
 
 fn legend(
@@ -1078,22 +1144,35 @@ fn legend(
     }
 }
 
-fn axes_gizmo(painter: &egui::Painter, rect: egui::Rect) {
+fn axes_gizmo(painter: &egui::Painter, rect: egui::Rect, camera: Option<&Camera>) {
     let o = rect.right_bottom() + egui::vec2(-44.0, -44.0);
     let len = 26.0;
     let stroke = |c| egui::Stroke::new(2.0, c);
-    painter.line_segment(
-        [o, o + egui::vec2(len, 0.0)],
-        stroke(egui::Color32::from_rgb(220, 70, 70)),
-    );
-    painter.line_segment(
-        [o, o + egui::vec2(0.0, -len)],
-        stroke(egui::Color32::from_rgb(70, 200, 90)),
-    );
-    painter.line_segment(
-        [o, o + egui::vec2(-len * 0.7, len * 0.7)],
-        stroke(egui::Color32::from_rgb(90, 130, 230)),
-    );
+    let red = egui::Color32::from_rgb(220, 70, 70);
+    let green = egui::Color32::from_rgb(70, 200, 90);
+    let blue = egui::Color32::from_rgb(90, 130, 230);
+    match camera {
+        // Track the live view: project each world axis into screen
+        // space via the camera basis (screen y is down, so up flips).
+        Some(c) => {
+            let (right, up, _) = c.basis();
+            let screen = |axis: glam::Vec3| egui::vec2(axis.dot(right) * len, -axis.dot(up) * len);
+            for (dir, col) in [
+                (glam::Vec3::X, red),
+                (glam::Vec3::Y, green),
+                (glam::Vec3::Z, blue),
+            ] {
+                painter.line_segment([o, o + screen(dir)], stroke(col));
+            }
+        }
+        // Static triad (headless composite / not attached) — the M3
+        // placeholder, byte-stable for that gate.
+        None => {
+            painter.line_segment([o, o + egui::vec2(len, 0.0)], stroke(red));
+            painter.line_segment([o, o + egui::vec2(0.0, -len)], stroke(green));
+            painter.line_segment([o, o + egui::vec2(-len * 0.7, len * 0.7)], stroke(blue));
+        }
+    }
 }
 
 fn dashed_rect(painter: &egui::Painter, r: egui::Rect, stroke: egui::Stroke) {

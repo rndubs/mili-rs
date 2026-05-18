@@ -939,6 +939,15 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       (`ShellState::hidden_materials`, default empty → composite gate
       unchanged) since the broadcast `MaterialsState` is keyed by
       material id with no client-side class catalog.
+    - **Real bbox overlay + camera-tracking axes gizmo (MVP-cut 5).**
+      `Camera::project` unprojects world→viewport-fraction;
+      `Mesh::aabb` gives the per-state box. The app publishes the live
+      camera + AABB into `ShellState` (the `scene_frac` pattern), so
+      the bbox overlay draws the 12 projected edges (tracking
+      orbit/pan/zoom and per-state deform) and the axes gizmo projects
+      world X/Y/Z through the camera basis. `camera`/`model_aabb`
+      default `None` (headless composite / not-attached) → the M3
+      placeholder inset + static triad, so that gate stays byte-stable.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

@@ -31,7 +31,7 @@ fn ray_through_viewport_centre_hits_the_framed_hull() {
     let (w, h) = (200u32, 200u32);
 
     // The centre pixel of a framed model must hit it.
-    let (o, d) = camera.ray_from_screen(w as f32 / 2.0, h as f32 / 2.0, w, h);
+    let (o, d) = camera.ray_from_screen(100.0, 100.0, w, h);
     let hit = mesh.pick(o, d).expect("centre ray hits the framed quad");
     assert!(hit.distance > 0.0, "a forward hit");
     // The hit point is on the z=0 plane the quad lives in.

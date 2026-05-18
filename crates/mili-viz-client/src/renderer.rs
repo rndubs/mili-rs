@@ -323,13 +323,13 @@ impl Renderer {
         // mesh keeps a 1-pair placeholder that `edge_count == 0` never
         // draws.
         let edges: &[u32] = if edges.is_empty() { &[0, 0] } else { &edges };
-        let edge_index_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mesh edge indices"),
-                    contents: bytemuck::cast_slice(&edges),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+        let edge_index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh edge indices"),
+                contents: bytemuck::cast_slice(edges),
+                usage: wgpu::BufferUsages::INDEX,
+            });
         self.mesh = Some(MeshBuffers {
             vertex_buffer,
             index_buffer,
@@ -454,10 +454,7 @@ impl Renderer {
                     pass.set_pipeline(&self.edge_pipeline);
                     pass.set_bind_group(0, &self.bind_group, &[]);
                     pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
-                    pass.set_index_buffer(
-                        m.edge_index_buffer.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    pass.set_index_buffer(m.edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..m.edge_count, 0, 0..1);
                 }
             }
