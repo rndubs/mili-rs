@@ -244,11 +244,16 @@ impl Renderer {
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
+        // Defensively clamp the offscreen depth target to the
+        // negotiated `max_texture_dimension_2d` so an over-large
+        // surface size never trips texture-size validation
+        // (`phase-5-m4.md` Decision 62).
+        let max_dim = self.device.limits().max_texture_dimension_2d;
         let depth = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
             size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
+                width: width.clamp(1, max_dim),
+                height: height.clamp(1, max_dim),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -317,11 +322,16 @@ pub fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             })
             .await
             .ok()?;
+        // Mirror the windowed path: `downlevel_defaults()` floor with
+        // the adapter's real `max_texture_dimension_2d` so a HiDPI
+        // offscreen size never trips validation (Decision 62).
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("mili-viz headless device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: limits,
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,

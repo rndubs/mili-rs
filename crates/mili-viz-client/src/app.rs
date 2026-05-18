@@ -34,6 +34,9 @@ struct WindowState {
     renderer: Renderer,
     egui: EguiPaint,
     egui_winit: egui_winit::State,
+    /// Negotiated `max_texture_dimension_2d`; the surface config and
+    /// the offscreen target are clamped to it (Decision 62).
+    max_dim: u32,
 }
 
 struct App {
@@ -201,15 +204,24 @@ impl ApplicationHandler for App {
             force_fallback_adapter: false,
         }))
         .expect("no compatible GPU adapter");
+        // Keep `downlevel_defaults()` as the CI floor but raise the
+        // 2048 `max_texture_dimension_2d` cap to what the adapter
+        // actually supports: on a HiDPI display the window's physical
+        // pixel size exceeds 2048, and `Surface::configure` validating
+        // against a 2048 cap aborts inside winit's non-unwinding
+        // `frame_did_change` (`phase-5-m4.md` Decision 62).
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("mili-viz device"),
             required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
+            required_limits: limits.clone(),
             experimental_features: wgpu::ExperimentalFeatures::default(),
             memory_hints: wgpu::MemoryHints::default(),
             trace: wgpu::Trace::Off,
         }))
         .expect("request device");
+        let max_dim = limits.max_texture_dimension_2d;
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
@@ -217,8 +229,8 @@ impl ApplicationHandler for App {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width.clamp(1, max_dim),
+            height: size.height.clamp(1, max_dim),
             present_mode: caps.present_modes[0],
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
@@ -246,6 +258,7 @@ impl ApplicationHandler for App {
             renderer,
             egui,
             egui_winit,
+            max_dim,
         });
     }
 
@@ -260,8 +273,8 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(ws) = &mut self.state {
-                    ws.config.width = size.width.max(1);
-                    ws.config.height = size.height.max(1);
+                    ws.config.width = size.width.clamp(1, ws.max_dim);
+                    ws.config.height = size.height.clamp(1, ws.max_dim);
                     ws.surface.configure(ws.renderer.device(), &ws.config);
                     ws.window.request_redraw();
                 }

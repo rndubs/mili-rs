@@ -275,6 +275,7 @@
 | [`phase-6-m1.md`](phase-6-m1.md) | **The buildable Phase 6 M1 scope (`pygriz` scaffold + stubs + connect/handshake) — landed.** A third pure-Python client of the frozen contract, gated only on Phase 4 M1 (independent of the Phase 5 renderer). Decisions 35–37 (top-level `python/` tree, dist `pygriz` / import `griz`, pure-Python no-pyo3; stubs are gitignored build output from the one canonical proto; M1 is Layer-0-only — reuse the server's `parse_raw`, Layer-1 + the Layer-0≡Layer-1 test is M3) + 53–55 (the `grpc_tools.protoc` generator + package-relative import rewrite, stale gitignore citation fixed; `run_script` = one verbatim `Command{raw}`, no Python line-split; the gate spawns the real `mili-viz-server` TCP binary, corpus-independent `load`). Unblocks `phase-5-m3.5.md` Decision 49. No proto change | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m2.md`](phase-6-m2.md) | **The buildable Phase 6 M2 scope (`pygriz` connection model + server-side session file) — landed.** `griz.attach()` (priority: newest live `~/.griz/sessions/<id>.json`), `attach(id=)`, `attach(host=,port=)`, `launch(gui=)`, `list_sessions()`. Decisions 56–58 (the server writes the Jupyter-style session/connection file from the **binary's `main`**, never the frozen library transport / frozen proto — `lib.rs`/`mili_viz.proto` byte-untouched, `Hello` echo unchanged; token written for the Jupyter contract but **not** enforced so the frozen tokenless M1 gate stays green; staleness handled read-side via dead-pid skip; `$GRIZ_SESSIONS_DIR` redirect for a hermetic gate. `attach()` precedence explicit-endpoint > `id` > newest-live, all lowering to the one M1 `connect()` transport — no parallel client. `launch()` spawns the binary + attaches via the file it wrote; `gui=True` warns + proceeds headless — the renderer is the independent Phase 5 track). **Fully discharges `phase-5-m3.5.md` Decision 49** (M1 half-closed it at `connect()`; `attach()` now exists). No proto change; frozen Phase 4/5 suites + the M1 gate unchanged and green | ✅ pinned + landed (2026-05-18) |
 | [`phase-6-m3.md`](phase-6-m3.md) | **The buildable Phase 6 M3 scope (`pygriz` Layer-1 object API + the Layer-0 ≡ Layer-1 test) — landed.** `s.open/state/next/prev/first/last/select/show/isosurface/contour/cutplane/colormap` + `s.selection`/`s.materials`/`s.legend` + `s.view.*` (server-authoritative), typed handles (`Result.range`, `Isosurface.remove()`, minimal `Database`/`Contour`). Decisions 59–61 (every Layer-1 call lowers to a **typed `Command` oneof variant, never `raw`** — no second griz parser *or* emitter in Python, the M1 single-parser invariant generalized; the **Layer-0 ≡ Layer-1** invariant pinned two ways — an always-on fake-stub lowering pin + a skip-on-absent identical-`DELTA_SNAPSHOT` leg against two freshly-`launch()`ed real servers, hand-written griz line in the test only; server-authoritative read-backs via a one-shot `Subscribe` snapshot, never client prediction — that is Phase 5 M4). `query`/`render`/`@s.on` deferred (M5/M6/M4). No proto change; **`crates/` byte-for-byte untouched**; frozen Phase 4/5 suites + the M1 & M2 gates unchanged and green | ✅ pinned + landed (2026-05-18) |
+| [`phase-5-m4.md`](phase-5-m4.md) | **The buildable Phase 5 M4 scope (local view manipulation) + the pre-M4 hardening.** Decisions 62–63 (**pre-M4 bug fixes, landed**: 62 — keep `downlevel_defaults()` as the CI floor but raise only `max_texture_dimension_2d` to the adapter's real max + clamp the surface config / offscreen depth target, fixing the HiDPI `Surface::configure` `panic_cannot_unwind` abort, in both `app.rs` and `renderer.rs`; 63 — a pure hand-rolled `cli::parse_args` for exactly the `phase-4-m1.md` Decision 4 portable griz subset, `-i`/bare positional → load root, `-V` → version, `-b`/`-w` parsed-but-logged-no-op, unknown flag a clear error not a silent filename, no `clap`) + Decisions 64–66 (**M4 proper, pending maintainer approval**: 64 — predict-and-reconcile, the local `Camera` updates optimistically on mouse input *and* emits the frozen `View` op, every `DELTA_CAMERA` broadcast is authoritative/last-wins; 65 — radians end-to-end, the proto "degrees" comment non-normative since the server is a unit-agnostic add; 66 — `Colormap`/`LegendLimits` honoured client-side via a viz-local named-ramp table + an effective-range `ShellState` method). Open question recorded: File→Open needs `rfd` — recommend deferring to its own milestone, **maintainer's call**. No proto change | 🟢 pre-M4 hardening (62–63) landed; M4 scope (64–66) pinned, awaiting approval |
 | [`README.md`](README.md) | Server/client split, crate layout (`mili-viz-proto` / `-server` / `-client`), `tonic`+Arrow-Flight transport, `wgpu`+`egui` renderer, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` is authoritative) |
 | [`scripting.md`](scripting.md) | Scripting is a second pure-Python client of `mili-viz-proto`; **camera is server-authoritative**; interactive `attach()` to a running GUI; `grizinit` batch via `session.run_script()`. Expands Phase 4 M1 with a subscription RPC + `StateDelta` stream + version handshake. **Implementation home: Phase 6** ([`phase-6-m1.md`](phase-6-m1.md)) | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design: a **server-hosted** agent peer of the command vocabulary, autonomous with barge-in + provenance journal, data-first debugging. Expands Phase 4 M1 with `AgentChat`, a `DELTA_AGENT` broadcast kind, `Snapshot`, `Interrupt`; adds Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -829,17 +830,22 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     (`cargo test --workspace --exclude mili-py` green by
     construction); the frozen Phase 4/5 suites + the M1 & M2 gates
     unchanged and green.
-21. ⏭️ **NEXT:** independent tracks, all gated only on the
-    long-landed Phase 4 M1 — pick either:
-    - **Phase 6 M4** (`pygriz` live sync — `Subscribe` stream →
-      `@s.on("state_changed")` callbacks; the open GUI and a script
-      stay in sync; camera prediction/reconciliation. Builds on the
-      landed M1–M3 `Session`/Layer-1 + the one-shot snapshot read).
-    - **Phase 5 M4** (`mili-viz` client — local view manipulation:
-      client-side rotate/zoom prediction reconciled against the
-      server-authoritative broadcast `DELTA_CAMERA`; `Colormap` /
-      `LegendLimits` honoured). Builds directly on the landed M3/M3.5
-      `ShellState`/`build_shell_ui` + the live `Session`.
+21. 🟢 **IN PROGRESS (Phase 5 M4 — local view manipulation):** the
+    **pre-M4 hardening landed** — two untracked client bugs fixed:
+    the HiDPI `Surface::configure` abort (Decision 62 — raise only
+    `max_texture_dimension_2d` off `downlevel_defaults()` + clamp the
+    surface/offscreen target in `app.rs`+`renderer.rs`) and the
+    missing griz-subset CLI (Decision 63 — pure `cli::parse_args`,
+    `phase-4-m1.md` Decision 4 finally coded; 9 always-on tests).
+    M4 proper (Decisions 64–66: predict-and-reconcile camera,
+    radians-end-to-end, `Colormap`/`LegendLimits`) is **scoped in
+    [`phase-5-m4.md`](phase-5-m4.md) and awaiting maintainer
+    approval** before coding; the File→Open/`rfd` gap is recorded as
+    an open question for the maintainer's call.
+22. ⏭️ **AFTER Phase 5 M4:** **Phase 5 M5** (remote mode — wire
+    `connect`/`attach` over the landed gRPC+Flight TCP transport;
+    HPC-latency buffer tuning) then the independent **Phase 6 M4**
+    (`pygriz` live sync — `Subscribe` stream → `@s.on` callbacks).
     No `mili-rs`/`mili-py` derived work remains.
 
 ## Update protocol

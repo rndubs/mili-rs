@@ -23,6 +23,7 @@
 
 mod app;
 mod camera;
+mod cli;
 mod colormap;
 mod egui_layer;
 mod mesh;
@@ -32,6 +33,7 @@ mod shell;
 
 pub use app::run;
 pub use camera::Camera;
+pub use cli::{parse_args, CliArgs, CliOutcome};
 pub use colormap::{normalize as colormap_normalize, sample as colormap_sample};
 pub use mesh::{decode_mvg, DecodeError, Mesh};
 pub use renderer::{
