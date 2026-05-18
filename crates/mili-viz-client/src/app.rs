@@ -66,6 +66,7 @@ struct App {
 
 impl App {
     fn ingest_deltas(&mut self) {
+        let prev_state = self.shell.state;
         for delta in self.session.poll_deltas() {
             match delta.payload {
                 Some(pb::state_delta::Payload::Snapshot(s)) => {
@@ -95,6 +96,34 @@ impl App {
                 _ => {}
             }
         }
+        // The frozen contract makes `state`/`next`/`prev`/`first`/
+        // `last` a bare `DELTA_STATE` — it moves the cursor but carries
+        // no geometry, so the mesh would stay frozen while the counter
+        // (and the time-history series, fed off `DELTA_RESULT`)
+        // advanced. Round-trip the active result once per drain so the
+        // deformed hull + field colours track the cursor during manual
+        // stepping *and* animation (the loop coalesces a strided burst
+        // to the final state, so this is one re-show, not `stride`).
+        if self.shell.state != prev_state {
+            self.refresh_result_geometry();
+        }
+    }
+
+    /// Re-issue the active `show` so the server re-encodes geometry at
+    /// the just-changed state (the contract-preserving counterpart to
+    /// `DELTA_STATE` carrying no geometry). No-op before the first
+    /// `show` (the in-process session always issues one on connect, so
+    /// even the bare hull deforms per state).
+    fn refresh_result_geometry(&mut self) {
+        let Some(r) = self.shell.result.as_ref() else {
+            return;
+        };
+        let cmd = pb::command::Cmd::Show(pb::Show {
+            result: r.name.clone(),
+            component: r.component.clone(),
+            opts: std::collections::HashMap::new(),
+        });
+        let _ = self.rt.block_on(self.session.execute(cmd));
     }
 
     fn apply_loaded(&mut self, l: &pb::LoadedState) {
@@ -195,14 +224,19 @@ impl App {
         let _ = self.rt.block_on(self.session.execute(cmd));
     }
 
-    /// Current viewport size in physical pixels (≥ 1), or a 1×1
-    /// fallback before the surface exists.
+    /// Size of the visible scene viewport in physical pixels (≥ 1), or
+    /// a 1×1 fallback before the surface exists. This is the central
+    /// rect the egui panels leave (not the full surface), so a
+    /// full-drag orbit / pan is calibrated to what the user actually
+    /// sees and matches the projection aspect the renderer uses.
     fn viewport(&self) -> (f32, f32) {
         self.state.as_ref().map_or((1.0, 1.0), |ws| {
-            (
-                ws.config.width.max(1) as f32,
-                ws.config.height.max(1) as f32,
-            )
+            let w = ws.config.width.max(1) as f32;
+            let h = ws.config.height.max(1) as f32;
+            match self.shell.scene_frac {
+                Some([_, _, fw, fh]) => ((fw * w).max(1.0), (fh * h).max(1.0)),
+                None => (w, h),
+            }
         })
     }
 
@@ -540,8 +574,15 @@ impl App {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let (w, h) = (ws.config.width, ws.config.height);
 
-        // Mesh pass — unchanged Renderer::render.
-        ws.renderer.render(&view, w, h, &self.camera);
+        // Mesh pass into just the central viewport the egui panels
+        // leave (one-frame-stale on a resize — invisible, the rect
+        // only moves while a panel is dragged). Framing + orbit are
+        // then about the centre of the *visible* scene.
+        let scene = self.shell.scene_frac.map(|[fx, fy, fw, fh]| {
+            let (sw, sh) = (w as f32, h as f32);
+            (fx * sw, fy * sh, (fw * sw).max(1.0), (fh * sh).max(1.0))
+        });
+        ws.renderer.render_in(&view, w, h, &self.camera, scene);
 
         // Additive egui pass; collect the frame's actions.
         let raw_input = ws.egui_winit.take_egui_input(&ws.window);

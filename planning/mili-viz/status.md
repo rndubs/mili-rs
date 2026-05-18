@@ -879,6 +879,41 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     HPC-latency buffer tuning) then the independent **Phase 6 M4**
     (`pygriz` live sync — `Subscribe` stream → `@s.on` callbacks).
     No `mili-rs`/`mili-py` derived work remains.
+23. ✅ **DONE (Phase 5 M4 follow-up — GUI-feedback fixes,
+    contract-preserving):** three untracked client bugs from running
+    the windowed shell on a real corpus (`bar71.pltA`):
+    - **Mesh framed/orbited off-centre.** The `wgpu` mesh pass drew
+      to the *full* surface while the `egui` left dock / bottom tabs /
+      AI rail occlude it asymmetrically, so the focus (orbit centre)
+      projected to the full-window centre — left of the visible
+      scene. Fix: `build_shell_ui` publishes the leftover central rect
+      as resolution-independent screen fractions
+      (`ShellState::scene_frac`); the app maps it onto the physical
+      surface and the new `Renderer::render_in` restricts the pass to
+      that sub-rect with the projection aspect taken from it. Orbit/
+      pan/zoom sensitivity (`App::viewport`) now tracks the visible
+      scene too. No proto change.
+    - **Stepping/animation froze the mesh.** The frozen contract makes
+      `state`/`next`/`prev`/`first`/`last` a bare `DELTA_STATE` (no
+      geometry), so the counter + time-history advanced while the
+      deformed hull / field colours stayed at the load state. Fix is
+      **client-side and contract-preserving** (server `DELTA_STATE`
+      stays `DELTA_STATE`, Layer-0 ≡ raw and the m6/fan-out gates
+      untouched): the app round-trips the active `show` once per delta
+      drain when the cursor moved, coalescing a strided burst to the
+      final state. This also makes the time-history series accumulate
+      while scrubbing/animating (was the "time/state mismatch").
+    - **Mesh/element outlines: confirmed *not implemented*** (no
+      wireframe/edge pass exists; the menu-bar `Rendering` menu is an
+      empty placeholder, and the toolbar overlay chips are HUD-only —
+      `title/state/legend/axes/bbox`). Recorded here as a known gap
+      for a future milestone (a hidden-line / element-edge render
+      mode + a `Rendering`-menu or overlay-chip toggle); the wireframe
+      "Tweaks" surface is the natural home.
+    Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
+    green (the M3 composite `render_shell_to_image` path is byte-stable
+    — it still renders full-surface; only the windowed `render_in` path
+    sub-rects). No proto change; no Phase 4 crate touched.
 
 ## Update protocol
 
@@ -888,3 +923,9 @@ any real architecture/scope decision in the relevant `mili-viz/*.md`
 (decision-numbered, like `m4.md`'s 22–26); keep this tracker's TL;DR
 and the open-questions table honest so a cold reader can resume from
 this file alone.
+
+Defects found exercising the client/server on real corpora (GUI-visual
+bugs the fixture/parity suites can't catch) go in
+[`bug-tracker.md`](bug-tracker.md) — symptom → root cause → fix →
+commit — not as milestone items here. This file stays the *milestone*
+log; that file is the *defect* log.
