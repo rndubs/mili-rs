@@ -5,6 +5,10 @@
 > **complete and frozen** — see [`../mili-rs/status.md`](../mili-rs/status.md)
 > and [`../mili-py/README.md`](../mili-py/README.md). All remaining
 > work in this repo is `mili-viz`.
+>
+> **Client wireframe coverage** (placeholder/partial inventory at a
+> finer grain than the milestones below) lives in its own tracker:
+> [`wireframe-parity.md`](wireframe-parity.md).
 
 ## TL;DR — where we are
 
