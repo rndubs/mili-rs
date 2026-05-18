@@ -923,3 +923,9 @@ any real architecture/scope decision in the relevant `mili-viz/*.md`
 (decision-numbered, like `m4.md`'s 22–26); keep this tracker's TL;DR
 and the open-questions table honest so a cold reader can resume from
 this file alone.
+
+Defects found exercising the client/server on real corpora (GUI-visual
+bugs the fixture/parity suites can't catch) go in
+[`bug-tracker.md`](bug-tracker.md) — symptom → root cause → fix →
+commit — not as milestone items here. This file stays the *milestone*
+log; that file is the *defect* log.
