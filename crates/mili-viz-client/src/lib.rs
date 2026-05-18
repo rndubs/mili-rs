@@ -38,13 +38,13 @@ pub use colormap::{
     normalize as colormap_normalize, sample as colormap_sample,
     sample_named as colormap_sample_named, NAMES as COLORMAP_NAMES,
 };
-pub use mesh::{decode_mvg, DecodeError, Mesh};
+pub use mesh::{decode_mvg, DecodeError, Mesh, Pick};
 pub use renderer::{
-    headless_device, render_mesh_to_image, render_shell_to_image, render_to_image, Renderer,
-    CLEAR_COLOR, OFFSCREEN_FORMAT,
+    headless_device, render_mesh_to_image, render_mesh_to_image_with_mode, render_shell_to_image,
+    render_to_image, Renderer, CLEAR_COLOR, OFFSCREEN_FORMAT,
 };
 pub use session::{fetch_server_mesh, Session};
 pub use shell::{
-    build_shell_ui, BottomTab, LoadedInfo, Overlay, Overlays, ResultInfo, SessionPhase, ShellState,
-    TimeSample, TranscriptKind, TranscriptLine, UiAction, DERIVED_RESULTS,
+    build_shell_ui, BottomTab, LoadedInfo, Overlay, Overlays, RenderMode, ResultInfo, SessionPhase,
+    ShellState, TimeSample, TranscriptKind, TranscriptLine, UiAction, DERIVED_RESULTS,
 };

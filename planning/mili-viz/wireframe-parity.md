@@ -37,8 +37,9 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Control · Rendering · Picking · Results · Time · Plot · Help` items | 🔴 placeholder | all 7 are `ui.menu_button(m, |_| {})` — open but empty | — |
-| `Rendering` menu (wireframe/edge toggles) | 🔴 placeholder | empty; the VB-003 home | VB-003 / status 23 |
+| `Control · Results · Time · Plot · Help` items | 🔴 placeholder | the other 5 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
+| `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
 | View / Preferences (theme, layout tweaks) | ⬜ missing | no menu to host the Tweaks set | — |
 
 ## Toolbar
@@ -56,7 +57,7 @@ started.
 | Results → `derived` | 🟡 partial | hard-coded 7-name `DERIVED_RESULTS`, not a real catalog | phase-5-m3 Dec 47 |
 | Results → `primal` / `time-indep` | 🔴 placeholder | literal `"(catalog: M4+)"`; frozen proto has no svar catalog | phase-5-m3 Dec 47 |
 | Colormap (ramp picker + manual legend limits) | ✅ done | extra vs wireframe but functional | phase-5-m4 Dec 66 |
-| Materials section | 🟡 partial | lists class names w/ static `●`; **no enable/disable, no dots, no row interaction** | status 8 (server-side done) |
+| Materials section | ✅ done | per-class row toggles visibility (● shown / ○ hidden, weak when off) → `UiAction::SetMaterialVisible` → frozen `Command::Material` | status 8 / 23 |
 | Surfaces section | 🔴 placeholder | `"(surfaces: M4+)"` | — |
 | Per-section row-count badges; Picking glyph row | ⬜ missing | only Results/Materials have a count | — |
 
@@ -65,8 +66,8 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | title / state / legend | ✅ done | data-driven | status 16 |
-| axes gizmo | 🟡 partial | static triad — does **not** track camera orientation | — |
-| bbox | 🔴 placeholder | fixed 18% dashed inset, not the real projected bbox | — |
+| axes gizmo | ✅ done | world X/Y/Z projected through the live camera basis (tracks orbit); static triad only on the headless/not-attached fallback | status 23 |
+| bbox | ✅ done | real per-state world AABB projected through the live camera (12 edges, tracks orbit/pan/zoom + deform); placeholder inset only when no live camera | status 23 |
 | Multi-client peer banner | ⬜ missing | — | M6 |
 | Not-attached card | ✅ done | — | status 16 |
 
@@ -89,7 +90,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| attached / proto / pick / fps row | 🟡 partial | `proto v1` hard-coded; `pick:` permanently `—`; no peer count | — |
+| attached / proto / pick / fps row | 🟡 partial | `proto v1` hard-coded, no peer count; `pick:` now **live** (client-side ray-cast readout, off by default) | status 23 |
 
 ## Tweaks / Preferences
 
@@ -102,14 +103,14 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | Filled `TriangleList` pass | ✅ done | `renderer.rs:149` | status 15 |
-| Wireframe / element-edge / hidden-line mode | ⬜ missing | only the filled pass exists — this is VB-003 | VB-003 / status 23 |
+| Wireframe / element-edge / hidden-line mode | ✅ done | `LineList` edge pass via `Mesh::edge_indices`; `Renderer::set_mode` → `Shaded` (default, byte-stable) / `Edges` (hidden-line overlay) / `Wireframe` | VB-003 / status 23 |
 
 ## Cross-cutting gaps
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | File → Open / `rfd` picker | ⏸️ deferred | own milestone (maintainer decision); load via CLI `-i` / Layer-0 `load` only | status 21 |
-| Picking (client-side from cached `GeometryRef`) | ⬜ missing | status-bar pick readout is dead | README "Open questions" (resolved-in-design) |
+| Picking (client-side from cached `GeometryRef`) | 🟡 partial | ray-cast vs. cached hull → live status-bar readout (node/tri/scalar). Frozen proto has no label catalog, so no `class N` mapping; no highlight glyph yet | status 23 |
 | Agent / multi-client session states | ⬜ missing | thinking/running/interrupted/peer | M6 |
 | Remote mode (gRPC+Flight wired to `connect`/`attach`) | ⏸️ deferred | server transport done (status 11); client wiring is Phase 5 M5 | status 22 |
 
@@ -121,14 +122,15 @@ The maintainer-scoped MVP excludes the AI panel (M6) and remote mode
 (Phase 5 M5). The parity gaps that remain in-scope for MVP, roughly by
 leverage:
 
-1. **Menu bar** — wire real items (esp. `Rendering`, `Control`,
-   `Picking`, View/Preferences host).
-2. **Wireframe / element-edge render mode** (VB-003) + its `Rendering`
-   toggle.
-3. **Materials enable/disable affordance** (server side already done,
-   status 8 — GUI only).
-4. **Picking** + live status-bar readout.
-5. **Real bbox overlay + camera-tracking axes gizmo.**
+1. **Menu bar** — 🟡 `Rendering` is now wired (VB-003); still to do:
+   `Control`, `Picking`, the View/Preferences host.
+2. ✅ **Wireframe / element-edge render mode** (VB-003) + its
+   `Rendering` toggle — done.
+3. ✅ **Materials enable/disable affordance** (server side already
+   done, status 8 — GUI only) — done.
+4. 🟡 **Picking** + live status-bar readout — ray-cast + readout
+   landed; a viewport highlight glyph + label-catalog mapping remain.
+5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. **File → Open** (lift the deferral if MVP needs it).
 7. **L3 focus mode + theme/tweaks surface.**
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto

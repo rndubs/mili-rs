@@ -8,6 +8,20 @@
 //!
 //! M2 replaces M1's hard-coded triangle (it was scaffolding,
 //! `phase-5-m1.md` Decision 40) with the decoded server [`Mesh`].
+//!
+//! VB-003 adds an element-edge / wireframe pass. The mesh's unique
+//! undirected edges ([`Mesh::edge_indices`]) feed a second
+//! `LineList` pipeline that shares the camera bind group and vertex
+//! buffer. It is **opt-in** via [`Renderer::set_mode`]:
+//! [`RenderMode::Shaded`] (default) is byte-for-byte the original
+//! single filled pass — so the headless composite gate
+//! (`render_shell_to_image`, always `Shaded`) and VB-001 stay
+//! untouched; [`RenderMode::Edges`] overlays the depth-tested edges
+//! on the filled hull (front edges only — hidden-line overlay);
+//! [`RenderMode::Wireframe`] draws only the edges over the cleared
+//! background (see-through wireframe).
+//!
+//! [`Mesh::edge_indices`]: crate::mesh::Mesh::edge_indices
 
 use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
@@ -15,6 +29,7 @@ use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
 use crate::mesh::Mesh;
+use crate::shell::RenderMode;
 
 /// Off-screen render target format. Non-sRGB so pixel-readback in the
 /// gating test is exact (no gamma surprises).
@@ -57,6 +72,10 @@ struct MeshBuffers {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+    /// Unique-edge `LineList` indices (VB-003); shares
+    /// `vertex_buffer`. Empty edge buffers are never drawn.
+    edge_index_buffer: wgpu::Buffer,
+    edge_count: u32,
 }
 
 /// A device + pipeline that can draw an uploaded indexed [`Mesh`] into
@@ -65,9 +84,15 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    /// `LineList` pipeline for the element-edge / wireframe pass
+    /// (VB-003). Built unconditionally but only recorded when
+    /// `mode != Shaded`, so the default path's command stream is
+    /// byte-for-byte unchanged.
+    edge_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     mesh: Option<MeshBuffers>,
+    mode: RenderMode,
 }
 
 impl Renderer {
@@ -162,14 +187,79 @@ impl Renderer {
             cache: None,
         });
 
+        // Edge / wireframe line pipeline (VB-003). Reuses the camera
+        // bind group and the same vertex buffer (only `position`,
+        // attribute 0, is read). Depth-tested `LessEqual` with a small
+        // negative bias so the lines sit cleanly on the coincident
+        // triangle faces in the overlay mode without z-fighting.
+        let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mili-viz edge shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
+        });
+        let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("edge pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &edge_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &edge_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             device,
             queue,
             pipeline,
+            edge_pipeline,
             uniform_buffer,
             bind_group,
             mesh: None,
+            mode: RenderMode::default(),
         }
+    }
+
+    /// Switch the render mode (VB-003). The windowed app calls this
+    /// when the `Rendering` menu emits [`UiAction::SetRenderMode`].
+    /// [`RenderMode::Shaded`] (the default) leaves the pass identical
+    /// to M2/M3.
+    ///
+    /// [`UiAction::SetRenderMode`]: crate::shell::UiAction::SetRenderMode
+    pub fn set_mode(&mut self, mode: RenderMode) {
+        self.mode = mode;
     }
 
     /// The underlying device — `app.rs` configures its surface with
@@ -227,10 +317,25 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
+        let edges = mesh.edge_indices();
+        let edge_count = edges.len() as u32;
+        // wgpu rejects a zero-sized buffer; a degenerate (no-triangle)
+        // mesh keeps a 1-pair placeholder that `edge_count == 0` never
+        // draws.
+        let edges: &[u32] = if edges.is_empty() { &[0, 0] } else { &edges };
+        let edge_index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh edge indices"),
+                contents: bytemuck::cast_slice(edges),
+                usage: wgpu::BufferUsages::INDEX,
+            });
         self.mesh = Some(MeshBuffers {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
+            edge_index_buffer,
+            edge_count,
         });
     }
 
@@ -332,11 +437,26 @@ impl Renderer {
                 pass.set_viewport(x, y, w, h, 0.0, 1.0);
             }
             if let Some(m) = &self.mesh {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
-                pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..m.index_count, 0, 0..1);
+                // Shaded (default) keeps the exact M2/M3 command
+                // sequence so the byte-stable composite gate (VB-001 /
+                // status 23) is untouched. Edges adds a depth-tested
+                // overlay; Wireframe draws only the edges (VB-003).
+                let draw_fill = self.mode != RenderMode::Wireframe;
+                let draw_edges = self.mode != RenderMode::Shaded && m.edge_count > 0;
+                if draw_fill {
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                    pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.index_count, 0, 0..1);
+                }
+                if draw_edges {
+                    pass.set_pipeline(&self.edge_pipeline);
+                    pass.set_bind_group(0, &self.bind_group, &[]);
+                    pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
+                    pass.set_index_buffer(m.edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..m.edge_count, 0, 0..1);
+                }
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -398,8 +518,23 @@ pub fn render_mesh_to_image(
     camera: &Camera,
     mesh: &Mesh,
 ) -> Option<Vec<u8>> {
+    render_mesh_to_image_with_mode(width, height, camera, mesh, RenderMode::Shaded)
+}
+
+/// As [`render_mesh_to_image`] but with an explicit [`RenderMode`] —
+/// the headless leg of the VB-003 gating test (skip-on-absent). The
+/// `Shaded` default keeps `render_mesh_to_image`'s output unchanged.
+#[must_use]
+pub fn render_mesh_to_image_with_mode(
+    width: u32,
+    height: u32,
+    camera: &Camera,
+    mesh: &Mesh,
+    mode: RenderMode,
+) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
+    renderer.set_mode(mode);
     renderer.upload_mesh(mesh, None, "cool");
     Some(renderer.read_back(width, height, camera))
 }

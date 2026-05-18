@@ -907,13 +907,47 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       drain when the cursor moved, coalescing a strided burst to the
       final state. This also makes the time-history series accumulate
       while scrubbing/animating (was the "time/state mismatch").
-    - **Mesh/element outlines: confirmed *not implemented*** (no
-      wireframe/edge pass exists; the menu-bar `Rendering` menu is an
-      empty placeholder, and the toolbar overlay chips are HUD-only —
-      `title/state/legend/axes/bbox`). Recorded here as a known gap
-      for a future milestone (a hidden-line / element-edge render
-      mode + a `Rendering`-menu or overlay-chip toggle); the wireframe
-      "Tweaks" surface is the natural home.
+    - **Mesh/element outlines: now implemented (VB-003 — `fixed`).**
+      `Mesh::edge_indices` extracts unique undirected edges; a second
+      `LineList` pipeline (sharing the camera bind group + vertex
+      buffer) draws them. `Renderer::set_mode` selects `Shaded`
+      (default — byte-for-byte the original single filled pass, so the
+      M3 composite gate / VB-001 are untouched), `Edges` (depth-tested
+      hidden-line overlay on the filled hull) or `Wireframe` (edges
+      only over the cleared background). The previously-empty
+      menu-bar `Rendering` menu now hosts the three-way toggle,
+      emitting the pure-client `UiAction::SetRenderMode` (no proto
+      change). See `bug-tracker.md` VB-003.
+    - **Client-side picking + live status-bar readout (MVP-cut 4).**
+      `Camera::ray_from_screen` unprojects the cursor; `Mesh::pick`
+      (two-sided Möller–Trumbore over the cached hull) returns the hit
+      triangle, nearest node and `MVG2` scalar. The previously-empty
+      `Picking` menu toggles it (`UiAction::TogglePicking`); a
+      left-click in picking mode ray-casts instead of orbiting and the
+      status bar's permanently-`—` `pick:` field goes live. The frozen
+      proto carries **no label catalog**, so the readout is the
+      node/tri/scalar the cached `GeometryRef` actually has, not the
+      wireframe's aspirational `class N` — a viewport highlight glyph
+      and a label mapping remain (wireframe-parity Picking row).
+    - **Materials enable/disable affordance (MVP-cut 3).** The
+      server side was already done (item 8); this wires the GUI. Each
+      left-dock Materials row is now a toggle (● shown / ○ hidden,
+      weak label when off) emitting `UiAction::SetMaterialVisible`,
+      lowered to the frozen `Command::Material`
+      (`MaterialVisibility{ enable, class_name }`, whole class).
+      Visibility is tracked client-authoritatively by class name
+      (`ShellState::hidden_materials`, default empty → composite gate
+      unchanged) since the broadcast `MaterialsState` is keyed by
+      material id with no client-side class catalog.
+    - **Real bbox overlay + camera-tracking axes gizmo (MVP-cut 5).**
+      `Camera::project` unprojects world→viewport-fraction;
+      `Mesh::aabb` gives the per-state box. The app publishes the live
+      camera + AABB into `ShellState` (the `scene_frac` pattern), so
+      the bbox overlay draws the 12 projected edges (tracking
+      orbit/pan/zoom and per-state deform) and the axes gizmo projects
+      world X/Y/Z through the camera basis. `camera`/`model_aabb`
+      default `None` (headless composite / not-attached) → the M3
+      placeholder inset + static triad, so that gate stays byte-stable.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

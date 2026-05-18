@@ -11,6 +11,8 @@
 
 use egui::Ui;
 
+use crate::camera::Camera;
+
 /// The three non-agent session states M3 must render visibly
 /// (wireframes §"Session states"; the agent states are M6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,36 @@ impl Overlays {
     }
 }
 
+/// How the renderer draws the mesh (VB-003). The default
+/// [`RenderMode::Shaded`] is the unchanged single filled
+/// `TriangleList` pass, so the byte-stable M3 composite path
+/// (`render_shell_to_image`, always `Shaded`) is unaffected
+/// (`bug-tracker.md` VB-001).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Filled lit hull only — the M2/M3 pass, unchanged.
+    #[default]
+    Shaded,
+    /// Filled hull **plus** a depth-tested unique-edge overlay, so
+    /// only the visible front edges draw over the surface
+    /// (hidden-line overlay).
+    Edges,
+    /// Unique mesh edges only over the cleared background — a
+    /// see-through wireframe (no fill to occlude back edges).
+    Wireframe,
+}
+
+impl RenderMode {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RenderMode::Shaded => "shaded",
+            RenderMode::Edges => "shaded + edges",
+            RenderMode::Wireframe => "wireframe",
+        }
+    }
+}
+
 /// The three peer bottom tabs (wireframes §"Bottom tabs";
 /// `phase-5-m3.5.md` Decision 51).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +210,22 @@ pub enum UiAction {
     /// Set/clear the `LegendLimits` override (`min`, `max`); `None`
     /// autoscales that end. Lowered to `Command::Legend`.
     SetLegendLimits(Option<f64>, Option<f64>),
+    /// Pure-client render-mode switch (VB-003). Already applied to
+    /// [`ShellState`]; the windowed app retargets the renderer. No
+    /// proto change — the frozen `Command` set is untouched.
+    SetRenderMode(RenderMode),
+    /// Pure-client picking-mode toggle. Already applied to
+    /// [`ShellState`]; client-side ray-cast against the cached hull,
+    /// no proto command.
+    TogglePicking,
+    /// Enable/disable a class's materials. Lowered to the frozen
+    /// `Command::Material` (`MaterialVisibility{ enable, class_name }`,
+    /// no `material` id — whole class). The server is already done
+    /// (status 8); this is the GUI affordance.
+    SetMaterialVisible {
+        class_name: String,
+        visible: bool,
+    },
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -209,8 +257,19 @@ pub struct ShellState {
     pub stride: u32,
     pub overlays: Overlays,
     pub fps: f32,
-    /// Status-bar pick readout (`—` until picking lands, M4+).
+    /// Status-bar pick readout (`—` when nothing picked / picking
+    /// off).
     pub pick: String,
+    /// Whether left-click does a client-side ray-cast pick instead of
+    /// starting an orbit. Default off, driven by the `Picking` menu.
+    pub picking: bool,
+    /// Classes whose materials are toggled **off** in the left-dock
+    /// Materials section. Empty = all visible (the default, so the M3
+    /// composite gate is unchanged). The proto's `MaterialsState` is
+    /// keyed by material id with no client-side class catalog, so
+    /// visibility is tracked client-authoritatively by class name and
+    /// pushed to the server via the typed command.
+    pub hidden_materials: std::collections::BTreeSet<String>,
     /// Currently highlighted Results-tree row.
     pub selected_result: Option<String>,
     /// Open bottom tab, or `None` for the collapsed 22 px strip
@@ -231,6 +290,10 @@ pub struct ShellState {
     /// from the broadcast `ResultState` (Decision 66).
     pub legend_min: Option<f64>,
     pub legend_max: Option<f64>,
+    /// Active render mode (VB-003), driven by the `Rendering` menu.
+    /// Default [`RenderMode::Shaded`] keeps the M3 composite gate
+    /// byte-stable.
+    pub render_mode: RenderMode,
     /// The central viewport the panels leave, as `[x, y, w, h]`
     /// fractions of the full egui screen (`0..1`, top-left origin).
     /// `None` until the first [`build_shell_ui`] measures it. The
@@ -240,6 +303,14 @@ pub struct ShellState {
     /// Resolution-independent (a fraction, not pixels) so no
     /// `pixels_per_point` plumbing is needed.
     pub scene_frac: Option<[f32; 4]>,
+    /// The live windowed camera, published each frame so the bbox /
+    /// axes overlays project against the real view. `None` (the
+    /// default, and the headless composite path) keeps the M3
+    /// placeholder bbox/gizmo so that gate stays byte-stable.
+    pub camera: Option<Camera>,
+    /// World-space AABB `(min, max)` of the current-state hull, for
+    /// the projected-bbox overlay. `None` → placeholder.
+    pub model_aabb: Option<([f32; 3], [f32; 3])>,
 }
 
 impl Default for ShellState {
@@ -255,6 +326,8 @@ impl Default for ShellState {
             overlays: Overlays::default(),
             fps: 0.0,
             pick: "—".to_string(),
+            picking: false,
+            hidden_materials: std::collections::BTreeSet::new(),
             selected_result: None,
             bottom_tab: None,
             transcript: Vec::new(),
@@ -263,7 +336,10 @@ impl Default for ShellState {
             colormap: "cool".to_string(),
             legend_min: None,
             legend_max: None,
+            render_mode: RenderMode::default(),
             scene_frac: None,
+            camera: None,
+            model_aabb: None,
         }
     }
 }
@@ -284,6 +360,59 @@ impl ShellState {
     fn select_result(&mut self, name: &str) -> UiAction {
         self.selected_result = Some(name.to_string());
         UiAction::Show(name.to_string())
+    }
+
+    /// Switch the render mode (VB-003). Pure client state; the
+    /// returned action is observability-only (no proto command).
+    pub fn set_render_mode(&mut self, mode: RenderMode) -> UiAction {
+        self.render_mode = mode;
+        UiAction::SetRenderMode(mode)
+    }
+
+    /// Toggle client-side picking. Turning it off clears the readout
+    /// back to `—`. Pure client state; the action is observability-only
+    /// (no proto command).
+    pub fn toggle_picking(&mut self) -> UiAction {
+        self.picking = !self.picking;
+        if !self.picking {
+            self.pick = "—".to_string();
+        }
+        UiAction::TogglePicking
+    }
+
+    /// Fold a ray-cast result into the status-bar readout. The frozen
+    /// proto has no label catalog, so a hit shows the node/triangle
+    /// indices the cached hull actually carries (plus the `MVG2`
+    /// scalar when present); a miss reads `(no hit)`.
+    pub fn apply_pick(&mut self, hit: Option<&crate::mesh::Pick>) {
+        self.pick = match hit {
+            None => "(no hit)".to_string(),
+            Some(p) => match p.scalar {
+                Some(v) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
+                None => format!("node {} · tri {}", p.node, p.tri),
+            },
+        };
+    }
+
+    /// Whether a class's materials are currently shown.
+    #[must_use]
+    pub fn material_visible(&self, class_name: &str) -> bool {
+        !self.hidden_materials.contains(class_name)
+    }
+
+    /// Flip a class's material visibility and emit the typed command
+    /// for the app to lower to the frozen `Command::Material`.
+    pub fn toggle_material(&mut self, class_name: &str) -> UiAction {
+        let visible = if self.hidden_materials.remove(class_name) {
+            true
+        } else {
+            self.hidden_materials.insert(class_name.to_string());
+            false
+        };
+        UiAction::SetMaterialVisible {
+            class_name: class_name.to_string(),
+            visible,
+        }
     }
 
     /// Toggle a bottom tab: open it, or collapse the body if it is
@@ -391,15 +520,27 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
         .exact_size(26.0)
         .show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                for m in [
-                    "Control",
-                    "Rendering",
-                    "Picking",
-                    "Results",
-                    "Time",
-                    "Plot",
-                    "Help",
-                ] {
+                let _ = ui.menu_button("Control", |_| {});
+                ui.menu_button("Rendering", |ui| {
+                    for mode in [RenderMode::Shaded, RenderMode::Edges, RenderMode::Wireframe] {
+                        let mark = if state.render_mode == mode {
+                            "● "
+                        } else {
+                            "○ "
+                        };
+                        // A `Button` click auto-closes the egui menu.
+                        if ui.button(format!("{mark}{}", mode.label())).clicked() {
+                            actions.push(state.set_render_mode(mode));
+                        }
+                    }
+                });
+                ui.menu_button("Picking", |ui| {
+                    let mark = if state.picking { "● " } else { "○ " };
+                    if ui.button(format!("{mark}enable picking")).clicked() {
+                        actions.push(state.toggle_picking());
+                    }
+                });
+                for m in ["Results", "Time", "Plot", "Help"] {
                     let _ = ui.menu_button(m, |_| {});
                 }
             });
@@ -630,16 +771,31 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                 }
             });
 
-        let n_classes = state.loaded.as_ref().map_or(0, |l| l.class_names.len());
-        egui::CollapsingHeader::new(format!("Materials · {n_classes}"))
+        let classes: Vec<String> = state
+            .loaded
+            .as_ref()
+            .map(|l| l.class_names.clone())
+            .unwrap_or_default();
+        egui::CollapsingHeader::new(format!("Materials · {}", classes.len()))
             .default_open(false)
             .show(ui, |ui| {
-                if let Some(l) = &state.loaded {
-                    for c in &l.class_names {
-                        ui.horizontal(|ui| {
-                            ui.label("●");
-                            ui.label(c);
-                        });
+                for c in &classes {
+                    // A row toggles the class's materials: filled dot +
+                    // normal label when visible, hollow dot + weak
+                    // label when hidden. The whole row is the button.
+                    let visible = state.material_visible(c);
+                    let dot = if visible { "●" } else { "○" };
+                    let text = if visible {
+                        egui::RichText::new(format!("{dot} {c}"))
+                    } else {
+                        egui::RichText::new(format!("{dot} {c}")).weak()
+                    };
+                    if ui
+                        .selectable_label(false, text)
+                        .on_hover_text("toggle material visibility")
+                        .clicked()
+                    {
+                        actions.push(state.toggle_material(c));
                     }
                 }
             });
@@ -870,16 +1026,77 @@ fn overlays(ui: &mut egui::Ui, rect: egui::Rect, state: &ShellState) {
     }
 
     if state.overlays.axes {
-        axes_gizmo(&painter, rect);
+        axes_gizmo(&painter, rect, state.camera.as_ref());
     }
 
     if state.overlays.bbox {
-        // Dashed inset rectangle standing in for the model bbox; the
-        // true projected box is M4 (needs the live camera).
-        let inset = rect.shrink2(egui::vec2(rect.width() * 0.18, rect.height() * 0.18));
-        let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
-        dashed_rect(&painter, inset, stroke);
+        match state
+            .camera
+            .as_ref()
+            .zip(state.model_aabb)
+            .and_then(|(c, aabb)| project_bbox(c, aabb, rect))
+        {
+            // Real world-space AABB projected through the live camera:
+            // its 12 edges track orbit/pan/zoom and per-state deform.
+            Some(corners) => {
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(110));
+                for &(a, b) in BBOX_EDGES {
+                    painter.line_segment([corners[a], corners[b]], stroke);
+                }
+            }
+            // No live camera (headless composite / not attached) — the
+            // M3 placeholder inset, byte-stable for that gate.
+            None => {
+                let inset = rect.shrink2(egui::vec2(rect.width() * 0.18, rect.height() * 0.18));
+                let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
+                dashed_rect(&painter, inset, stroke);
+            }
+        }
     }
+}
+
+/// The 12 edges of a box as index pairs into the 8-corner array laid
+/// out as `bit0=x bit1=y bit2=z` (`min`=0, `max`=1 per axis).
+const BBOX_EDGES: &[(usize, usize)] = &[
+    (0, 1),
+    (2, 3),
+    (4, 5),
+    (6, 7), // x-dir
+    (0, 2),
+    (1, 3),
+    (4, 6),
+    (5, 7), // y-dir
+    (0, 4),
+    (1, 5),
+    (2, 6),
+    (3, 7), // z-dir
+];
+
+/// Project the 8 AABB corners to viewport pixels via the live camera.
+/// `None` if any corner is at/behind the eye (a partially-clipped box
+/// would draw garbage edges — fall back to the placeholder instead).
+fn project_bbox(
+    camera: &Camera,
+    aabb: ([f32; 3], [f32; 3]),
+    rect: egui::Rect,
+) -> Option<[egui::Pos2; 8]> {
+    let (lo, hi) = aabb;
+    let w = rect.width().max(1.0) as u32;
+    let h = rect.height().max(1.0) as u32;
+    let mut out = [egui::Pos2::ZERO; 8];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let p = glam::Vec3::new(
+            if i & 1 == 0 { lo[0] } else { hi[0] },
+            if i & 2 == 0 { lo[1] } else { hi[1] },
+            if i & 4 == 0 { lo[2] } else { hi[2] },
+        );
+        let f = camera.project(p, w, h)?;
+        *slot = egui::pos2(
+            rect.min.x + f.x * rect.width(),
+            rect.min.y + f.y * rect.height(),
+        );
+    }
+    Some(out)
 }
 
 fn legend(
@@ -927,22 +1144,35 @@ fn legend(
     }
 }
 
-fn axes_gizmo(painter: &egui::Painter, rect: egui::Rect) {
+fn axes_gizmo(painter: &egui::Painter, rect: egui::Rect, camera: Option<&Camera>) {
     let o = rect.right_bottom() + egui::vec2(-44.0, -44.0);
     let len = 26.0;
     let stroke = |c| egui::Stroke::new(2.0, c);
-    painter.line_segment(
-        [o, o + egui::vec2(len, 0.0)],
-        stroke(egui::Color32::from_rgb(220, 70, 70)),
-    );
-    painter.line_segment(
-        [o, o + egui::vec2(0.0, -len)],
-        stroke(egui::Color32::from_rgb(70, 200, 90)),
-    );
-    painter.line_segment(
-        [o, o + egui::vec2(-len * 0.7, len * 0.7)],
-        stroke(egui::Color32::from_rgb(90, 130, 230)),
-    );
+    let red = egui::Color32::from_rgb(220, 70, 70);
+    let green = egui::Color32::from_rgb(70, 200, 90);
+    let blue = egui::Color32::from_rgb(90, 130, 230);
+    match camera {
+        // Track the live view: project each world axis into screen
+        // space via the camera basis (screen y is down, so up flips).
+        Some(c) => {
+            let (right, up, _) = c.basis();
+            let screen = |axis: glam::Vec3| egui::vec2(axis.dot(right) * len, -axis.dot(up) * len);
+            for (dir, col) in [
+                (glam::Vec3::X, red),
+                (glam::Vec3::Y, green),
+                (glam::Vec3::Z, blue),
+            ] {
+                painter.line_segment([o, o + screen(dir)], stroke(col));
+            }
+        }
+        // Static triad (headless composite / not attached) — the M3
+        // placeholder, byte-stable for that gate.
+        None => {
+            painter.line_segment([o, o + egui::vec2(len, 0.0)], stroke(red));
+            painter.line_segment([o, o + egui::vec2(0.0, -len)], stroke(green));
+            painter.line_segment([o, o + egui::vec2(-len * 0.7, len * 0.7)], stroke(blue));
+        }
+    }
 }
 
 fn dashed_rect(painter: &egui::Painter, r: egui::Rect, stroke: egui::Stroke) {
