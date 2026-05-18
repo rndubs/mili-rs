@@ -60,7 +60,10 @@ fn write_session_file(local: &std::net::SocketAddr) -> std::io::Result<()> {
         .unwrap_or(0);
 
     let id = format!("{:08x}", mix(u128::from(pid), nanos));
-    let token = format!("{:016x}", mix(nanos, u128::from(pid).wrapping_mul(0x9E37_79B9)));
+    let token = format!(
+        "{:016x}",
+        mix(nanos, u128::from(pid).wrapping_mul(0x9E37_79B9))
+    );
 
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
@@ -100,10 +103,8 @@ fn sessions_dir() -> std::path::PathBuf {
     if let Some(d) = std::env::var_os("GRIZ_SESSIONS_DIR") {
         return std::path::PathBuf::from(d);
     }
-    let home = std::env::var_os("HOME").map_or_else(
-        || std::path::PathBuf::from("."),
-        std::path::PathBuf::from,
-    );
+    let home = std::env::var_os("HOME")
+        .map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
     home.join(".griz").join("sessions")
 }
 
