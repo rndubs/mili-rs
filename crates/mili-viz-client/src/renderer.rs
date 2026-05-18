@@ -192,12 +192,12 @@ impl Renderer {
     /// (`phase-5-m3.md` Decision 47); otherwise every vertex gets the
     /// M2 uniform [`BASE_COLOR`] (so a bare hull renders exactly as in
     /// M2).
-    pub fn upload_mesh(&mut self, mesh: &Mesh, range: Option<(f32, f32)>) {
+    pub fn upload_mesh(&mut self, mesh: &Mesh, range: Option<(f32, f32)>, colormap: &str) {
         let color_of = |i: usize| -> [f32; 3] {
             match (&mesh.scalars, range) {
                 (Some(s), Some((lo, hi))) => {
                     let t = crate::colormap::normalize(s[i], lo, hi);
-                    crate::colormap::sample(t)
+                    crate::colormap::sample_named(colormap, t)
                 }
                 _ => BASE_COLOR,
             }
@@ -244,11 +244,16 @@ impl Renderer {
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
+        // Defensively clamp the offscreen depth target to the
+        // negotiated `max_texture_dimension_2d` so an over-large
+        // surface size never trips texture-size validation
+        // (`phase-5-m4.md` Decision 62).
+        let max_dim = self.device.limits().max_texture_dimension_2d;
         let depth = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
             size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
+                width: width.clamp(1, max_dim),
+                height: height.clamp(1, max_dim),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -317,11 +322,16 @@ pub fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
             })
             .await
             .ok()?;
+        // Mirror the windowed path: `downlevel_defaults()` floor with
+        // the adapter's real `max_texture_dimension_2d` so a HiDPI
+        // offscreen size never trips validation (Decision 62).
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        limits.max_texture_dimension_2d = adapter.limits().max_texture_dimension_2d;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("mili-viz headless device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: limits,
                 experimental_features: wgpu::ExperimentalFeatures::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
@@ -353,7 +363,7 @@ pub fn render_mesh_to_image(
 ) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
-    renderer.upload_mesh(mesh, None);
+    renderer.upload_mesh(mesh, None, "cool");
     Some(renderer.read_back(width, height, camera))
 }
 
@@ -374,7 +384,7 @@ pub fn render_shell_to_image(
 ) -> Option<Vec<u8>> {
     let (device, queue) = headless_device()?;
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
-    renderer.upload_mesh(mesh, range);
+    renderer.upload_mesh(mesh, range, "cool");
     let mut egui = crate::egui_layer::EguiPaint::new(&renderer.device, OFFSCREEN_FORMAT);
 
     let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {

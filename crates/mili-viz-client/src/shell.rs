@@ -171,6 +171,13 @@ pub enum UiAction {
     RunCommand(String),
     SelectBottomTab(BottomTab),
     CollapseBottomTabs,
+    /// Pick a named colormap (`phase-5-m4.md` Decision 66). Lowered to
+    /// the frozen `Command::Colormap`; the visual effect is applied
+    /// client-side (the server treats it as a recolor no-op).
+    SetColormap(String),
+    /// Set/clear the `LegendLimits` override (`min`, `max`); `None`
+    /// autoscales that end. Lowered to `Command::Legend`.
+    SetLegendLimits(Option<f64>, Option<f64>),
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -217,6 +224,13 @@ pub struct ShellState {
     /// Time-history series accumulated from `ResultState`
     /// (Decision 50).
     pub time_history: Vec<TimeSample>,
+    /// Active colormap name (`phase-5-m4.md` Decision 66); one of
+    /// [`crate::colormap::NAMES`], default `cool`.
+    pub colormap: String,
+    /// `LegendLimits` override; an unset bound autoscales that end
+    /// from the broadcast `ResultState` (Decision 66).
+    pub legend_min: Option<f64>,
+    pub legend_max: Option<f64>,
 }
 
 impl Default for ShellState {
@@ -237,6 +251,9 @@ impl Default for ShellState {
             transcript: Vec::new(),
             cmdline_input: String::new(),
             time_history: Vec::new(),
+            colormap: "cool".to_string(),
+            legend_min: None,
+            legend_max: None,
         }
     }
 }
@@ -328,6 +345,22 @@ impl ShellState {
             self.time_history.push(sample);
             self.time_history.sort_by_key(|s| s.state);
         }
+    }
+
+    /// The colour-mapping range the renderer and legend use
+    /// (`phase-5-m4.md` Decision 66): a `LegendLimits` bound overrides
+    /// that end, an unset bound autoscales from the broadcast
+    /// `ResultState`. `None` when there is no scalar result (the bare
+    /// hull renders the M2 base colour exactly as before).
+    #[must_use]
+    pub fn effective_range(&self) -> Option<(f32, f32)> {
+        let r = self.result.as_ref()?;
+        if r.name.is_empty() {
+            return None;
+        }
+        let lo = self.legend_min.unwrap_or(r.min);
+        let hi = self.legend_max.unwrap_or(r.max);
+        Some((lo as f32, hi as f32))
     }
 }
 
@@ -523,6 +556,55 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                     .show(ui, |ui| {
                         ui.weak("(catalog: M4+)");
                     });
+            });
+
+        egui::CollapsingHeader::new("Colormap")
+            .default_open(false)
+            .show(ui, |ui| {
+                let mut cmap = state.colormap.clone();
+                egui::ComboBox::from_id_salt("colormap")
+                    .selected_text(&cmap)
+                    .show_ui(ui, |ui| {
+                        for &n in crate::colormap::NAMES {
+                            ui.selectable_value(&mut cmap, n.to_string(), n);
+                        }
+                    });
+                if cmap != state.colormap {
+                    state.colormap = cmap.clone();
+                    actions.push(UiAction::SetColormap(cmap));
+                }
+
+                let (auto_lo, auto_hi) =
+                    state.result.as_ref().map_or((0.0, 1.0), |r| (r.min, r.max));
+                let mut manual = state.legend_min.is_some() || state.legend_max.is_some();
+                if ui.checkbox(&mut manual, "manual limits").clicked() {
+                    let (lo, hi) = if manual {
+                        (Some(auto_lo), Some(auto_hi))
+                    } else {
+                        (None, None)
+                    };
+                    state.legend_min = lo;
+                    state.legend_max = hi;
+                    actions.push(UiAction::SetLegendLimits(lo, hi));
+                }
+                if manual {
+                    let mut lo = state.legend_min.unwrap_or(auto_lo);
+                    let mut hi = state.legend_max.unwrap_or(auto_hi);
+                    let mut changed = false;
+                    ui.horizontal(|ui| {
+                        ui.label("min");
+                        changed |= ui.add(egui::DragValue::new(&mut lo)).changed();
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("max");
+                        changed |= ui.add(egui::DragValue::new(&mut hi)).changed();
+                    });
+                    if changed {
+                        state.legend_min = Some(lo);
+                        state.legend_max = Some(hi);
+                        actions.push(UiAction::SetLegendLimits(Some(lo), Some(hi)));
+                    }
+                }
             });
 
         let n_classes = state.loaded.as_ref().map_or(0, |l| l.class_names.len());
@@ -792,7 +874,7 @@ fn legend(
     let bands = 32;
     for b in 0..bands {
         let t = 1.0 - (b as f32 + 0.5) / bands as f32;
-        let c = crate::colormap::sample(t);
+        let c = crate::colormap::sample_named(&state.colormap, t);
         let y0 = bar.top() + bar.height() * (b as f32 / bands as f32);
         let y1 = bar.top() + bar.height() * ((b + 1) as f32 / bands as f32);
         painter.rect_filled(
@@ -805,7 +887,9 @@ fn legend(
             ),
         );
     }
-    let (lo, hi) = state.result.as_ref().map_or((0.0, 1.0), |r| (r.min, r.max));
+    let (lo, hi) = state
+        .effective_range()
+        .map_or((0.0, 1.0), |(l, h)| (f64::from(l), f64::from(h)));
     for i in 0..5 {
         let f = i as f32 / 4.0;
         let v = hi + (lo - hi) * f64::from(f);
