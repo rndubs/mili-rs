@@ -22,19 +22,37 @@ Conventions:
 
 ## VB-003 — mesh/element outlines unimplemented
 
-- **Status:** known-gap
+- **Status:** fixed
 - **Reported:** 2026-05-18 (maintainer feedback, `bar71.pltA`)
 - **Symptom:** no way to enable mesh / element edge outlines; the
   menu-bar `Rendering` menu does nothing.
-- **Root cause:** never built. The renderer has only a filled
-  `TriangleList` pass; the `Rendering` menu button is an empty
+- **Root cause:** never built. The renderer had only a filled
+  `TriangleList` pass; the `Rendering` menu button was an empty
   placeholder (`shell.rs`, `ui.menu_button(m, |_| {})`); the toolbar
   overlay chips are HUD-only (`title/state/legend/axes/bbox`).
-- **Fix:** none yet — needs a milestone: a hidden-line / element-edge
-  render mode (extract unique edges, line pipeline or barycentric
-  wireframe shader) plus a `Rendering`-menu or overlay-chip toggle.
-  The wireframe "Tweaks" surface is the natural home.
-- **Commit:** — · `status.md` item 23.
+- **Fix:** **client-side, no proto change.** `Mesh::edge_indices`
+  extracts the unique undirected triangle edges; a second `LineList`
+  pipeline (`edges.wgsl`, sharing the camera bind group + vertex
+  buffer, depth-tested `LessEqual` with a small negative bias) draws
+  them. `Renderer::set_mode` picks the mode:
+  - `Shaded` (default) — byte-for-byte the original single filled
+    pass, so the M3 composite gate (`render_shell_to_image`, always
+    `Shaded`) and VB-001 are untouched;
+  - `Edges` — depth-tested edge overlay on the filled hull, so only
+    the visible front edges draw (hidden-line overlay);
+  - `Wireframe` — edges only over the cleared background (see-through
+    wireframe).
+  The menu-bar `Rendering` menu now hosts the three-way toggle and
+  emits the pure-client `UiAction::SetRenderMode`, lowered in `app.rs`
+  to `Renderer::set_mode` (no frozen-proto command).
+- **Commit:** `branch:claude/update-wireframe-parity-J0XIn` ·
+  `status.md` item 23.
+- **Regression test:** `tests/vb003_render_modes.rs` — always-on pure
+  logic (mode default, the `ShellState` switch, `edge_indices`
+  dedup) plus a skip-on-absent headless leg asserting `Shaded` is
+  byte-identical to `render_mesh_to_image` while `Edges`/`Wireframe`
+  change pixels. The GUI render itself is not headlessly verifiable
+  in CI (no display).
 
 ## VB-002 — stepping/animation froze the mesh (time/state mismatch)
 

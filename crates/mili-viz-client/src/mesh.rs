@@ -166,6 +166,27 @@ impl Mesh {
         }
     }
 
+    /// Unique undirected triangle edges as a `LineList` index buffer
+    /// (pairs into [`Mesh::positions`]). Each shared edge appears once
+    /// regardless of how many triangles fan around it, so the
+    /// element-edge / wireframe pass draws clean mesh lines rather than
+    /// every triangle leg three times over (VB-003).
+    #[must_use]
+    pub fn edge_indices(&self) -> Vec<u32> {
+        let mut seen = std::collections::HashSet::new();
+        let mut edges = Vec::new();
+        for tri in self.indices.chunks_exact(3) {
+            for &(a, b) in &[(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = (a.min(b), a.max(b));
+                if seen.insert(key) {
+                    edges.push(key.0);
+                    edges.push(key.1);
+                }
+            }
+        }
+        edges
+    }
+
     /// Bounding-sphere `(center, radius)` of the vertex cloud — the
     /// input to [`crate::Camera::looking_at`] so the gating render
     /// frames a real corpus regardless of its coordinate scale.

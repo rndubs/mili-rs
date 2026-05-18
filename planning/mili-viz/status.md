@@ -907,13 +907,17 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       drain when the cursor moved, coalescing a strided burst to the
       final state. This also makes the time-history series accumulate
       while scrubbing/animating (was the "time/state mismatch").
-    - **Mesh/element outlines: confirmed *not implemented*** (no
-      wireframe/edge pass exists; the menu-bar `Rendering` menu is an
-      empty placeholder, and the toolbar overlay chips are HUD-only —
-      `title/state/legend/axes/bbox`). Recorded here as a known gap
-      for a future milestone (a hidden-line / element-edge render
-      mode + a `Rendering`-menu or overlay-chip toggle); the wireframe
-      "Tweaks" surface is the natural home.
+    - **Mesh/element outlines: now implemented (VB-003 — `fixed`).**
+      `Mesh::edge_indices` extracts unique undirected edges; a second
+      `LineList` pipeline (sharing the camera bind group + vertex
+      buffer) draws them. `Renderer::set_mode` selects `Shaded`
+      (default — byte-for-byte the original single filled pass, so the
+      M3 composite gate / VB-001 are untouched), `Edges` (depth-tested
+      hidden-line overlay on the filled hull) or `Wireframe` (edges
+      only over the cleared background). The previously-empty
+      menu-bar `Rendering` menu now hosts the three-way toggle,
+      emitting the pure-client `UiAction::SetRenderMode` (no proto
+      change). See `bug-tracker.md` VB-003.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

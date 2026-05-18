@@ -102,6 +102,36 @@ impl Overlays {
     }
 }
 
+/// How the renderer draws the mesh (VB-003). The default
+/// [`RenderMode::Shaded`] is the unchanged single filled
+/// `TriangleList` pass, so the byte-stable M3 composite path
+/// (`render_shell_to_image`, always `Shaded`) is unaffected
+/// (`bug-tracker.md` VB-001).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Filled lit hull only — the M2/M3 pass, unchanged.
+    #[default]
+    Shaded,
+    /// Filled hull **plus** a depth-tested unique-edge overlay, so
+    /// only the visible front edges draw over the surface
+    /// (hidden-line overlay).
+    Edges,
+    /// Unique mesh edges only over the cleared background — a
+    /// see-through wireframe (no fill to occlude back edges).
+    Wireframe,
+}
+
+impl RenderMode {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RenderMode::Shaded => "shaded",
+            RenderMode::Edges => "shaded + edges",
+            RenderMode::Wireframe => "wireframe",
+        }
+    }
+}
+
 /// The three peer bottom tabs (wireframes §"Bottom tabs";
 /// `phase-5-m3.5.md` Decision 51).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +208,10 @@ pub enum UiAction {
     /// Set/clear the `LegendLimits` override (`min`, `max`); `None`
     /// autoscales that end. Lowered to `Command::Legend`.
     SetLegendLimits(Option<f64>, Option<f64>),
+    /// Pure-client render-mode switch (VB-003). Already applied to
+    /// [`ShellState`]; the windowed app retargets the renderer. No
+    /// proto change — the frozen `Command` set is untouched.
+    SetRenderMode(RenderMode),
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -231,6 +265,10 @@ pub struct ShellState {
     /// from the broadcast `ResultState` (Decision 66).
     pub legend_min: Option<f64>,
     pub legend_max: Option<f64>,
+    /// Active render mode (VB-003), driven by the `Rendering` menu.
+    /// Default [`RenderMode::Shaded`] keeps the M3 composite gate
+    /// byte-stable.
+    pub render_mode: RenderMode,
     /// The central viewport the panels leave, as `[x, y, w, h]`
     /// fractions of the full egui screen (`0..1`, top-left origin).
     /// `None` until the first [`build_shell_ui`] measures it. The
@@ -263,6 +301,7 @@ impl Default for ShellState {
             colormap: "cool".to_string(),
             legend_min: None,
             legend_max: None,
+            render_mode: RenderMode::default(),
             scene_frac: None,
         }
     }
@@ -284,6 +323,13 @@ impl ShellState {
     fn select_result(&mut self, name: &str) -> UiAction {
         self.selected_result = Some(name.to_string());
         UiAction::Show(name.to_string())
+    }
+
+    /// Switch the render mode (VB-003). Pure client state; the
+    /// returned action is observability-only (no proto command).
+    pub fn set_render_mode(&mut self, mode: RenderMode) -> UiAction {
+        self.render_mode = mode;
+        UiAction::SetRenderMode(mode)
     }
 
     /// Toggle a bottom tab: open it, or collapse the body if it is
@@ -391,15 +437,28 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
         .exact_size(26.0)
         .show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                for m in [
-                    "Control",
-                    "Rendering",
-                    "Picking",
-                    "Results",
-                    "Time",
-                    "Plot",
-                    "Help",
-                ] {
+                let _ = ui.menu_button("Control", |_| {});
+                ui.menu_button("Rendering", |ui| {
+                    for mode in [
+                        RenderMode::Shaded,
+                        RenderMode::Edges,
+                        RenderMode::Wireframe,
+                    ] {
+                        let mark = if state.render_mode == mode {
+                            "● "
+                        } else {
+                            "○ "
+                        };
+                        // A `Button` click auto-closes the egui menu.
+                        if ui
+                            .button(format!("{mark}{}", mode.label()))
+                            .clicked()
+                        {
+                            actions.push(state.set_render_mode(mode));
+                        }
+                    }
+                });
+                for m in ["Picking", "Results", "Time", "Plot", "Help"] {
                     let _ = ui.menu_button(m, |_| {});
                 }
             });

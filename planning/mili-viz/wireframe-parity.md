@@ -37,8 +37,8 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Control · Rendering · Picking · Results · Time · Plot · Help` items | 🔴 placeholder | all 7 are `ui.menu_button(m, |_| {})` — open but empty | — |
-| `Rendering` menu (wireframe/edge toggles) | 🔴 placeholder | empty; the VB-003 home | VB-003 / status 23 |
+| `Control · Picking · Results · Time · Plot · Help` items | 🔴 placeholder | the other 6 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
 | View / Preferences (theme, layout tweaks) | ⬜ missing | no menu to host the Tweaks set | — |
 
 ## Toolbar
@@ -102,7 +102,7 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | Filled `TriangleList` pass | ✅ done | `renderer.rs:149` | status 15 |
-| Wireframe / element-edge / hidden-line mode | ⬜ missing | only the filled pass exists — this is VB-003 | VB-003 / status 23 |
+| Wireframe / element-edge / hidden-line mode | ✅ done | `LineList` edge pass via `Mesh::edge_indices`; `Renderer::set_mode` → `Shaded` (default, byte-stable) / `Edges` (hidden-line overlay) / `Wireframe` | VB-003 / status 23 |
 
 ## Cross-cutting gaps
 
@@ -121,10 +121,10 @@ The maintainer-scoped MVP excludes the AI panel (M6) and remote mode
 (Phase 5 M5). The parity gaps that remain in-scope for MVP, roughly by
 leverage:
 
-1. **Menu bar** — wire real items (esp. `Rendering`, `Control`,
-   `Picking`, View/Preferences host).
-2. **Wireframe / element-edge render mode** (VB-003) + its `Rendering`
-   toggle.
+1. **Menu bar** — 🟡 `Rendering` is now wired (VB-003); still to do:
+   `Control`, `Picking`, the View/Preferences host.
+2. ✅ **Wireframe / element-edge render mode** (VB-003) + its
+   `Rendering` toggle — done.
 3. **Materials enable/disable affordance** (server side already done,
    status 8 — GUI only).
 4. **Picking** + live status-bar readout.

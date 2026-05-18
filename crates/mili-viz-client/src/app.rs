@@ -363,6 +363,14 @@ impl App {
                     max: *max,
                 }))
             }
+            UiAction::SetRenderMode(m) => {
+                // Pure-client (VB-003): retarget the renderer; no
+                // proto command (the frozen set is untouched).
+                if let Some(ws) = &mut self.state {
+                    ws.renderer.set_mode(*m);
+                }
+                None
+            }
             // Client-only: already applied to ShellState by the UI.
             UiAction::SetStride(_)
             | UiAction::ToggleOverlay(_)
