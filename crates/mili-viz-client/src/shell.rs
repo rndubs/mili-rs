@@ -231,6 +231,15 @@ pub struct ShellState {
     /// from the broadcast `ResultState` (Decision 66).
     pub legend_min: Option<f64>,
     pub legend_max: Option<f64>,
+    /// The central viewport the panels leave, as `[x, y, w, h]`
+    /// fractions of the full egui screen (`0..1`, top-left origin).
+    /// `None` until the first [`build_shell_ui`] measures it. The
+    /// windowed app maps it onto the physical surface so the `wgpu`
+    /// mesh pass frames — and orbits — about the centre of the
+    /// *visible* scene, not the full surface the docks occlude.
+    /// Resolution-independent (a fraction, not pixels) so no
+    /// `pixels_per_point` plumbing is needed.
+    pub scene_frac: Option<[f32; 4]>,
 }
 
 impl Default for ShellState {
@@ -254,6 +263,7 @@ impl Default for ShellState {
             colormap: "cool".to_string(),
             legend_min: None,
             legend_max: None,
+            scene_frac: None,
         }
     }
 }
@@ -373,6 +383,9 @@ impl ShellState {
 /// mesh pass shows through (`phase-5-m3.md` Decision 45).
 pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
     let mut actions = Vec::new();
+    // Full extent before any panel carves into it; the leftover
+    // central rect is normalized against this below.
+    let full = ui.max_rect();
 
     egui::Panel::top("menu")
         .exact_size(26.0)
@@ -429,6 +442,16 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
     // region the full-surface mesh pass shows through; the five
     // overlays (or the not-attached card) paint over it.
     let rect = ui.available_rect_before_wrap();
+    // Publish the leftover central rect as screen fractions so the
+    // windowed mesh pass can target exactly the visible scene.
+    if full.width() > 0.0 && full.height() > 0.0 {
+        state.scene_frac = Some([
+            (rect.min.x - full.min.x) / full.width(),
+            (rect.min.y - full.min.y) / full.height(),
+            rect.width() / full.width(),
+            rect.height() / full.height(),
+        ]);
+    }
     if state.phase == SessionPhase::NotAttached {
         attach_card(ui, rect);
     } else {

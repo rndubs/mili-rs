@@ -235,9 +235,32 @@ impl Renderer {
     }
 
     /// Record + submit one frame: clear, then draw the uploaded mesh
-    /// (if any) into `view`.
+    /// (if any) into `view`, filling the whole `width`x`height` target.
     pub fn render(&self, view: &wgpu::TextureView, width: u32, height: u32, camera: &Camera) {
-        let vp: Mat4 = camera.view_projection(width, height);
+        self.render_in(view, width, height, camera, None);
+    }
+
+    /// As [`render`](Self::render), but when `scene` is
+    /// `Some((x, y, w, h))` the mesh is drawn into just that sub-rect
+    /// of the `width`x`height` attachment (physical pixels, top-left
+    /// origin) and the projection aspect is taken from `w`/`h`. The
+    /// windowed app passes the central viewport the `egui` panels
+    /// leave, so the model is framed — and orbits — about the centre
+    /// of the *visible* scene, not the centre of the full surface that
+    /// the left dock / bottom tabs occlude.
+    pub fn render_in(
+        &self,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        camera: &Camera,
+        scene: Option<(f32, f32, f32, f32)>,
+    ) {
+        let (proj_w, proj_h) = match scene {
+            Some((_, _, w, h)) => (w.max(1.0) as u32, h.max(1.0) as u32),
+            None => (width, height),
+        };
+        let vp: Mat4 = camera.view_projection(proj_w, proj_h);
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
         };
@@ -294,6 +317,20 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            if let Some((x, y, w, h)) = scene {
+                // Clamp into the attachment so a stale (pre-resize)
+                // rect can never trip viewport validation.
+                let fw = width as f32;
+                let fh = height as f32;
+                // `.max(1.0)` on the upper bound keeps it ≥ the lower
+                // bound so `f32::clamp` can never be called min > max
+                // (it panics) even for a degenerate stale rect.
+                let x = x.clamp(0.0, (fw - 1.0).max(0.0));
+                let y = y.clamp(0.0, (fh - 1.0).max(0.0));
+                let w = w.clamp(1.0, (fw - x).max(1.0));
+                let h = h.clamp(1.0, (fh - y).max(1.0));
+                pass.set_viewport(x, y, w, h, 0.0, 1.0);
+            }
             if let Some(m) = &self.mesh {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
