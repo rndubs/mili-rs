@@ -117,10 +117,25 @@ async fn catalog_blob_is_well_formed_and_flight_byte_identical() {
         !primal.is_empty(),
         "serial/basic1 exposes queriable primal svars"
     );
-    // Every non-empty line is a tagged primal entry (no stray bytes).
+    // Derived section (`phase-5-m4.md` Decision 71): the DB-filtered
+    // computable derived results. basic1 carries stress/strain +
+    // nodal-position primals, so the union is non-empty.
+    let derived: Vec<&str> = body.lines().filter_map(|l| l.strip_prefix("D\t")).collect();
     assert!(
-        body.lines().all(|l| l.is_empty() || l.starts_with("P\t")),
-        "every catalog line is a P-tagged primal entry"
+        !derived.is_empty(),
+        "serial/basic1 exposes computable derived results"
+    );
+    // No dupes in the deduped union.
+    let mut ded = derived.clone();
+    ded.sort_unstable();
+    ded.dedup();
+    assert_eq!(ded.len(), derived.len(), "derived section is deduped");
+    // Every non-empty line is a tagged primal or derived entry
+    // (no stray bytes); time-indep (`T`) stays unenumerated (Dec 69).
+    assert!(
+        body.lines()
+            .all(|l| l.is_empty() || l.starts_with("P\t") || l.starts_with("D\t")),
+        "every catalog line is a P- or D-tagged entry"
     );
 
     // Real Arrow Flight DoGet of the conventional ticket returns the
