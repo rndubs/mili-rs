@@ -59,11 +59,17 @@ fn paint(state: &mut ShellState) -> (Vec<UiAction>, bool) {
 #[test]
 fn decode_round_trips_and_rejects_non_catalog() {
     // Hand-built blob in the documented format: magic + P-tagged
-    // primal lines (plus an unknown `Z` tag a newer server might add).
-    let blob = b"MVCAT1\nP\tsx\nP\tstress\nZ\tfuture\n".to_vec();
+    // primal and D-tagged derived lines, interleaved, plus an unknown
+    // `Z` tag (a future `T` time-indep) a newer server might add — it
+    // must degrade cleanly (skipped, neither primal nor derived).
+    let blob = b"MVCAT1\nP\tsx\nD\teff_stress\nP\tstress\nZ\tfuture\nD\tpressure\n".to_vec();
     let cat = decode_catalog(&blob).expect("well-formed blob decodes");
     assert_eq!(cat.primal, vec!["sx".to_string(), "stress".to_string()]);
-    assert_eq!(cat.len(), 2);
+    assert_eq!(
+        cat.derived,
+        vec!["eff_stress".to_string(), "pressure".to_string()]
+    );
+    assert_eq!(cat.len(), 4);
     assert!(!cat.is_empty());
 
     // A real run with no queriable svars: magic only ⇒ Some(empty).
@@ -95,12 +101,14 @@ fn wired_shell_paints_input_free_with_and_without_catalog() {
     let (a, painted) = paint(&mut bare);
     assert!(painted && a.is_empty(), "no-catalog shell paints inert");
 
-    // Populated catalog: the primal sub-tree now lists real names; a
-    // pure paint (no input) must still yield no actions.
+    // Populated catalog: the primal + derived sub-trees now list real
+    // names (derived from the DB-filtered catalog, not the static
+    // fallback); a pure paint (no input) must still yield no actions.
     let mut full = ShellState {
         phase: SessionPhase::AttachedIdle,
         catalog: Some(ResultCatalog {
             primal: vec!["sx".into(), "sy".into(), "eps".into()],
+            derived: vec!["eff_stress".into(), "pressure".into()],
         }),
         ..ShellState::default()
     };
@@ -127,6 +135,10 @@ async fn composite_render() {
     assert!(
         !catalog.primal.is_empty(),
         "serial/basic1 exposes primal svars"
+    );
+    assert!(
+        !catalog.derived.is_empty(),
+        "serial/basic1 exposes DB-filtered derived results (Dec 71)"
     );
 
     let mesh = fetch_server_mesh(&path.to_string_lossy(), "")

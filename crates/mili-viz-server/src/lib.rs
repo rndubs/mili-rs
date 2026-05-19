@@ -180,8 +180,17 @@ impl Session {
     /// re-port" boundary). `None` when no real run is loaded, exactly
     /// like [`Session::geometry_ref`]: the client then keeps its
     /// static placeholder and the headless composite gate is
-    /// unperturbed (`bug-tracker.md` VB-001). Time-independent
-    /// variables are not enumerated yet (mili-rs has no TI accessor —
+    /// unperturbed (`bug-tracker.md` VB-001).
+    ///
+    /// The `D` section is the loaded run's *computable* derived
+    /// results — the union over the mesh's element classes of
+    /// `Database::derived_variables_of_class` (the oracle-gated
+    /// enumeration milestone; `phase-5-m4.md` Decision 71), deduped
+    /// first-seen in (class order × registry order). This is the
+    /// faithful DB-filtered analog of griz's `analy->derived_results`,
+    /// and still a *reshape* — no new file parsing, no derived math
+    /// (that stays the `derived.rs` compute path). Time-independent
+    /// variables remain unenumerated (no TI accessor — Decision 69;
     /// the client labels that sub-tree accordingly).
     fn catalog_blob(&self) -> Option<Vec<u8>> {
         let db = self.db.as_ref()?;
@@ -192,6 +201,19 @@ impl Session {
             blob.extend_from_slice(b"P\t");
             blob.extend_from_slice(name.as_bytes());
             blob.push(b'\n');
+        }
+        if let Some(mesh_id) = self.topo.as_ref().map(MeshTopology::mesh_id) {
+            let mut seen: Vec<String> = Vec::new();
+            for class in db.class_names(mesh_id) {
+                for d in db.derived_variables_of_class(mesh_id, &class) {
+                    if !seen.iter().any(|s| s == &d) {
+                        blob.extend_from_slice(b"D\t");
+                        blob.extend_from_slice(d.as_bytes());
+                        blob.push(b'\n');
+                        seen.push(d);
+                    }
+                }
+            }
         }
         Some(blob)
     }

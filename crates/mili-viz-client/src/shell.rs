@@ -285,12 +285,11 @@ pub enum UiAction {
     SetFocusMode(bool),
 }
 
-/// Built-in derived result names the Phase 4 server supports
-/// (`status.md` M5–M5d). The frozen proto carries no svar catalog, so
-/// the M3 Results tree offers this representative derived set; the
-/// primal / time-indep sub-trees are collapsed placeholders until a
-/// catalog path exists (out of frozen-proto scope — recorded in
-/// `phase-5-m3.md` Decision 47's neighbourhood).
+/// Static fallback derived-result names, shown only until a real
+/// catalog is attached. Once the side-channel catalog arrives
+/// (`phase-5-m4.md` Decision 71) the left dock lists the run's
+/// DB-filtered `ResultCatalog::derived` instead; this set keeps the
+/// default (no-catalog) `ShellState` chrome byte-identical (VB-001).
 pub const DERIVED_RESULTS: &[&str] = &[
     "disp_mag",
     "disp_x",
@@ -1005,26 +1004,41 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                 }
             });
 
-        // Primal svar names from the side-channel catalog
-        // (`phase-5-m3.md` Decision 67). Cloned up front so the
+        // Primal + derived names from the side-channel catalog
+        // (`phase-5-m4.md` Decision 67 / 71). Cloned up front so the
         // selectable rows can call `state.select_result` without
-        // aliasing `state.catalog`. `None`/absent → empty, so the
-        // badge stays `DERIVED_RESULTS.len()` and the sub-tree keeps
-        // the static placeholder (byte-stable default, VB-001).
+        // aliasing `state.catalog`. `None`/absent ⇒ `primal` empty and
+        // `derived` falls back to the static `DERIVED_RESULTS`, so the
+        // default (no-catalog) chrome — badge `DERIVED_RESULTS.len()`,
+        // bare `derived`/`primal` headers, the `(catalog: M4+)`
+        // placeholder — stays byte-identical (VB-001).
         let primal: Vec<String> = state
             .catalog
             .as_ref()
             .map(|c| c.primal.clone())
             .unwrap_or_default();
-        let results_count = DERIVED_RESULTS.len() + primal.len();
+        let derived: Vec<String> = state
+            .catalog
+            .as_ref()
+            .map(|c| c.derived.clone())
+            .unwrap_or_else(|| DERIVED_RESULTS.iter().map(|s| (*s).to_string()).collect());
+        let has_catalog = state.catalog.is_some();
+        let results_count = derived.len() + primal.len();
         egui::CollapsingHeader::new(format!("Results · {results_count}"))
             .default_open(true)
             .show(ui, |ui| {
-                egui::CollapsingHeader::new("derived")
+                // Bare `derived` (byte-stable default) until a real
+                // catalog is attached, then `derived · N`.
+                let derived_label = if has_catalog {
+                    format!("derived · {}", derived.len())
+                } else {
+                    "derived".to_string()
+                };
+                egui::CollapsingHeader::new(derived_label)
                     .default_open(true)
                     .show(ui, |ui| {
-                        for &r in DERIVED_RESULTS {
-                            let sel = state.selected_result.as_deref() == Some(r);
+                        for r in &derived {
+                            let sel = state.selected_result.as_deref() == Some(r.as_str());
                             if ui.selectable_label(sel, r).clicked() {
                                 actions.push(state.select_result(r));
                             }
@@ -1059,8 +1073,9 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                     .default_open(false)
                     .show(ui, |ui| {
                         // No mili-rs time-independent accessor yet
-                        // (`phase-5-m3.md` Decision 67) — honest
-                        // placeholder, not a stub that looks live.
+                        // (`phase-5-m4.md` Decision 69 — a re-port, not
+                        // a reshape) — honest placeholder, not a stub
+                        // that looks live. Rendered text unchanged.
                         ui.weak("(time-indep: no catalog path yet)");
                     });
             });

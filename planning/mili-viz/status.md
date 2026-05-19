@@ -1184,6 +1184,66 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       composites the mesh). The windowed `apply_loaded` fetch site is
       not headlessly verifiable; the `Session::fetch_catalog` API it
       calls is.
+    - **`time-indep` result catalog — deferred (Decision-67
+      continuation, scope-guarded; `phase-5-m4.md` Decision 69).** The
+      `time-indep` left-dock sub-tree **stays** the honest labelled
+      placeholder. A faithful TI-results enumeration is a substantive
+      **re-port**, not the trivial reshape `queriable_svars` was for
+      Decision 67: `TI_PARAM` is a junk-drawer (mili-rs `ParamTable`
+      collapses it with `MILI_PARAM`/`APPLICATION_PARAM` and it also
+      stores labels/materials/element-sets/coords — a raw name dump
+      would render internal bookkeeping as fake "results", the
+      live-looking stub Decision 67 forbade); mili-python exposes **no**
+      TI-results accessor (only raw `parameters()`), so there is no
+      `mili` parity oracle; and a faithful filter needs the
+      `mc_ti_get_metadata_from_name` TI-name grammar + a
+      TI-type-aware `ParamTable` mili-rs does not have. No data-lib
+      accessor, no server `T` line, no client field were added —
+      **zero code change**, so the byte-stable headless composite path
+      (default `ShellState`, `catalog: None`) is trivially unperturbed
+      (`bug-tracker.md` VB-001). Forward seam already clean: the blob's
+      reserved `T` tag + `decode_catalog`'s unknown-tag tolerance mean
+      a future `mili-rs` core TI-results accessor (the named blocker)
+      lights this up with no wire/proto/ticket change.
+    - **`derived` result catalog — ✅ LANDED (Decision-67
+      continuation; `phase-5-m4.md` Decision 70 → 71).** First
+      scope-deferred (Decision 70: a faithful derived catalog is
+      DB-filtered and needed a `mili-rs` core derived-enumeration
+      accessor that did not exist — a re-port, not the `queriable_svars`
+      reshape; blocker named, core-port call surfaced to the
+      maintainer). The maintainer authorized that core port as its own
+      milestone, which landed: `mili-rs` `reshape.rs` gained
+      `supported_derived_variables` / `derived_variables_of_class` /
+      `classes_of_derived_variable` + a 55-entry `DERIVED_REGISTRY`
+      faithfully transcribed from `derived.py` (enum `.value`s pulled
+      from the `mili` oracle), composing the already parity-gated
+      primal reshapes — a reshape, decision-19 invariant intact, no
+      derived value math in the enumeration path. Corpus-wide
+      `parity_derived_enum.rs` gates it vs `_MiliInternal` (10
+      fixtures: supported/of_class exact, classes_of set-equal — class
+      order is `mesh_object_classes`' orthogonal concern;
+      `../mili-py/m4.md` Decision 28). Server `catalog_blob` now emits a
+      `D\t<name>` section (union over classes, deduped) in the
+      unchanged `MVCAT1` blob / `CATALOG_TICKET` / Flight `DoGet` — no
+      `.proto`/blob/ticket/RPC/message change. Client `ResultCatalog`
+      gained `derived`; `decode_catalog` routes `D` (future `T` still
+      skipped); the left-dock `derived` sub-tree lists the run's real
+      `catalog.derived` with a `derived · N` badge (selectable → same
+      `UiAction::Show` as `primal`), `Results · N` =
+      `derived+primal`. **VB-001 preserved**: default `ShellState`
+      (`catalog: None`) renders byte-identically — `derived` falls
+      back to the static `DERIVED_RESULTS`, bare `derived` header, badge
+      `DERIVED_RESULTS.len()`; the real catalog lights up only when a
+      run is attached. Gating: `mili-rs` lib (148) + the new corpus
+      parity binary; `crates/mili-viz-server/tests/catalog.rs`
+      (non-empty deduped `D` for `serial/basic1`, every line P/D-tagged,
+      Flight `DoGet` byte-identical to the in-process seam);
+      `crates/mili-viz-client/tests/result_catalog.rs` (decode routes
+      P+D + skips unknown, default catalog `None`, wired shell paints
+      inert with/without a derived catalog, composite over the real
+      fetched catalog). `time-indep` unaffected — still the honest
+      Decision-69 placeholder (a re-port with no `mili` oracle; not in
+      this milestone).
     - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
       `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
       68).** `shell.rs::status_bar` rendered a literal `proto v1` and
