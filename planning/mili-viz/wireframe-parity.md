@@ -92,7 +92,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| attached / proto / pick / fps row | 🟡 partial | `proto v1` hard-coded, no peer count; `pick:` now **live** (client-side ray-cast readout, off by default) | status 23 |
+| attached / proto / pick / fps row | ✅ done | `proto v1` is now the **major** of the single-source `mili_viz_proto::v1::PROTOCOL_VERSION` (compile-time, not a `Hello` round-trip — Decision 68; byte-identical to the old literal so the VB-001 seam is unmoved); honest **local** peer count `(1 peer)` shown attached-state only (real `n peer(s)` fan-out is M6 — "Multi-client peer banner"); not-attached carries no peer cell (byte-stable). `pick:` is **live** (client-side ray-cast readout, off by default) | phase-5-m4 Dec 68 / status 23 |
 
 ## Tweaks / Preferences
 

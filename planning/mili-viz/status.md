@@ -1184,6 +1184,23 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       composites the mesh). The windowed `apply_loaded` fetch site is
       not headlessly verifiable; the `Session::fetch_catalog` API it
       calls is.
+    - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
+      `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
+      68).** `shell.rs::status_bar` rendered a literal `proto v1` and
+      no peer count. The proto cell is now the **major** of the
+      single-source `mili_viz_proto::v1::PROTOCOL_VERSION` (compile-
+      time — the in-process `Session` never runs `Hello`, so the
+      constant *is* the truth; negotiated-`Hello` is deferred to M5
+      remote mode), byte-identical to the old literal so the default
+      `ShellState` composite seam is unmoved (VB-001). An honest
+      **local** `(1 peer)` is shown attached-state only — the real
+      `n peer(s)` fan-out + peer banner is M6; not-attached carries no
+      peer cell, so the byte-stable path is unperturbed. No `.proto`
+      change, no Phase 4 crate touched. Gating
+      `tests/status_bar_proto_peer.rs` (always-on: the proto cell
+      tracks the constant major and is byte-stable, not-attached has
+      no peer cell, attached gains `(1 peer)`; skip-on-absent
+      composite: the default not-attached frame still shows the mesh).
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

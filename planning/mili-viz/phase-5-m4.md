@@ -240,6 +240,39 @@ labelled placeholder, not a stub that pretends to be live; a real TI
 catalog is follow-up work (a mili-rs accessor + the same `T` tag the
 blob format already reserves).
 
+### Decision 68 — the status-bar `proto` cell is the **compile-time** `PROTOCOL_VERSION` major (single source of truth, no `Hello` round-trip); the peer count is the honest **local** count, attached-state only, until the M6 multi-client fan-out
+
+**Problem (MVP polish, `wireframe-parity.md` "Status bar" 🟡).** The
+status bar hard-coded `ui.monospace("proto v1")` and showed no peer
+count; the wireframe row is `attached / proto / pick / fps` with the
+peer count pushed right next to fps. Two scope questions: (a) surface
+the compile-time `mili_viz_proto::v1::PROTOCOL_VERSION` (`"1.0.0"`) or
+a value negotiated from `HelloReply`; (b) what an honest peer count is
+when the multi-client banner is explicitly M6/deferred.
+
+**Decision.** **(a) Compile-time, the major component.** The frozen
+contract's identity is its *major* version — `Hello` negotiates
+"major must match" (`mili-viz-proto` `PROTOCOL_VERSION` doc) — so the
+cell is `proto v{major}` derived from the constant, not a literal: it
+follows the constant if the major ever bumps and stays **byte-
+identical** to the old `proto v1` for the default `ShellState`, so the
+VB-001 composite seam is unmoved. Negotiated-`Hello` is deliberately
+**out of scope**: the in-process `Session` (`session.rs`) is the only
+transport today and never runs `Hello`, so a negotiated value would
+mean a new `Hello` round-trip + `ShellState` field for zero behavioural
+gain — the constant *is* the truth with no runtime state. If/when M5
+remote mode adds a real `Hello`, the negotiated value can replace the
+constant behind the same cell with no wireframe change.
+**(b) Honest local count, attached-state only.** The real `n peer(s)`
+fan-out + peer banner is M6 (`wireframe-parity.md` "Multi-client peer
+banner"); an in-process session is exactly one local peer, so the
+truthful minimal is `(1 peer)` rendered in the right-aligned group
+next to fps **only when attached**. Not-attached (the default state)
+renders no peer cell — exactly as before — so the byte-stable
+composite path is unperturbed. No `.proto` change, no Phase 4 crate
+touched. Regression: `tests/status_bar_proto_peer.rs` (always-on text
+invariant + skip-on-absent composite).
+
 ## Resolved: File→Open / interactive load deferred (Part-1 item 3)
 
 **File→Open / interactive load (usability gap, not a bug).**

@@ -1319,19 +1319,49 @@ fn time_history_tab(ui: &mut egui::Ui, state: &ShellState) {
         });
 }
 
+/// Spec status-bar protocol cell. The frozen contract's identity is
+/// its **major** version (`Hello` negotiates "major must match" —
+/// `mili-viz-proto` `PROTOCOL_VERSION` doc), so the wireframe's
+/// `proto v1` is the major of the single-source-of-truth constant, not
+/// a hard-coded literal — it follows the constant if the contract's
+/// major ever bumps, and stays byte-identical to the M3 composite
+/// baseline today (`1.0.0` → `proto v1`). Compile-time, not negotiated:
+/// the in-process `Session` is the only transport and never runs
+/// `Hello`, so the constant *is* the truth here with no runtime state.
+fn proto_cell() -> String {
+    let major = mili_viz_proto::v1::PROTOCOL_VERSION
+        .split('.')
+        .next()
+        .unwrap_or("1");
+    format!("proto v{major}")
+}
+
 fn status_bar(ui: &mut egui::Ui, state: &ShellState) {
     ui.horizontal_centered(|ui| {
-        let txt = match state.phase {
-            SessionPhase::NotAttached => "— not attached —".to_string(),
-            _ => format!("● attached {}@{}", state.session_id, state.host),
+        let attached = state.phase != SessionPhase::NotAttached;
+        let txt = if attached {
+            format!("● attached {}@{}", state.session_id, state.host)
+        } else {
+            "— not attached —".to_string()
         };
         ui.monospace(txt);
         ui.separator();
-        ui.monospace("proto v1");
+        ui.monospace(proto_cell());
         ui.separator();
         ui.monospace(format!("pick: {}", state.pick));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace(format!("fps {:.0}", state.fps));
+            // Honest local peer count, attached state only. The
+            // multi-client peer banner / real `n peer(s)` fan-out is
+            // M6 (`wireframe-parity.md` "Multi-client peer banner");
+            // an in-process session is exactly one local peer, so the
+            // truthful minimal is `(1 peer)`. Not-attached renders no
+            // peer cell — exactly as today — so the default-`ShellState`
+            // composite gate (VB-001) is unperturbed.
+            if attached {
+                ui.separator();
+                ui.monospace("(1 peer)");
+            }
         });
     });
 }
