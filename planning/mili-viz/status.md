@@ -1243,7 +1243,24 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       inert with/without a derived catalog, composite over the real
       fetched catalog). `time-indep` unaffected — still the honest
       Decision-69 placeholder (a re-port with no `mili` oracle; not in
-      this milestone).
+      this milestone). **`mili-py`/`milox` bridge follow-up — ✅ LANDED
+      (`../mili-py/m4.md` Decision 29).** Decision 28 deferred the
+      Python bridge as a clean separable follow-up (the viz server
+      consumes the Rust `Database` directly). Now closed:
+      `crates/mili-py/src/database.rs` gained three thin pyo3
+      pass-throughs (mirroring `queriable_svars` /
+      `classes_of_state_variable` / `state_variables_of_class`), and
+      `milox/derived.py`'s duplicated Python re-implementation of
+      `supported_variables` / `derived_variables_of_class` /
+      `classes_of_derived_variable` (+ `__variable_exists_for_class`)
+      was replaced by delegation to the parity-gated Rust core — no
+      drift surface left. `__derived_expressions` retained verbatim
+      (still backs `derived_variable_titles` / `find_batchable_queries`;
+      value `compute_function`s still the decision-19 typed-error stub).
+      Gating: strict 0-xfail `pytest -q crates/mili-py/tests` (950
+      passed — the redirected upstream `test_derived` listing methods
+      now exercise the bridge end to end); no new Rust binary (decision
+      28's `parity_derived_enum.rs` already owns the core coverage).
     - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
       `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
       68).** `shell.rs::status_bar` rendered a literal `proto v1` and
