@@ -41,7 +41,7 @@ started.
 | `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
 | `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
-| View / Preferences (theme, layout tweaks) | ⬜ missing | no menu to host the Tweaks set | — |
+| View / Preferences (theme, layout tweaks) | ✅ done | `Preferences` menu hosts the Tweaks set: `Theme` (dark/light → `UiAction::SetTheme`, applied via egui visuals in `build_shell_ui`) + `Left dock collapsed` (→ `UiAction::SetDockCollapsed`, L1 ↔ 28 px rail). Pure-client, no proto change | status 23 |
 
 ## Toolbar
 
@@ -97,7 +97,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | ⬜ missing | no surface at all; `let _ = Overlay::Title;` marks the unbuilt persistence hook | — |
+| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | 🟡 partial | `Preferences` menu surfaces **Theme** + **Left dock collapsed** (pure-client, `SetTheme`/`SetDockCollapsed`, returned for persistence). Bottom-tab hide is already reachable via the tab strip's `▾ hide`; **AI-panel position** is M6 (panel is a placeholder). Cross-session persistence of the returned actions still unbuilt (`app.rs` `let _ = Overlay::Title;` hook) | status 23 |
 
 ## Renderer / rendering modes
 
@@ -135,7 +135,10 @@ leverage:
    landed; a viewport highlight glyph + label-catalog mapping remain.
 5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. **File → Open** (lift the deferral if MVP needs it).
-7. **L3 focus mode + theme/tweaks surface.**
+7. 🟡 **L3 focus mode + theme/tweaks surface** — the `Preferences`
+   menu + Theme + Left-dock-collapse landed; the full L3 focus mode
+   (dock→icon rail *plus* AI/tabs hidden via `Ctrl+\`) and
+   cross-session tweak persistence remain.
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto
    catalog path — design first).
 9. 🟡 **Wire the scripting tab** — done as a `launch()`-based

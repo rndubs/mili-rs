@@ -995,6 +995,33 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       skip-on-absent composite render proving the closed-by-default
       menu leaves the M3 seam byte-stable). The menu-open click path is
       windowed pointer input, **not headlessly verifiable in CI**.
+    - **View / Preferences tweaks surface (MVP-cut 7, partial).** A new
+      `Preferences` menu hosts the wireframe Tweaks set. The legacy
+      griz menu bar has no settings menu, so the wireframe maps the
+      Tweaks to a "View / Preferences" menu; MVP scope is the two
+      pure-client tweaks needing no proto/contract change: **Theme**
+      (`Theme::Dark`/`Light` → `UiAction::SetTheme`; `build_shell_ui`
+      applies the egui `Visuals` each frame — default `Dark` *is*
+      egui's `Visuals::dark()`, so the default composite path is
+      pixel-unchanged and VB-001 is unaffected) and **Left dock
+      collapsed** (`UiAction::SetDockCollapsed` → the L1 230 px dock
+      becomes a 28 px click-to-expand rail; default `false` so
+      `scene_frac` / the composite gate are unchanged). "Show bottom
+      tabs" is already reachable via the tab strip's `▾ hide`;
+      "AI panel position" is M6 (the panel is a placeholder). Both
+      actions are returned for the (still-unbuilt) cross-session
+      persistence hook (`app.rs` `let _ = Overlay::Title;`). No proto
+      change, no new contract, no Phase 4 crate touched. Gating test
+      `crates/mili-viz-client/tests/preferences_tweaks.rs` (always-on:
+      pure/observable switches, byte-stable defaults, input-free paint
+      in every theme×collapse combo, and a no-GPU `scene_frac`-widens
+      check that the collapse re-lays-out; skip-on-absent composite
+      render proving the default seam is unperturbed and the
+      Light+collapsed render still composites over the unchanged mesh
+      pass while visibly relighting the chrome). The menu-open click
+      path is windowed pointer input, **not headlessly verifiable in
+      CI**. Full L3 focus mode (`Ctrl+\`, AI/tabs hidden too) and the
+      persistence wiring remain.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
