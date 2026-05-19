@@ -39,7 +39,7 @@ started.
 | ---- | ------ | ----- | --- |
 | `Results · Time · Plot · Help` items | 🔴 placeholder | the other 4 are still `ui.menu_button(m, |_| {})` — open but empty | — |
 | `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
-| `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
+| `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode`. The `LineList` edge pipeline carried an illegal non-zero depth bias that aborted startup on a real device — fixed (zero bias + `LessEqual`), now device-verified by `tests/vb004_edge_pipeline_validation.rs` | VB-003 / VB-004 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
 | View / Preferences (theme, layout tweaks) | ✅ done | `Preferences` menu hosts the Tweaks set: `Theme` (dark/light → `UiAction::SetTheme`, applied via egui visuals in `build_shell_ui`) + `Left dock collapsed` (→ `UiAction::SetDockCollapsed`, L1 ↔ 28 px rail). Pure-client, no proto change | status 23 |
 
@@ -92,7 +92,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| attached / proto / pick / fps row | 🟡 partial | `proto v1` hard-coded, no peer count; `pick:` now **live** (client-side ray-cast readout, off by default) | status 23 |
+| attached / proto / pick / fps row | ✅ done | `proto v1` is now the **major** of the single-source `mili_viz_proto::v1::PROTOCOL_VERSION` (compile-time, not a `Hello` round-trip — Decision 68; byte-identical to the old literal so the VB-001 seam is unmoved); honest **local** peer count `(1 peer)` shown attached-state only (real `n peer(s)` fan-out is M6 — "Multi-client peer banner"); not-attached carries no peer cell (byte-stable). `pick:` is **live** (client-side ray-cast readout, off by default) | phase-5-m4 Dec 68 / status 23 |
 
 ## Tweaks / Preferences
 

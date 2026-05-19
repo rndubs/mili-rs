@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 [dev-dependencies]
 glam = "0.32"
 egui = "0.34.2"
+mili-viz-proto = { path = "../mili-viz-proto" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [lints]

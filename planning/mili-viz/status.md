@@ -918,6 +918,18 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       menu-bar `Rendering` menu now hosts the three-way toggle,
       emitting the pure-client `UiAction::SetRenderMode` (no proto
       change). See `bug-tracker.md` VB-003.
+    - **Edge pipeline startup abort fixed (VB-004 — `fixed`).** The
+      VB-003 `LineList` edge pipeline carried a non-zero
+      `DepthBiasState`; wgpu 29 rejects depth bias on a non-triangle
+      topology, so `Renderer::new` aborted at startup on a real device
+      (macOS/Metal) — invisible to the `Shaded`-only composite gate.
+      Fix is client-side / no proto change: zero the edge pipeline's
+      depth bias and rely on the existing `LessEqual` compare (the
+      edges share the triangle vertices, so coincident edges still
+      draw over the fill). New always-on/skip-on-absent regression
+      `tests/vb004_edge_pipeline_validation.rs` builds a real
+      `Renderer` under a wgpu validation scope. See `bug-tracker.md`
+      VB-004.
     - **Client-side picking + live status-bar readout (MVP-cut 4).**
       `Camera::ray_from_screen` unprojects the cursor; `Mesh::pick`
       (two-sided Möller–Trumbore over the cached hull) returns the hit
@@ -1172,6 +1184,23 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       composites the mesh). The windowed `apply_loaded` fetch site is
       not headlessly verifiable; the `Session::fetch_catalog` API it
       calls is.
+    - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
+      `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
+      68).** `shell.rs::status_bar` rendered a literal `proto v1` and
+      no peer count. The proto cell is now the **major** of the
+      single-source `mili_viz_proto::v1::PROTOCOL_VERSION` (compile-
+      time — the in-process `Session` never runs `Hello`, so the
+      constant *is* the truth; negotiated-`Hello` is deferred to M5
+      remote mode), byte-identical to the old literal so the default
+      `ShellState` composite seam is unmoved (VB-001). An honest
+      **local** `(1 peer)` is shown attached-state only — the real
+      `n peer(s)` fan-out + peer banner is M6; not-attached carries no
+      peer cell, so the byte-stable path is unperturbed. No `.proto`
+      change, no Phase 4 crate touched. Gating
+      `tests/status_bar_proto_peer.rs` (always-on: the proto cell
+      tracks the constant major and is byte-stable, not-attached has
+      no peer cell, attached gains `(1 peer)`; skip-on-absent
+      composite: the default not-attached frame still shows the mesh).
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
