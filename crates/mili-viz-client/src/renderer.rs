@@ -189,9 +189,16 @@ impl Renderer {
 
         // Edge / wireframe line pipeline (VB-003). Reuses the camera
         // bind group and the same vertex buffer (only `position`,
-        // attribute 0, is read). Depth-tested `LessEqual` with a small
-        // negative bias so the lines sit cleanly on the coincident
-        // triangle faces in the overlay mode without z-fighting.
+        // attribute 0, is read). Depth-tested `LessEqual` with **zero**
+        // depth bias: wgpu 29 rejects a non-zero `DepthBiasState` on a
+        // non-triangle topology (`LineList`) at pipeline creation
+        // (VB-004). The edges are extracted from the triangle mesh and
+        // share its exact vertices, so along a coincident face edge the
+        // interpolated depth equals the triangle's and `LessEqual`
+        // alone keeps the line on top of the fill in the overlay mode —
+        // no bias needed for the common case (minor z-fight only where
+        // a line crosses a *different*, near-coincident face; see
+        // bug-tracker VB-004).
         let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mili-viz edge shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
@@ -229,11 +236,7 @@ impl Renderer {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: -1,
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

@@ -20,6 +20,52 @@ Conventions:
 
 ---
 
+## VB-004 — edge pipeline aborts startup (depth bias on `LineList`)
+
+- **Status:** fixed
+- **Reported:** 2026-05-19 (maintainer feedback, release binary on a
+  real corpus, macOS/Metal)
+- **Symptom:** the release binary aborts at startup on a real device:
+
+  ```
+  wgpu error: Validation Error
+    In Device::create_render_pipeline, label = 'edge pipeline'
+      Depth/stencil state is invalid
+        Depth bias is not compatible with non-triangle topology LineList
+  ```
+
+  `Renderer::new` runs inside a non-unwinding winit callback, so the
+  panicking uncaptured-error handler aborts the process.
+- **Root cause:** the VB-003 edge pipeline (`renderer.rs`) is a
+  `PrimitiveTopology::LineList` pass but carried a non-zero
+  `DepthBiasState { constant: -1, slope_scale: -1.0, .. }` (added to
+  pull the hidden-line overlay in front of the coincident faces).
+  wgpu 29 validation rejects any non-zero depth bias on a non-triangle
+  topology at pipeline-creation time. The `Shaded` triangle pipeline
+  (`DepthBiasState::default()`) is fine, and the headless composite
+  gate only exercises `Shaded`, so CI never built the edge pipeline.
+- **Fix:** **client-side, no proto change.** The edge pipeline now uses
+  `DepthBiasState::default()` (zero — legal for `LineList`). The
+  overlay still draws on top because the edges are extracted from the
+  triangle mesh and share its exact vertices: along a coincident face
+  edge the interpolated fragment depth equals the triangle's, so the
+  existing `depth_compare: LessEqual` already lets the line pass over
+  the fill — the bias was redundant for the common (on-face-edge)
+  case. **Tradeoff:** where an edge passes *in front of a different,
+  near-coincident face* it no longer gets the ~1-unit pull toward the
+  camera, so minor z-fighting is possible on such crossings; acceptable
+  versus aborting at startup, and not observed on `bar71.pltA`. A
+  legal slope-independent pull (constant offset in the line vertices /
+  a depth-range tweak) is a future polish if z-fight is reported.
+- **Commit:** `branch:claude/fix-depth-bias-validation-ZppGM` ·
+  `status.md` item 23.
+- **Regression test:** `tests/vb004_edge_pipeline_validation.rs` —
+  builds a real `Renderer` via `headless_device()` inside a
+  `wgpu::ErrorFilter::Validation` scope and asserts `pop_error_scope`
+  is `None`, so the edge/wireframe pipeline is validated in CI even
+  though the composite gate stays on `Shaded`. Skip-on-absent when no
+  adapter (CLAUDE.md), always-on otherwise.
+
 ## VB-003 — mesh/element outlines unimplemented
 
 - **Status:** fixed

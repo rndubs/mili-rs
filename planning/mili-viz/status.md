@@ -918,6 +918,18 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       menu-bar `Rendering` menu now hosts the three-way toggle,
       emitting the pure-client `UiAction::SetRenderMode` (no proto
       change). See `bug-tracker.md` VB-003.
+    - **Edge pipeline startup abort fixed (VB-004 — `fixed`).** The
+      VB-003 `LineList` edge pipeline carried a non-zero
+      `DepthBiasState`; wgpu 29 rejects depth bias on a non-triangle
+      topology, so `Renderer::new` aborted at startup on a real device
+      (macOS/Metal) — invisible to the `Shaded`-only composite gate.
+      Fix is client-side / no proto change: zero the edge pipeline's
+      depth bias and rely on the existing `LessEqual` compare (the
+      edges share the triangle vertices, so coincident edges still
+      draw over the fill). New always-on/skip-on-absent regression
+      `tests/vb004_edge_pipeline_validation.rs` builds a real
+      `Renderer` under a wgpu validation scope. See `bug-tracker.md`
+      VB-004.
     - **Client-side picking + live status-bar readout (MVP-cut 4).**
       `Camera::ray_from_screen` unprojects the cursor; `Mesh::pick`
       (two-sided Möller–Trumbore over the cached hull) returns the hit

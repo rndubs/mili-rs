@@ -39,7 +39,7 @@ started.
 | ---- | ------ | ----- | --- |
 | `Results · Time · Plot · Help` items | 🔴 placeholder | the other 4 are still `ui.menu_button(m, |_| {})` — open but empty | — |
 | `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
-| `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
+| `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode`. The `LineList` edge pipeline carried an illegal non-zero depth bias that aborted startup on a real device — fixed (zero bias + `LessEqual`), now device-verified by `tests/vb004_edge_pipeline_validation.rs` | VB-003 / VB-004 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
 | View / Preferences (theme, layout tweaks) | ✅ done | `Preferences` menu hosts the Tweaks set: `Theme` (dark/light → `UiAction::SetTheme`, applied via egui visuals in `build_shell_ui`) + `Left dock collapsed` (→ `UiAction::SetDockCollapsed`, L1 ↔ 28 px rail). Pure-client, no proto change | status 23 |
 
