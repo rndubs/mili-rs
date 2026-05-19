@@ -1205,6 +1205,31 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       reserved `T` tag + `decode_catalog`'s unknown-tag tolerance mean
       a future `mili-rs` core TI-results accessor (the named blocker)
       lights this up with no wire/proto/ticket change.
+    - **`derived` result catalog — deferred (Decision-67
+      continuation, scope-guarded; `phase-5-m4.md` Decision 70).** The
+      `Results → derived` left-dock sub-tree **stays** the hard-coded
+      7-name representative `DERIVED_RESULTS` (openly labelled as
+      representative). Same scope-guard outcome as time-indep
+      (Decision 69), parallel reason: a faithful derived catalog is
+      DB-filtered (griz iterates `analy->derived_results`; mili-python
+      `supported_derived_variables` / `derived_variables_of_class` over
+      `derived.py`'s `__derived_expressions` registry of required
+      primals + eligible classes), and `mili-rs`/`mili-py` have **no**
+      such accessor or enumerable registry — derived handling is
+      deliberately scattered across per-name `*_spec`/`*_primals`
+      functions + the server's `geometry.rs` dispatch (the M5 "reuse,
+      don't re-port" boundary). Building it is a substantive `mili-rs`
+      **core** re-port with a `mili` oracle, an architecturally-
+      significant separate milestone — surfaced to the maintainer, not
+      forced as a viz reshape. A DB-filtered curated subset was
+      rejected as the live-looking stub Decision 67/69 forbid. **Zero
+      code change** ⇒ the byte-stable headless composite path (default
+      `ShellState`, `catalog: None`,
+      `Results · DERIVED_RESULTS.len()` badge, the exact existing
+      `derived` listing) is trivially unperturbed (VB-001). Forward
+      seam clean: the blob's reserved tag space +
+      `decode_catalog`'s unknown-tag tolerance light a future
+      `D`-tagged section with no wire/proto/ticket change.
     - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
       `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
       68).** `shell.rs::status_bar` rendered a literal `proto v1` and
