@@ -349,6 +349,13 @@ better than a faithful-looking lie.
 
 ### Decision 70 — the `derived` result catalog stays the hard-coded representative set: a faithful derived catalog needs a `mili-rs` **core** derived registry + eligibility port (with a `mili` oracle), not a viz reshape — same scope guard as Decision 69, blocker named
 
+> **Superseded by Decision 71.** The named blocker — a `mili-rs` core
+> derived-enumeration accessor + `mili` oracle — was authorized by the
+> maintainer as a separate core milestone and has now landed
+> (`../mili-py/m4.md` Decision 28); the `derived` catalog is real. The
+> scope analysis below stands as the record of *why* it was correctly
+> deferred out of the viz mini-milestone until the core port existed.
+
 **Problem (next `wireframe-parity.md` slice, scope-guarded).** With
 `primal` real (Decision 67) and `time-indep` deferred (Decision 69),
 the remaining catalog gap is `Results → derived` (`wireframe-parity.md`
@@ -425,6 +432,54 @@ Decision 67/69 forbade, no faithful registry, no parity oracle for the
 "representative", already byte-stable — is strictly better than a
 faithful-looking lie, and the real fix is a clean, separately-scoped
 core milestone, not a forced viz reshape.
+
+### Decision 71 — the `derived` result catalog is now real: the maintainer-authorized `mili-rs` core derived-enumeration milestone landed, so the catalog blob carries a DB-filtered `D` section (discharges Decision 70's blocker; the `queriable_svars`-shaped reshape continuation of Decision 67)
+
+**What changed.** Decision 70 deferred `derived` because a faithful
+catalog needed a `mili-rs` core derived-enumeration accessor that did
+not exist; the maintainer authorized that core port as its own
+milestone (`../mili-py/m4.md` Decision 28 — the oracle-gated
+`supported_derived_variables` / `derived_variables_of_class` /
+`classes_of_derived_variable` reshape). With the blocker discharged the
+viz slice is exactly the `queriable_svars`-shaped reshape Decision 67
+established for `primal`, and is landed end to end:
+
+- **Server.** `mili-viz-server`'s `catalog_blob` appends a `D\t<name>`
+  section after `P`: the union over the mesh's element classes of
+  `Database::derived_variables_of_class`, deduped first-seen — the
+  faithful DB-filtered analog of griz's `analy->derived_results`. **No
+  `mili_viz.proto`/blob/ticket/RPC/message change** (the blob already
+  reserved tag space; `MVCAT1` format unchanged). `None`/no-run still
+  yields no catalog, so the byte-stable composite gate is unmoved.
+- **Client.** `ResultCatalog` gains `derived: Vec<String>`;
+  `decode_catalog` routes `D` lines (unknown tags — a future `T` —
+  still skipped). The left-dock `derived` sub-tree lists the run's
+  `catalog.derived` with a `derived · N` badge (selectable → the same
+  `UiAction::Show` as `primal`); `Results · N` is now
+  `derived.len() + primal.len()` from the real catalog.
+- **Byte-stability (VB-001) preserved.** A default `ShellState`
+  (`catalog: None`) renders **exactly** as before: `derived` falls
+  back to the static `DERIVED_RESULTS`, the header stays the bare
+  `derived` (no badge), the `Results · N` badge stays
+  `DERIVED_RESULTS.len()`, `primal`/`time-indep` keep their
+  placeholders. The real catalog lights up only once a run is
+  attached (a non-default state). `m1/m2/m3/m3_5` composite seams +
+  `result_catalog.rs` green; the real Flight `DoGet` stays
+  byte-identical to the in-process seam (`catalog.rs`).
+
+`time-indep` is unaffected — it remains the honest placeholder of
+Decision 69 (still a re-port with no `mili` oracle; not in this
+milestone).
+
+**Trade-off recorded.** The conservative two-step — defer with the
+blocker named (Decision 70), land the core port as its own
+oracle-gated milestone (Decision 28), then take the now-trivial viz
+reshape (this decision) — was chosen over forcing a curated-subset
+"catalog" inside the viz mini-milestone (the live-looking stub
+Decision 67/69/70 reject) or unilaterally undertaking a core re-port
+without maintainer sign-off. The cost (two extra decisions + a
+deferral round-trip) bought a faithful, parity-gated derived catalog
+with zero frozen-contract movement.
 
 ## Resolved: File→Open / interactive load deferred (Part-1 item 3)
 

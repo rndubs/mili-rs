@@ -1205,31 +1205,45 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       reserved `T` tag + `decode_catalog`'s unknown-tag tolerance mean
       a future `mili-rs` core TI-results accessor (the named blocker)
       lights this up with no wire/proto/ticket change.
-    - **`derived` result catalog — deferred (Decision-67
-      continuation, scope-guarded; `phase-5-m4.md` Decision 70).** The
-      `Results → derived` left-dock sub-tree **stays** the hard-coded
-      7-name representative `DERIVED_RESULTS` (openly labelled as
-      representative). Same scope-guard outcome as time-indep
-      (Decision 69), parallel reason: a faithful derived catalog is
-      DB-filtered (griz iterates `analy->derived_results`; mili-python
-      `supported_derived_variables` / `derived_variables_of_class` over
-      `derived.py`'s `__derived_expressions` registry of required
-      primals + eligible classes), and `mili-rs`/`mili-py` have **no**
-      such accessor or enumerable registry — derived handling is
-      deliberately scattered across per-name `*_spec`/`*_primals`
-      functions + the server's `geometry.rs` dispatch (the M5 "reuse,
-      don't re-port" boundary). Building it is a substantive `mili-rs`
-      **core** re-port with a `mili` oracle, an architecturally-
-      significant separate milestone — surfaced to the maintainer, not
-      forced as a viz reshape. A DB-filtered curated subset was
-      rejected as the live-looking stub Decision 67/69 forbid. **Zero
-      code change** ⇒ the byte-stable headless composite path (default
-      `ShellState`, `catalog: None`,
-      `Results · DERIVED_RESULTS.len()` badge, the exact existing
-      `derived` listing) is trivially unperturbed (VB-001). Forward
-      seam clean: the blob's reserved tag space +
-      `decode_catalog`'s unknown-tag tolerance light a future
-      `D`-tagged section with no wire/proto/ticket change.
+    - **`derived` result catalog — ✅ LANDED (Decision-67
+      continuation; `phase-5-m4.md` Decision 70 → 71).** First
+      scope-deferred (Decision 70: a faithful derived catalog is
+      DB-filtered and needed a `mili-rs` core derived-enumeration
+      accessor that did not exist — a re-port, not the `queriable_svars`
+      reshape; blocker named, core-port call surfaced to the
+      maintainer). The maintainer authorized that core port as its own
+      milestone, which landed: `mili-rs` `reshape.rs` gained
+      `supported_derived_variables` / `derived_variables_of_class` /
+      `classes_of_derived_variable` + a 55-entry `DERIVED_REGISTRY`
+      faithfully transcribed from `derived.py` (enum `.value`s pulled
+      from the `mili` oracle), composing the already parity-gated
+      primal reshapes — a reshape, decision-19 invariant intact, no
+      derived value math in the enumeration path. Corpus-wide
+      `parity_derived_enum.rs` gates it vs `_MiliInternal` (10
+      fixtures: supported/of_class exact, classes_of set-equal — class
+      order is `mesh_object_classes`' orthogonal concern;
+      `../mili-py/m4.md` Decision 28). Server `catalog_blob` now emits a
+      `D\t<name>` section (union over classes, deduped) in the
+      unchanged `MVCAT1` blob / `CATALOG_TICKET` / Flight `DoGet` — no
+      `.proto`/blob/ticket/RPC/message change. Client `ResultCatalog`
+      gained `derived`; `decode_catalog` routes `D` (future `T` still
+      skipped); the left-dock `derived` sub-tree lists the run's real
+      `catalog.derived` with a `derived · N` badge (selectable → same
+      `UiAction::Show` as `primal`), `Results · N` =
+      `derived+primal`. **VB-001 preserved**: default `ShellState`
+      (`catalog: None`) renders byte-identically — `derived` falls
+      back to the static `DERIVED_RESULTS`, bare `derived` header, badge
+      `DERIVED_RESULTS.len()`; the real catalog lights up only when a
+      run is attached. Gating: `mili-rs` lib (148) + the new corpus
+      parity binary; `crates/mili-viz-server/tests/catalog.rs`
+      (non-empty deduped `D` for `serial/basic1`, every line P/D-tagged,
+      Flight `DoGet` byte-identical to the in-process seam);
+      `crates/mili-viz-client/tests/result_catalog.rs` (decode routes
+      P+D + skips unknown, default catalog `None`, wired shell paints
+      inert with/without a derived catalog, composite over the real
+      fetched catalog). `time-indep` unaffected — still the honest
+      Decision-69 placeholder (a re-port with no `mili` oracle; not in
+      this milestone).
     - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
       `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
       68).** `shell.rs::status_bar` rendered a literal `proto v1` and
