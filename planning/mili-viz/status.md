@@ -973,6 +973,28 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       render proving the open body composites and the collapsed seam is
       byte-stable). The `pygriz` **subprocess** itself is windowed-only
       and **not headlessly verifiable in CI**.
+    - **`Control` menu wired (MVP-cut 1).** The last open-but-empty
+      `let _ = ui.menu_button("Control", |_| {})` placeholder is now a
+      real menu. The legacy griz `Control` Motif menu
+      (`reference/griz/Src/gui.c`) is session/app control
+      (Copyright, Material Mgr, Session save/load, Quit) — all needing
+      a proto or windowed-lifecycle contract this slice does not touch
+      — so, following the griz idiom of menus duplicating the toolbar/
+      `Time` menu, `Control` hosts the session-control verbs that
+      already have a `UiAction` *and* an `app.rs` lowering: transport
+      (`First`/`Prev`/`Next`/`Last`), `ToggleAnimate`/`StopAnimate`,
+      `ViewReset`/`Fit`. The rows are pure data (`control_menu_items`)
+      so the wiring unit-tests without driving egui pointer input; the
+      menu body is greyed when not attached (matching the toolbar). No
+      frozen-proto change, no new `UiAction`, no Phase 4 crate touched;
+      `ShellState` defaults are untouched so the M3 composite gate
+      stays byte-stable. Gating test
+      `crates/mili-viz-client/tests/control_menu.rs` (always-on:
+      `control_menu_items` is exactly the expected already-lowered
+      actions + the wired shell paints input-free in all three phases;
+      skip-on-absent composite render proving the closed-by-default
+      menu leaves the M3 seam byte-stable). The menu-open click path is
+      windowed pointer input, **not headlessly verifiable in CI**.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

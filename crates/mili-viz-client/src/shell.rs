@@ -267,6 +267,34 @@ s = griz.launch()
 print(s)
 ";
 
+/// The `Control` menu rows: a label plus the **already-existing,
+/// already-lowered** [`UiAction`] each emits (`wireframe-parity.md`
+/// "Menu bar"; MVP-cut item 1). The legacy griz `Control` Motif menu
+/// (`reference/griz/Src/gui.c`) is session/app control — Copyright,
+/// Material Mgr, Session save/load, Quit — all of which need a proto
+/// or windowed-lifecycle contract this slice deliberately does not
+/// touch. So `Control` instead hosts the session-control verbs that
+/// already have a `UiAction` and an `app.rs` lowering (the griz idiom
+/// of menus duplicating the toolbar / `Time` menu): transport,
+/// animate/stop, view-reset/fit. Pure data so the wiring is
+/// unit-testable without driving egui pointer input — the menu just
+/// iterates this and the windowed app lowers each variant exactly as
+/// the toolbar's clicks already do. No frozen-proto change, no new
+/// `UiAction`.
+#[must_use]
+pub fn control_menu_items() -> Vec<(&'static str, UiAction)> {
+    vec![
+        ("⏮ first state", UiAction::First),
+        ("◀ prev state", UiAction::Prev),
+        ("▶ next state", UiAction::Next),
+        ("⏭ last state", UiAction::Last),
+        ("▶/⏸ animate", UiAction::ToggleAnimate),
+        ("⏹ stop animate", UiAction::StopAnimate),
+        ("⟲ view reset", UiAction::ViewReset),
+        ("⊞ fit", UiAction::Fit),
+    ]
+}
+
 /// All shell state the layout is a pure function of.
 #[derive(Debug, Clone)]
 pub struct ShellState {
@@ -584,7 +612,24 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
         .exact_size(26.0)
         .show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                let _ = ui.menu_button("Control", |_| {});
+                ui.menu_button("Control", |ui| {
+                    // Transport/animate/view need an attached run, like
+                    // the toolbar's equivalents; grey the whole menu
+                    // body when not attached rather than emit no-ops.
+                    let attached = state.phase != SessionPhase::NotAttached;
+                    ui.add_enabled_ui(attached, |ui| {
+                        for (i, (label, action)) in control_menu_items().into_iter().enumerate() {
+                            // griz groups: transport | animate | view.
+                            if i == 4 || i == 6 {
+                                ui.separator();
+                            }
+                            // A `Button` click auto-closes the menu.
+                            if ui.button(label).clicked() {
+                                actions.push(action);
+                            }
+                        }
+                    });
+                });
                 ui.menu_button("Rendering", |ui| {
                     for mode in [RenderMode::Shaded, RenderMode::Edges, RenderMode::Wireframe] {
                         let mark = if state.render_mode == mode {

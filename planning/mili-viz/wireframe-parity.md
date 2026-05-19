@@ -37,7 +37,8 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Control · Results · Time · Plot · Help` items | 🔴 placeholder | the other 5 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Results · Time · Plot · Help` items | 🔴 placeholder | the other 4 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
 | `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
 | View / Preferences (theme, layout tweaks) | ⬜ missing | no menu to host the Tweaks set | — |
@@ -122,8 +123,10 @@ The maintainer-scoped MVP excludes the AI panel (M6) and remote mode
 (Phase 5 M5). The parity gaps that remain in-scope for MVP, roughly by
 leverage:
 
-1. **Menu bar** — 🟡 `Rendering` is now wired (VB-003); still to do:
-   `Control`, `Picking`, the View/Preferences host.
+1. **Menu bar** — 🟡 `Rendering` (VB-003), `Picking`, and `Control`
+   (session-control verbs, reusing the already-lowered
+   transport/animate/view `UiAction`s) are now wired; still to do:
+   the View/Preferences host.
 2. ✅ **Wireframe / element-edge render mode** (VB-003) + its
    `Rendering` toggle — done.
 3. ✅ **Materials enable/disable affordance** (server side already
