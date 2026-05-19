@@ -45,7 +45,7 @@ pub use renderer::{
 };
 pub use session::{fetch_server_mesh, Session};
 pub use shell::{
-    build_shell_ui, control_menu_items, BottomTab, LoadedInfo, Overlay, Overlays, RenderMode,
-    ResultInfo, SessionPhase, ShellState, Theme, TimeSample, TranscriptKind, TranscriptLine,
-    UiAction, DERIVED_RESULTS,
+    build_shell_ui, control_menu_items, dock_rail_glyphs, BottomTab, LoadedInfo, Overlay, Overlays,
+    RenderMode, ResultInfo, SessionPhase, ShellState, Theme, TimeSample, TranscriptKind,
+    TranscriptLine, UiAction, DERIVED_RESULTS,
 };

@@ -1046,6 +1046,31 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       carries no label catalog, so the `class N` mapping stays
       deferred (design-first). The windowed click→ray-cast path is
       **not headlessly verifiable in CI**.
+    - **Left-dock collapsed R/M/S/P icon rail (wireframe-parity Left
+      dock row; wireframes §"L3 — Focus mode").** The Preferences-slice
+      collapsed rail showed only a bare `▸`; it is now the wireframe's
+      `R/M/S/P` glyph column (Results/Materials/Surfaces/Picking). The
+      glyph set is pure data (`dock_rail_glyphs(picking)`) so the
+      wiring unit-tests without egui pointer input — the `P` hint
+      reflects the live picking state (the rail doubles as an
+      at-a-glance status), the other three are state-independent. Every
+      glyph's only action is to expand the dock
+      (`UiAction::SetDockCollapsed(false)`, already pinned by
+      `preferences_tweaks.rs`) — no proto change, no new `UiAction`, no
+      `app.rs` change, no Phase 4 crate touched. Default stays expanded
+      (`dock_collapsed` false) so `scene_frac` / the M3 composite gate
+      are byte-stable (`bug-tracker.md` VB-001). All four wireframe
+      left-dock sections (Runs/sessions, Results, Materials, Surfaces)
+      already carry a `· N` count badge; the Surfaces/primal counts
+      remain placeholders pending a real catalog path (design-first).
+      Gating test `crates/mili-viz-client/tests/dock_rail.rs`
+      (always-on: `dock_rail_glyphs` is exactly R/M/S/P with a
+      picking-tracking `P` hint + the collapsed shell paints input-free
+      in every phase×picking combo and the expanded default is
+      unchanged; skip-on-absent composite render proving the rail
+      composites over the unchanged mesh pass and the expanded seam is
+      byte-stable). The glyph-click→expand path is windowed pointer
+      input, **not headlessly verifiable in CI**.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

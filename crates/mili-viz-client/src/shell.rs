@@ -334,6 +334,31 @@ pub fn control_menu_items() -> Vec<(&'static str, UiAction)> {
     ]
 }
 
+/// The L3 focus-mode icon-rail entries (wireframes §"L3 — Focus mode":
+/// *R/M/S/P glyphs for Results / Materials / Surfaces / Picking*). Pure
+/// data: a single-char glyph + its hover text. The `Picking` entry's
+/// hint reflects the live picking state so the collapsed rail doubles
+/// as an at-a-glance status read-out. Every glyph's only action is to
+/// expand the dock (`UiAction::SetDockCollapsed(false)` — no proto, no
+/// new `UiAction`); the rail is the `dock_collapsed` view of the same
+/// left dock.
+#[must_use]
+pub fn dock_rail_glyphs(picking: bool) -> [(&'static str, &'static str); 4] {
+    [
+        ("R", "Results — expand dock"),
+        ("M", "Materials — expand dock"),
+        ("S", "Surfaces — expand dock"),
+        (
+            "P",
+            if picking {
+                "Picking: on — expand dock"
+            } else {
+                "Picking: off — expand dock"
+            },
+        ),
+    ]
+}
+
 /// All shell state the layout is a pure function of.
 #[derive(Debug, Clone)]
 pub struct ShellState {
@@ -772,18 +797,20 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
     bottom_tabs(ui, state, &mut actions);
 
     if state.dock_collapsed {
-        // L3-style left rail (wireframes §"Tweaks": *Left dock
-        // collapsed*): a 28 px strip with a click-to-expand glyph,
-        // mirroring the AI rail. Off by default so `scene_frac` / the
-        // composite gate are unchanged.
+        // L3 focus-mode icon rail (wireframes §"L3 — Focus mode" /
+        // §"Tweaks": *Left dock collapsed*): a 28 px strip showing the
+        // R/M/S/P section glyphs; any glyph expands the dock. Off by
+        // default so `scene_frac` / the composite gate are unchanged.
         egui::Panel::left("dock")
             .resizable(false)
             .exact_size(28.0)
             .show_inside(ui, |ui| {
                 ui.vertical_centered(|ui| {
-                    ui.add_space(8.0);
-                    if ui.button("▸").on_hover_text("expand left dock").clicked() {
-                        actions.push(state.set_dock_collapsed(false));
+                    ui.add_space(6.0);
+                    for (glyph, tip) in dock_rail_glyphs(state.picking) {
+                        if ui.button(glyph).on_hover_text(tip).clicked() {
+                            actions.push(state.set_dock_collapsed(false));
+                        }
                     }
                 });
             });

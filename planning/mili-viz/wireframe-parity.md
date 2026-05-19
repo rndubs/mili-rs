@@ -31,7 +31,7 @@ started.
 | ---- | ------ | ----- | --- |
 | L1 default layout (6 regions, egui panel mapping, default sizes) | ✅ done | `build_shell_ui` | status 16 |
 | L2 — AI panel expanded (28 px rail → 340 px dock) | ⬜ missing | right panel is a hard 28 px rail, no expand path | M6 |
-| L3 — focus mode (dock→icon rail, AI/tabs hidden, `Ctrl+\`) | ⬜ missing | — | — |
+| L3 — focus mode (dock→icon rail, AI/tabs hidden, `Ctrl+\`) | 🟡 partial | dock→28 px **R/M/S/P icon rail** landed (`dock_collapsed` + `dock_rail_glyphs`, toggled from the Preferences menu). Remaining: AI/tabs auto-hide + the `Ctrl+\` one-shot toggle | status 23 |
 
 ## Menu bar
 
@@ -60,7 +60,7 @@ started.
 | Colormap (ramp picker + manual legend limits) | ✅ done | extra vs wireframe but functional | phase-5-m4 Dec 66 |
 | Materials section | ✅ done | per-class row toggles visibility (● shown / ○ hidden, weak when off) → `UiAction::SetMaterialVisible` → frozen `Command::Material` | status 8 / 23 |
 | Surfaces section | 🔴 placeholder | `"(surfaces: M4+)"` | — |
-| Per-section row-count badges; Picking glyph row | ⬜ missing | only Results/Materials have a count | — |
+| Per-section row-count badges; Picking glyph row | 🟡 partial | all four wireframe sections (Runs/sessions, Results, Materials, Surfaces) carry a `· N` badge; the collapsed dock is now the wireframe **R/M/S/P icon rail** (`dock_rail_glyphs`, `P` hint tracks live picking) — any glyph expands the dock. Remaining: Surfaces/primal counts are still placeholders (no real catalog — design-first) | status 23 |
 
 ## Viewport overlays
 
