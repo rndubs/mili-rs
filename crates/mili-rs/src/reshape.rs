@@ -750,7 +750,241 @@ impl Database {
             library_version: s("lib version")?.unwrap_or_default(),
         })
     }
+
+    // ---- derived-variable enumeration ----
+    //
+    // Mirrors `mili.derived.DerivedExpressions`
+    // (`reference/mili-python/src/mili/derived.py`) and the three
+    // `_MiliInternal` pass-throughs (`miliinternal.py:531-565`). This
+    // is the *enumeration* surface only — which derived results exist
+    // and on which classes — built by composing the already
+    // parity-gated primal reshapes (`queriable_svars`,
+    // `classes_of_state_variable`, `mesh_object_classes`,
+    // `class_names`) with the static spec registry below. No derived
+    // *math* is ported here (that stays the `derived.rs` `*_spec`
+    // compute path); no new file parsing — a reshape, not a re-port.
+
+    /// `_MiliInternal.supported_derived_variables`
+    /// (`miliinternal.py:531` → `derived.py:603`
+    /// `list(self.__derived_expressions.keys())`). The static set of
+    /// derived names the library can compute *if* the required primals
+    /// exist — registry insertion order.
+    #[must_use]
+    pub fn supported_derived_variables(&self) -> Vec<String> {
+        DERIVED_REGISTRY
+            .iter()
+            .map(|e| e.name.to_string())
+            .collect()
+    }
+
+    /// `DerivedExpressions.__variable_exists_for_class`
+    /// (`derived.py:615-621`): `class_name in
+    /// classes_of_state_variable(variable)` OR (KeyError-guarded)
+    /// `class_name in classes_of_derived_variable(variable)`. A primal
+    /// req is never itself a registry name in the current spec, so the
+    /// derived branch is a terminating `Err`-as-`false` — no recursion.
+    fn derived_var_exists_for_class(&self, mesh: MeshId, variable: &str, class_name: &str) -> bool {
+        let primal_exists = self
+            .classes_of_state_variable(variable)
+            .is_some_and(|cs| cs.iter().any(|c| c == class_name));
+        let derived_exists = self
+            .classes_of_derived_variable(mesh, variable)
+            .is_ok_and(|cs| cs.iter().any(|c| c == class_name));
+        primal_exists || derived_exists
+    }
+
+    /// `_MiliInternal.derived_variables_of_class`
+    /// (`miliinternal.py:539` → `derived.py:624-657`). Empty when the
+    /// class is unknown (upstream returns `[]`). Registry order.
+    #[must_use]
+    pub fn derived_variables_of_class(&self, mesh: MeshId, class_name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.class_names(mesh).iter().any(|c| c == class_name) {
+            return out;
+        }
+        let Ok(mocs) = self.mesh_object_classes(mesh) else {
+            return out;
+        };
+        let Some(cdef) = mocs.iter().find(|c| c.short_name == class_name) else {
+            return out;
+        };
+        let sclass = cdef.sclass;
+        let queriable = self.queriable_svars(false, false);
+        let in_q = |n: &str| {
+            queriable.iter().any(|s| s == n) || DERIVED_REGISTRY.iter().any(|e| e.name == n)
+        };
+        for spec in DERIVED_REGISTRY {
+            if !spec.only_sclasses.is_empty() && !spec.only_sclasses.contains(&sclass) {
+                continue;
+            }
+            // `primals_found` only grows when *both* the
+            // queriable/registry gate and the class-existence gate
+            // pass, so a full count == `primals.len()` is upstream's
+            // `len(primals_found) == len(spec['primals']) and all(...)`.
+            let count = |reqs: &[&str]| -> usize {
+                reqs.iter()
+                    .zip(spec.primals_class.iter())
+                    .filter(|(rp, rpc)| {
+                        in_q(rp)
+                            && self.derived_var_exists_for_class(
+                                mesh,
+                                rp,
+                                rpc.unwrap_or(class_name),
+                            )
+                    })
+                    .count()
+            };
+            if count(spec.primals) == spec.primals.len() {
+                out.push(spec.name.to_string());
+            } else if !spec.alternate_primals.is_empty()
+                && count(spec.alternate_primals) == spec.primals.len()
+            {
+                // Upstream gates the alt branch on `len(spec['primals'])`
+                // (not `alternate_primals`); equal-length in the spec.
+                out.push(spec.name.to_string());
+            }
+        }
+        out
+    }
+
+    /// `_MiliInternal.classes_of_derived_variable`
+    /// (`miliinternal.py:553` → `derived.py:660-690`). `Err` when the
+    /// derived name is unknown (upstream raises `KeyError`). Class
+    /// order = `mesh_object_classes`.
+    pub fn classes_of_derived_variable(&self, mesh: MeshId, var_name: &str) -> Result<Vec<String>> {
+        let Some(spec) = DERIVED_REGISTRY.iter().find(|e| e.name == var_name) else {
+            return Err(crate::MiliError::UnknownSvar(var_name.to_string()));
+        };
+        let mocs = self.mesh_object_classes(mesh)?;
+        let all_same_class = spec.primals_class.iter().all(Option::is_none);
+        let mut out = Vec::new();
+        for c in &mocs {
+            if !spec.only_sclasses.is_empty() && !spec.only_sclasses.contains(&c.sclass) {
+                continue;
+            }
+            let ok = if all_same_class {
+                // CASE 1 (`derived.py:677-683`): every primal on the
+                // result's own class.
+                spec.primals
+                    .iter()
+                    .all(|p| self.derived_var_exists_for_class(mesh, p, &c.short_name))
+            } else {
+                // CASE 2 (`derived.py:685-690`): each primal on its
+                // declared class (never `None` in a CASE-2 spec).
+                spec.primals
+                    .iter()
+                    .zip(spec.primals_class.iter())
+                    .all(|(p, pc)| {
+                        self.derived_var_exists_for_class(
+                            mesh,
+                            p,
+                            pc.unwrap_or(c.short_name.as_str()),
+                        )
+                    })
+            };
+            if ok {
+                out.push(c.short_name.clone());
+            }
+        }
+        Ok(out)
+    }
 }
+
+/// One `DerivedExpressions.__derived_expressions` entry, reduced to the
+/// fields the *enumeration* accessors read (`derived.py:25-34`
+/// `DerivedSpec`): the compute fn / `supports_batching` are the
+/// compute path's concern (`derived.rs`), not enumeration's.
+struct DerivedRegEntry {
+    name: &'static str,
+    /// `spec['primals']` — required primal svar names.
+    primals: &'static [&'static str],
+    /// `spec['alternate_primals']` (empty = key absent).
+    alternate_primals: &'static [&'static str],
+    /// `spec['primals_class']`, `None` = "same class as the result"
+    /// (upstream's `None`); length always == `primals`.
+    primals_class: &'static [Option<&'static str>],
+    /// `spec['only_sclasses']` superclass codes (empty = key absent).
+    only_sclasses: &'static [i32],
+}
+
+// Shared column shapes (upstream repeats these verbatim per entry).
+const PC1: &[Option<&str>] = &[None];
+const PC2: &[Option<&str>] = &[None, None];
+const PC3: &[Option<&str>] = &[None, None, None];
+const PC6: &[Option<&str>] = &[None, None, None, None, None, None];
+const NODE1: &[Option<&str>] = &[Some("node")];
+const NODE3: &[Option<&str>] = &[Some("node"), Some("node"), Some("node")];
+const STRAIN6: &[&str] = &["ex", "ey", "ez", "exy", "eyz", "ezx"];
+const STRESS6: &[&str] = &["sx", "sy", "sz", "sxy", "syz", "szx"];
+const NO_ALT: &[&str] = &[];
+const NO_SC: &[i32] = &[];
+const SC_HEX_TET: &[i32] = &[Superclass::Hex as i32, Superclass::Tet as i32];
+const SC_QUAD: &[i32] = &[Superclass::Quad as i32];
+const SC_HEX: &[i32] = &[Superclass::Hex as i32];
+
+/// Faithful transcription of `derived.py`'s `__derived_expressions`
+/// dict (insertion order; `derived.py:56-600`). Enum `.value` strings
+/// extracted from the installed `mili.mdg_defines` oracle. The
+/// corpus-wide `parity_derived_enum.rs` gate validates this table
+/// transitively against `_MiliInternal`.
+#[rustfmt::skip]
+static DERIVED_REGISTRY: &[DerivedRegEntry] = &[
+    DerivedRegEntry { name: "disp_x", primals: &["ux"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "disp_y", primals: &["uy"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "disp_z", primals: &["uz"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "disp_mag", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: PC3, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "disp_rad_mag_xy", primals: &["ux", "uy"], alternate_primals: NO_ALT, primals_class: PC2, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "vel_x", primals: &["ux"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "vel_y", primals: &["uy"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "vel_z", primals: &["uz"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "acc_x", primals: &["ux"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "acc_y", primals: &["uy"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "acc_z", primals: &["uz"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "vol_strain", primals: &["ex", "ey", "ez"], alternate_primals: NO_ALT, primals_class: PC3, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_strain1", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_strain2", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_strain3", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_strain1", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_strain2", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_strain3", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_strain1_alt", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_strain2_alt", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_strain3_alt", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_strain1_alt", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_strain2_alt", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_strain3_alt", primals: STRAIN6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_stress1", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_stress2", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_stress3", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "eff_stress", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "pressure", primals: &["sx", "sy", "sz"], alternate_primals: NO_ALT, primals_class: PC3, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_stress1", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_stress2", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "prin_dev_stress3", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "max_shear_stress", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "triaxiality", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "norm_press", primals: STRESS6, alternate_primals: NO_ALT, primals_class: PC6, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "eps_rate", primals: &["eps"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "nodtangmag", primals: &["nodtang_x", "nodtang_y", "nodtang_z"], alternate_primals: NO_ALT, primals_class: PC3, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "mat_cog_disp_x", primals: &["matcgx"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "mat_cog_disp_y", primals: &["matcgy"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "mat_cog_disp_z", primals: &["matcgz"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "element_volume", primals: &["nodpos"], alternate_primals: NO_ALT, primals_class: NODE1, only_sclasses: SC_HEX_TET },
+    DerivedRegEntry { name: "area", primals: &["nodpos"], alternate_primals: NO_ALT, primals_class: NODE1, only_sclasses: SC_QUAD },
+    DerivedRegEntry { name: "centroid", primals: &["nodpos"], alternate_primals: NO_ALT, primals_class: NODE1, only_sclasses: NO_SC },
+    DerivedRegEntry { name: "surfstrainx", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: NODE3, only_sclasses: SC_HEX },
+    DerivedRegEntry { name: "surfstrainy", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: NODE3, only_sclasses: SC_HEX },
+    DerivedRegEntry { name: "surfstrainz", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: NODE3, only_sclasses: SC_HEX },
+    DerivedRegEntry { name: "surfstrainxy", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: NODE3, only_sclasses: SC_HEX },
+    DerivedRegEntry { name: "surfstrainyz", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: NODE3, only_sclasses: SC_HEX },
+    DerivedRegEntry { name: "surfstrainzx", primals: &["ux", "uy", "uz"], alternate_primals: NO_ALT, primals_class: NODE3, only_sclasses: SC_HEX },
+    DerivedRegEntry { name: "relative_volume", primals: &["nodpos"], alternate_primals: NO_ALT, primals_class: NODE1, only_sclasses: SC_HEX_TET },
+    DerivedRegEntry { name: "normal_force", primals: &["sn"], alternate_primals: &["nodpres"], primals_class: PC1, only_sclasses: SC_QUAD },
+    DerivedRegEntry { name: "force_x", primals: &["s1"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: SC_QUAD },
+    DerivedRegEntry { name: "force_y", primals: &["s2"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: SC_QUAD },
+    DerivedRegEntry { name: "force_z", primals: &["s3"], alternate_primals: NO_ALT, primals_class: PC1, only_sclasses: SC_QUAD },
+    DerivedRegEntry { name: "shear_magnitude", primals: &["qxx", "qyy"], alternate_primals: NO_ALT, primals_class: PC2, only_sclasses: NO_SC },
+];
 
 /// A `material=` argument: a name / digit-string, or an integer.
 #[derive(Debug, Clone)]
