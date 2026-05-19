@@ -273,6 +273,80 @@ composite path is unperturbed. No `.proto` change, no Phase 4 crate
 touched. Regression: `tests/status_bar_proto_peer.rs` (always-on text
 invariant + skip-on-absent composite).
 
+### Decision 69 — the `time-indep` result catalog stays an honest labelled placeholder: a faithful TI-results enumeration is a substantive **re-port** (TI-name grammar + TI-type filter + a `mili` oracle that does not exist), **not** the trivial reshape `queriable_svars` was for Decision 67
+
+**Problem (Decision-67 continuation, scope-guarded).** Decision 67
+shipped `primal` as a real catalog and explicitly left `time-indep` a
+labelled placeholder "until mili-rs grows a TI accessor", the blob
+format already reserving a `T` tag. The follow-up slice opened the
+question design-first with a hard scope rule: extend the catalog only
+if a faithful TI enumeration is a *reshape of already-parsed metadata*
+(the shape `queriable_svars` was — no new parse path, no formula/golden,
+no re-port); otherwise leave the placeholder, name the blocker, and
+stop.
+
+**Investigation.** mili-rs *does* already parse every `TI_PARAM`
+directory entry into `ParamTable` at `Database::open` (`param.rs`), so
+a *raw* name dump would be a reshape. But a raw dump is not faithful —
+and a faithful one is not a reshape:
+
+- **No oracle, no analogous accessor.** `queriable_svars` is a pure
+  ~25-line reshape of the parsed svar table that mili-python exposes
+  publicly, so Decision 67 had a `mili` parity oracle and a settled
+  "faithful shape" to mirror. mili-python has **no** TI-results
+  accessor anywhere — only raw `parameters()` / `parameter(name)`
+  (`milidatabase.py`); `copy_non_state_data` is the only TI-adjacent
+  API, exactly as Decision 67 noted. There is nothing to gate parity
+  against and no settled shape to reshape into.
+- **`TI_PARAM` is a junk-drawer.** `ParamTable` deliberately collapses
+  `MILI_PARAM`/`APPLICATION_PARAM`/`TI_PARAM` and `TI_PARAM` is *also*
+  the storage backend for Node/Element Labels, `MAT_NAME_*`, element
+  sets, particle-class titles and mesh coords (the documented
+  "TI_PARAM-as-storage pattern", `param.rs:393`–`407`,
+  `miliinternal.py:97`). Emitting every `TI_PARAM` name would surface
+  internal bookkeeping as fake "results" — a stub pretending to be
+  live, the precise failure mode Decision 67 rejected ("not a stub
+  that pretends to be live").
+- **A faithful filter is a re-port.** griz derives TI result variables
+  via `mc_ti_htable_search_wildcard(db,…,"M_",…)` →
+  `is_correct_param_type(…,TI_PARAM)` → `mc_ti_get_metadata_from_name`
+  decoding the encoded
+  `name[/Mesh-%d/Sname-%s/++/IsMvar-%s/IsNod-%s/Scls-%s/Mat-%d/St-%d]`
+  TI-name grammar (`reference/mili/src/mili.c:4135`,
+  `reference/mili/src/ti.c:1082`). None of that exists in mili-rs:
+  `ParamTable` does not even retain the per-entry directory type, so
+  it cannot distinguish a true `TI_PARAM` from the others, let alone
+  decode the name grammar or apply the `IsMvar` filter. Porting it is
+  a substantive new semantic/parse path with **no** Python oracle for
+  parity — categorically the re-port the scope rule rules out, not the
+  trivial reshape.
+- **The C reference is itself a stub here.** griz's
+  `create_ti_res_menu` has its population commented out
+  (`// for ti_result in ti_results…`, `reference/griz/Src/gui.c:1779`)
+  — even "mirror the C reference" yields no faithful list to copy.
+
+**Decision: defer — `time-indep` stays the honest labelled
+placeholder; no data-lib accessor, no server `T` line, no client
+field.** The conservative path per the scope rule: correctness over
+completing the slice. The blob format's reserved `T` tag and
+`decode_catalog`'s unknown-tag tolerance already make this a clean
+forward seam — when mili-rs grows a real TI-results accessor (the
+named blocker: a per-entry `TI_PARAM`-type-aware `ParamTable`, the
+`mc_ti_get_metadata_from_name` TI-name decoder, and a `mili`-oracle
+TI-results enumeration to gate against — a `mili-rs` core re-port, the
+M5 "reuse, don't re-port" boundary), the server emits `T\t<name>`
+lines and the client wires `time_indep` with **zero** wire/proto/
+ticket change. Nothing in this decision touches code, so the
+byte-stable headless composite path (default `ShellState`,
+`catalog: None`) is trivially unperturbed (`bug-tracker.md` VB-001).
+
+**Trade-off recorded.** Shipping a raw `TI_PARAM` name dump was
+rejected: it would regress the wireframe (internal label/material/
+coord bookkeeping rendered as bogus "results"), has no parity oracle,
+and is exactly the live-looking stub Decision 67 forbade. The honest
+placeholder — already byte-stable and already documented — is strictly
+better than a faithful-looking lie.
+
 ## Resolved: File→Open / interactive load deferred (Part-1 item 3)
 
 **File→Open / interactive load (usability gap, not a bug).**

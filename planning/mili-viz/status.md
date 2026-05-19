@@ -1184,6 +1184,27 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       composites the mesh). The windowed `apply_loaded` fetch site is
       not headlessly verifiable; the `Session::fetch_catalog` API it
       calls is.
+    - **`time-indep` result catalog — deferred (Decision-67
+      continuation, scope-guarded; `phase-5-m4.md` Decision 69).** The
+      `time-indep` left-dock sub-tree **stays** the honest labelled
+      placeholder. A faithful TI-results enumeration is a substantive
+      **re-port**, not the trivial reshape `queriable_svars` was for
+      Decision 67: `TI_PARAM` is a junk-drawer (mili-rs `ParamTable`
+      collapses it with `MILI_PARAM`/`APPLICATION_PARAM` and it also
+      stores labels/materials/element-sets/coords — a raw name dump
+      would render internal bookkeeping as fake "results", the
+      live-looking stub Decision 67 forbade); mili-python exposes **no**
+      TI-results accessor (only raw `parameters()`), so there is no
+      `mili` parity oracle; and a faithful filter needs the
+      `mc_ti_get_metadata_from_name` TI-name grammar + a
+      TI-type-aware `ParamTable` mili-rs does not have. No data-lib
+      accessor, no server `T` line, no client field were added —
+      **zero code change**, so the byte-stable headless composite path
+      (default `ShellState`, `catalog: None`) is trivially unperturbed
+      (`bug-tracker.md` VB-001). Forward seam already clean: the blob's
+      reserved `T` tag + `decode_catalog`'s unknown-tag tolerance mean
+      a future `mili-rs` core TI-results accessor (the named blocker)
+      lights this up with no wire/proto/ticket change.
     - **Status-bar `proto` / peer count de-hard-coded (MVP polish;
       `wireframe-parity.md` "Status bar"; `phase-5-m4.md` Decision
       68).** `shell.rs::status_bar` rendered a literal `proto v1` and
