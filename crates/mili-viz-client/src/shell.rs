@@ -140,8 +140,8 @@ impl RenderMode {
 pub enum BottomTab {
     /// Layer-0 raw griz / `grizinit` stream (Decision 48).
     CommandLine,
-    /// Subprocess+`attach()` runner — disabled placeholder until
-    /// Phase 6 `pygriz` lands (Decision 49).
+    /// Managed-venv `pygriz` subprocess runner (Decision 49; unblocked
+    /// by Phase 6 M2 — `phase-6-m2.md`).
     Scripting,
     /// `egui_plot` host fed by the `Subscribe` stream (Decision 50).
     TimeHistory,
@@ -226,6 +226,17 @@ pub enum UiAction {
         class_name: String,
         visible: bool,
     },
+    /// Pure-client: run the scripting-tab buffer in a managed `pygriz`
+    /// subprocess (`client.md` decision 3, `phase-6-m2.md`). Already
+    /// applied to [`ShellState`] (the running flag is set + the output
+    /// pane cleared); the windowed app spawns the child and streams its
+    /// stdout/stderr back via [`ShellState::push_script_output`] /
+    /// [`ShellState::finish_script`]. No proto command — the script
+    /// owns its own connection (`griz.launch()` spawns a headless
+    /// server; `attach()`-into-*this* in-process GUI is gated on the
+    /// deferred Phase 5 M5 remote mode). The subprocess path is
+    /// windowed-only — not headlessly verifiable in CI.
+    RunScript(String),
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -243,6 +254,18 @@ pub const DERIVED_RESULTS: &[&str] = &[
     "prin_strain1",
     "triaxiality",
 ];
+
+/// Seed for the scripting editor. `attach()`-into-*this* GUI needs the
+/// deferred Phase 5 M5 remote transport (the in-process client writes
+/// no `~/.griz` session file), so the template uses the landed Phase 6
+/// M2 `griz.launch()` (a headless server the script drives).
+pub const DEFAULT_SCRIPT: &str = "\
+import griz
+# This GUI runs in-process; attach() to it needs Phase 5 M5 (remote mode).
+# launch() spawns a headless mili-viz-server you drive from here.
+s = griz.launch()
+print(s)
+";
 
 /// All shell state the layout is a pure function of.
 #[derive(Debug, Clone)]
@@ -280,6 +303,16 @@ pub struct ShellState {
     pub transcript: Vec<TranscriptLine>,
     /// Command-line input buffer.
     pub cmdline_input: String,
+    /// Scripting-tab editor buffer (`client.md` decision 3). Seeded
+    /// with a `griz.launch()` template — the in-process GUI has no
+    /// session file to `attach()` to (that needs Phase 5 M5).
+    pub script: String,
+    /// Streamed stdout/stderr of the last/active script run.
+    pub script_output: String,
+    /// A script subprocess is in flight (disables Run).
+    pub script_running: bool,
+    /// The `venv: … · attach: …` status line under the runner.
+    pub script_status: String,
     /// Time-history series accumulated from `ResultState`
     /// (Decision 50).
     pub time_history: Vec<TimeSample>,
@@ -332,6 +365,10 @@ impl Default for ShellState {
             bottom_tab: None,
             transcript: Vec::new(),
             cmdline_input: String::new(),
+            script: DEFAULT_SCRIPT.to_string(),
+            script_output: String::new(),
+            script_running: false,
+            script_status: "venv: — · attach: —".to_string(),
             time_history: Vec::new(),
             colormap: "cool".to_string(),
             legend_min: None,
@@ -452,6 +489,33 @@ impl ShellState {
             (TranscriptKind::Error, error.to_string())
         };
         self.transcript.push(TranscriptLine { kind, text });
+    }
+
+    /// Start a script run (`client.md` decision 3). Sets the running
+    /// flag + clears the output pane and emits the buffer for the app
+    /// to spawn the `pygriz` subprocess. `None` while a run is already
+    /// in flight or the buffer is blank.
+    pub fn run_script(&mut self) -> Option<UiAction> {
+        if self.script_running || self.script.trim().is_empty() {
+            return None;
+        }
+        self.script_running = true;
+        self.script_output.clear();
+        self.script_status = "venv: starting · attach: launch".to_string();
+        Some(UiAction::RunScript(self.script.clone()))
+    }
+
+    /// Append a streamed stdout/stderr chunk from the running script
+    /// subprocess (called by the windowed app each frame).
+    pub fn push_script_output(&mut self, chunk: &str) {
+        self.script_output.push_str(chunk);
+    }
+
+    /// Mark the script subprocess finished and update the status line
+    /// (called by the windowed app when the child exits).
+    pub fn finish_script(&mut self, status: &str) {
+        self.script_running = false;
+        self.script_status = status.to_string();
     }
 
     /// Record a time-history sample for the active result at the
@@ -835,7 +899,7 @@ fn bottom_tabs(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
             ui.separator();
             match tab {
                 BottomTab::CommandLine => cmdline_tab(ui, state, actions),
-                BottomTab::Scripting => scripting_tab(ui),
+                BottomTab::Scripting => scripting_tab(ui, state, actions),
                 BottomTab::TimeHistory => time_history_tab(ui, state),
             }
         }
@@ -899,27 +963,52 @@ fn cmdline_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
     });
 }
 
-/// Scripting runner — a structured **disabled** placeholder
-/// (`phase-5-m3.5.md` Decision 49): the functional subprocess+
-/// `attach()` runner is blocked on the uncoded Phase 6 `pygriz`.
-fn scripting_tab(ui: &mut egui::Ui) {
-    let mut script = String::from("# import griz; s = griz.attach()\n");
-    ui.add_enabled(
-        false,
-        egui::TextEdit::multiline(&mut script)
+/// Scripting runner (`client.md` decision 3, `phase-6-m2.md`): a
+/// monospace editor, a Run button, a streamed output pane, and the
+/// `venv: … · attach: …` indicator. Run emits [`UiAction::RunScript`];
+/// the windowed app spawns a managed `pygriz` subprocess and streams
+/// its output back. The subprocess path is windowed-only — the
+/// gating test exercises the pure [`ShellState`] logic, not the child
+/// (not headlessly verifiable in CI).
+fn scripting_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
+
+    ui.add(
+        egui::TextEdit::multiline(&mut state.script)
             .code_editor()
+            .font(mono.clone())
             .desired_rows(4)
             .desired_width(f32::INFINITY),
     );
     ui.horizontal(|ui| {
-        ui.add_enabled(false, egui::Button::new("▶ Run"));
-        ui.weak("scripting runner requires pygriz (Phase 6) — not yet available");
+        if ui
+            .add_enabled(!state.script_running, egui::Button::new("▶ Run"))
+            .clicked()
+        {
+            if let Some(a) = state.run_script() {
+                actions.push(a);
+            }
+        }
+        if state.script_running {
+            ui.spinner();
+            ui.weak("running…");
+        }
     });
-    ui.add_enabled(
-        false,
-        egui::Label::new(egui::RichText::new("(no output)").weak()),
-    );
-    ui.weak("venv: — · attach: —");
+
+    let foot = 20.0;
+    let scroll_h = (ui.available_height() - foot).max(40.0);
+    egui::ScrollArea::vertical()
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .max_height(scroll_h)
+        .show(ui, |ui| {
+            if state.script_output.is_empty() {
+                ui.weak("(no output)");
+            } else {
+                ui.label(egui::RichText::new(&state.script_output).font(mono.clone()));
+            }
+        });
+    ui.weak(&state.script_status);
 }
 
 /// Time-history plot (`phase-5-m3.5.md` Decision 50): an `egui_plot`

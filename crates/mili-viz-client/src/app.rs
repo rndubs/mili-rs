@@ -62,6 +62,19 @@ struct App {
     /// predict half (`phase-5-m4.md` Decision 64).
     drag: Option<DragKind>,
     last_cursor: Option<glam::Vec2>,
+    /// Scripting-runner subprocess channel (`client.md` decision 3):
+    /// the worker thread streams stdout/stderr + a final status; the
+    /// frame loop drains it into [`ShellState`].
+    script_tx: std::sync::mpsc::Sender<ScriptMsg>,
+    script_rx: std::sync::mpsc::Receiver<ScriptMsg>,
+}
+
+/// A message from the scripting-runner worker thread.
+enum ScriptMsg {
+    /// A streamed stdout/stderr chunk (newline-terminated).
+    Out(String),
+    /// The child exited; payload is the `venv: … · attach: …` line.
+    Done(String),
 }
 
 impl App {
@@ -401,6 +414,14 @@ impl App {
                 }
                 None
             }
+            UiAction::RunScript(src) => {
+                // Pure-client (`client.md` decision 3): spawn the
+                // managed `pygriz` subprocess; output streams back
+                // through the channel into ShellState each frame. No
+                // proto command — the script owns its connection.
+                self.spawn_script(src.clone());
+                None
+            }
             // Client-only: already applied to ShellState by the UI.
             UiAction::SetStride(_)
             | UiAction::ToggleOverlay(_)
@@ -412,6 +433,123 @@ impl App {
             let _ = self.rt.block_on(self.session.execute(cmd));
         }
     }
+
+    /// Spawn the managed `pygriz` runner for `src` on a worker thread
+    /// (`client.md` decision 3). Windowed-only; not CI-exercised.
+    fn spawn_script(&self, src: String) {
+        let tx = self.script_tx.clone();
+        std::thread::spawn(move || run_script_subprocess(&src, &tx));
+    }
+
+    /// Drain the script worker's streamed output into [`ShellState`]
+    /// (called once per frame, mirroring `ingest_deltas`).
+    fn poll_script(&mut self) {
+        let msgs: Vec<ScriptMsg> = self.script_rx.try_iter().collect();
+        for msg in msgs {
+            match msg {
+                ScriptMsg::Out(s) => self.shell.push_script_output(&s),
+                ScriptMsg::Done(status) => self.shell.finish_script(&status),
+            }
+        }
+    }
+}
+
+/// Run a scripting-tab buffer as a `pygriz` subprocess, streaming
+/// stdout/stderr back through `tx` (`client.md` decision 3,
+/// `phase-6-m2.md`). The interpreter is `$GRIZ_PYTHON` (else
+/// `python3`); the pure-Python `griz` package is made importable via
+/// `$GRIZ_PYGRIZ_SRC` (else the repo's `python/pygriz/src`) prepended
+/// to `PYTHONPATH`. A full managed/`pip install`ed venv (decision 3's
+/// production shape) is the documented forward path; this is the
+/// smallest wiring that genuinely runs the landed Phase 6 path.
+fn run_script_subprocess(src: &str, tx: &std::sync::mpsc::Sender<ScriptMsg>) {
+    use std::io::{BufRead, BufReader};
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    let py = std::env::var("GRIZ_PYTHON").unwrap_or_else(|_| "python3".to_string());
+    let pygriz_src = std::env::var("GRIZ_PYGRIZ_SRC").unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("python")
+            .join("pygriz")
+            .join("src")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let pythonpath = match std::env::var("PYTHONPATH") {
+        Ok(p) if !p.is_empty() => {
+            let sep = if cfg!(windows) { ";" } else { ":" };
+            format!("{pygriz_src}{sep}{p}")
+        }
+        _ => pygriz_src,
+    };
+
+    let tmp = std::env::temp_dir().join(format!("griz-script-{}.py", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, src) {
+        let _ = tx.send(ScriptMsg::Done(format!(
+            "venv: {py} · attach: launch · could not stage script: {e}"
+        )));
+        return;
+    }
+
+    let mut child = match Command::new(&py)
+        .arg(&tmp)
+        .env("PYTHONPATH", &pythonpath)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = tx.send(ScriptMsg::Done(format!(
+                "venv: {py} · attach: launch · spawn failed: {e}"
+            )));
+            return;
+        }
+    };
+
+    let mut readers = Vec::new();
+    for pipe in [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn std::io::Read + Send>),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                if tx.send(ScriptMsg::Out(format!("{line}\n"))).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    let status = child.wait();
+    for r in readers {
+        let _ = r.join();
+    }
+    let _ = std::fs::remove_file(&tmp);
+    let summary = match status {
+        Ok(s) if s.success() => format!("venv: {py} (PYTHONPATH) · attach: launch · ok"),
+        Ok(s) => format!(
+            "venv: {py} (PYTHONPATH) · attach: launch · exited {}",
+            s.code()
+                .map_or_else(|| "(signal)".to_string(), |c| c.to_string())
+        ),
+        Err(e) => format!("venv: {py} · attach: launch · wait failed: {e}"),
+    };
+    let _ = tx.send(ScriptMsg::Done(summary));
 }
 
 fn step(dir: pb::step::Dir) -> pb::command::Cmd {
@@ -592,6 +730,7 @@ impl ApplicationHandler for App {
 impl App {
     fn redraw(&mut self) {
         self.ingest_deltas();
+        self.poll_script();
 
         // Animation: server-authoritative — step forward by `stride`
         // roughly every 80 ms while the phase is Animating.
@@ -676,6 +815,7 @@ impl App {
 pub fn run(root: Option<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let rt = tokio::runtime::Runtime::new()?;
     let session = rt.block_on(Session::connect_in_process(root.as_deref()))?;
+    let (script_tx, script_rx) = std::sync::mpsc::channel();
 
     let mut shell = ShellState::default();
     if root.is_some() {
@@ -694,6 +834,8 @@ pub fn run(root: Option<String>) -> Result<(), Box<dyn std::error::Error + Send 
         last_anim: Instant::now(),
         drag: None,
         last_cursor: None,
+        script_tx,
+        script_rx,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

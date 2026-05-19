@@ -82,7 +82,7 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | Command line (Layer-0 verbatim, transcript) | ✅ done | — | status 17 |
-| Scripting runner | 🔴 placeholder | "requires pygriz (Phase 6)"; **Phase 6 M1–M3 now landed → unblocked, not yet wired** | phase-5-m3.5 Dec 49 / status 18–20 |
+| Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). Forward path: a `pip install`ed managed venv + `attach()`-into-*this*-GUI (the latter gated on Phase 5 M5 remote mode — the in-process client writes no session file) | client.md dec 3 / phase-6-m2 / status 18–20, 23 |
 | Time-history plot | 🟡 partial | fed by `ResultState` min/max envelope, not the `Query` per-element series; server `Query` is a stub | phase-5-m3.5 Dec 50 |
 | Whole-region hide (tweak) | 🟡 partial | collapses body only; 22 px strip always present | — |
 
@@ -135,7 +135,12 @@ leverage:
 7. **L3 focus mode + theme/tweaks surface.**
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto
    catalog path — design first).
-9. **Wire the scripting tab** (now unblocked by Phase 6 M1–M3).
+9. 🟡 **Wire the scripting tab** — done as a `launch()`-based
+   `pygriz` subprocess runner (enabled editor + Run + streamed
+   output + venv/attach indicator). Remaining: a `pip install`ed
+   managed venv and `attach()`-into-*this*-GUI (the latter needs
+   Phase 5 M5 remote mode; the in-process client has no session
+   file).
 
 ## Update protocol
 
