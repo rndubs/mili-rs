@@ -1071,6 +1071,29 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       composites over the unchanged mesh pass and the expanded seam is
       byte-stable). The glyph-click→expand path is windowed pointer
       input, **not headlessly verifiable in CI**.
+    - **L3 focus mode completed (wireframe-parity L3 row; wireframes
+      §"L3 — Focus mode").** `Ctrl+\` toggles a new `focus_mode` flag
+      (`set_focus_mode` also collapses the dock so the R/M/S/P rail
+      shows); in focus mode `build_shell_ui` hides the AI rail + bottom
+      tabs, stripping the chrome to the viewport. A rail glyph or a
+      second `Ctrl+\` restores full L1. The key is read from egui input
+      in the pure shell (a real key event, so the "no input ⇒ no
+      actions" invariant is preserved); `app.rs` lowers
+      `UiAction::SetFocusMode` as a pure-client no-op (state already
+      applied). Default `focus_mode`/`dock_collapsed` false → the full
+      L1 chrome and `scene_frac` are unchanged, so the M3 composite
+      gate is byte-stable (`bug-tracker.md` VB-001). No proto change,
+      no Phase 4 crate touched. Gating test
+      `crates/mili-viz-client/tests/l3_focus_mode.rs` (always-on:
+      `set_focus_mode` pure/observable + dock round-trip, a synthetic
+      `Ctrl+\` event toggles it while no key stays inert, and a
+      deterministic no-GPU `scene_frac`-enlarges check that AI/tabs are
+      hidden; skip-on-absent composite render proving the default seam
+      is unperturbed and the focus render drops the AI-rail chrome
+      while still compositing the mesh). The windowed key path is
+      exercised by the synthetic-event leg; only cross-session
+      persistence of the tweak flags remains (the `app.rs`
+      `let _ = Overlay::Title;` hook).
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
