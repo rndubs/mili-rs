@@ -1020,8 +1020,8 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       Light+collapsed render still composites over the unchanged mesh
       pass while visibly relighting the chrome). The menu-open click
       path is windowed pointer input, **not headlessly verifiable in
-      CI**. Full L3 focus mode (`Ctrl+\`, AI/tabs hidden too) and the
-      persistence wiring remain.
+      CI**. (Full L3 focus mode and the cross-session persistence
+      wiring both landed in follow-up bullets below.)
     - **Picking viewport highlight glyph (MVP-cut 4 remainder).** The
       ray-cast + status-bar readout already landed; this adds the
       missing viewport marker. `Pick` already carries the world-space
@@ -1091,13 +1091,95 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       hidden; skip-on-absent composite render proving the default seam
       is unperturbed and the focus render drops the AI-rail chrome
       while still compositing the mesh). The windowed key path is
-      exercised by the synthetic-event leg; only cross-session
-      persistence of the tweak flags remains (the `app.rs`
-      `let _ = Overlay::Title;` hook).
+      exercised by the synthetic-event leg; cross-session persistence
+      of the tweak flags landed in the next bullet.
+    - **Cross-session tweak persistence (MVP-cut 7 remainder — the
+      last `wireframe-parity.md` MVP-cut item 7 piece).** The `app.rs`
+      `let _ = Overlay::Title;` placeholder hook is now a real
+      `serde`-backed config. A new `tweaks.rs` defines `PersistedTweaks`
+      — the **wireframe-justified** set from
+      `griz_wgpu_wireframes/README.md` §"Tweaks": the five overlay-chip
+      states ("should persist between sessions") + the two Tweaks-table
+      preferences (**Theme**, **Left dock collapsed**). `stride` /
+      `focus_mode` are deliberately *not* persisted (runtime modes, not
+      preferences). The windowed `run` loads it into `ShellState` at
+      startup; `redraw` re-writes it whenever a frame's actions include
+      a persisted one (`is_persisted_action` — exactly
+      `ToggleOverlay`/`SetTheme`/`SetDockCollapsed`). Path is the XDG
+      base-dir spec (`$XDG_CONFIG_HOME` absolute, else
+      `$HOME/.config`) + `mili-viz/tweaks.json`, with a
+      `MILI_VIZ_CONFIG` override; an unresolvable/unwritable config is
+      a silent no-op (losing persistence never breaks the GUI).
+      `PersistedTweaks::default` is *by construction*
+      `from_state(&ShellState::default())`, so a **missing** config
+      restores the byte-identical default shell — the headless
+      `render_shell_to_image` path never touches disk and stays
+      byte-stable (`bug-tracker.md` VB-001). No frozen-proto change,
+      no new `UiAction`, no Phase 4 crate touched (serde/serde_json
+      added to the client crate only). Gating test
+      `crates/mili-viz-client/tests/tweaks_persistence.rs` (always-on:
+      default == default-shell snapshot, absent-file load == default +
+      `apply_to` leaves the byte-stable defaults, loss-free JSON +
+      on-disk round-trip via the explicit-path API, `apply_to` purity
+      — only the persisted fields move, and `is_persisted_action`
+      classifies exactly the three tweak actions; skip-on-absent
+      composite render proving a restored-from-absent state is
+      **pixel-identical** to the untouched default and a JSON
+      round-tripped Light+collapsed config still composites + relights
+      the chrome). The windowed disk read/write itself (no event loop /
+      display in CI) is **not headlessly verifiable**; the pure
+      (de)serialization + default-equivalence + explicit-path API are
+      the pinned contract.
+    - **Primal result catalog via a Flight side-channel (MVP-cut 8;
+      `phase-5-m4.md` Decision 67).** Opened **design-first** (the
+      frozen proto carries no svar catalog); the maintainer chose the
+      Flight side-channel. The Phase 4 `mili-viz-server` enumerates the
+      loaded run's primal svars via mili-rs
+      `Database::queriable_svars(false,false)` — a *reshape*, no
+      formula/golden re-port — into a small **self-describing blob**
+      (`MVCAT1\n` + `P\t<name>` lines; opaque, never an Arrow
+      `RecordBatch`, so it rides `FlightData.data_body` exactly like
+      the `MVG1`/`MVG2` geometry blob). It is fetched by the
+      *conventional* `mili_viz_server::CATALOG_TICKET`
+      (`catalog:current`) over **both** the in-process
+      `VizService::fetch_catalog` seam (the path the current client
+      uses, mirroring `fetch_geometry`) and a one-line Flight `DoGet`
+      ticket-prefix branch (for the deferred Phase 5 M5 remote mode).
+      **No `mili_viz.proto`/blob/ticket/format change, no new RPC or
+      message.** Client: `catalog.rs::decode_catalog` (pure, mirroring
+      `decode_mvg`) → `ShellState::catalog: Option<ResultCatalog>`;
+      `app.rs` fetches it once per run in `apply_loaded` (windowed-only)
+      and the left-dock `primal` sub-tree lists the names (selectable →
+      the same `UiAction::Show` the command line emits) with a
+      `primal · N` badge. `None` (stub `LoadedState` / no real DB /
+      undecodable) keeps the static `(catalog: M4+)` placeholder and
+      the *exact* pre-Decision-67 collapsed `primal` label + `Results ·
+      DERIVED_RESULTS.len()` badge, so the default `ShellState`
+      (`catalog: None`) leaves `render_shell_to_image` byte-stable
+      (`bug-tracker.md` VB-001). `time-indep` stays an honest labelled
+      placeholder — mili-rs has no TI accessor (the blob format already
+      reserves a `T` tag for that follow-up). Gating tests
+      `crates/mili-viz-server/tests/catalog.rs` (always-on: no-DB ⇒
+      `fetch_catalog` `None`; skip-on-absent: well-formed blob + a
+      **real Flight `DoGet`** byte-identical to the in-process seam,
+      the M6 transport-swap-parity shape) and
+      `crates/mili-viz-client/tests/result_catalog.rs` (always-on:
+      `decode_catalog` round-trip / non-catalog rejection /
+      unknown-tag tolerance, default `catalog None`, wired shell paints
+      inert with and without a catalog; skip-on-absent composite:
+      `Session::fetch_catalog` over the in-process side-channel yields
+      a non-empty primal catalog and the populated left dock still
+      composites the mesh). The windowed `apply_loaded` fetch site is
+      not headlessly verifiable; the `Session::fetch_catalog` API it
+      calls is.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
-    sub-rects). No proto change; no Phase 4 crate touched.
+    sub-rects). The only proto-adjacent change is the
+    maintainer-approved Decision-67 catalog side-channel: **no
+    `mili_viz.proto` change**; the Phase 4 `mili-viz-server` is touched
+    for that one approved mini-milestone only (a `fetch_catalog` seam +
+    a one-line Flight `DoGet` branch, no new RPC/message).
 
 ## Update protocol
 

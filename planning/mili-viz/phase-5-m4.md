@@ -194,6 +194,52 @@ render seam is unchanged.** The colormap ramp stays a client concern
 `Mesh.scalars`); a `LegendLimits` change re-runs `upload_mesh` with
 the new range, no new geometry round-trip.
 
+### Decision 67 — the primal result catalog rides a conventional Flight `DoGet` ticket (a self-describing blob over the existing bulk boundary), **no `.proto` change**; the server enumerates `Database::queriable_svars` (a reshape, not a re-port); time-indep stays a labelled placeholder until mili-rs grows a TI accessor
+
+**Problem (MVP-cut 8, design-first).** The wireframe's left-dock
+`Results → primal / time-indep` sub-trees were literal
+`(catalog: M4+)` placeholders. The **frozen** `mili_viz.proto` carries
+no svar catalog anywhere — `LoadedState` is `db/num_states/
+state_times/class_names`, `Show` only *consumes* a name, and
+`CommandReply` is `{ok,error,delta_seq}` with no free-text channel.
+A real catalog therefore needs a non-frozen-proto transport, and only
+the Phase 4 `mili-viz-server` holds the DB handle — so this required a
+maintainer transport decision (the slice was opened design-first via
+`AskUserQuestion`).
+
+**Maintainer decision: option B — a Flight catalog side-channel.**
+The server enumerates the loaded run's primal svars via mili-rs
+`Database::queriable_svars(false, false)` — a *reshape* of the
+already-parsed svar table (the M5 "reuse, don't re-port" boundary,
+no formula/golden) — into a small **self-describing blob** (magic
+`MVCAT1\n`, then `TAG\tNAME` lines; `P` = primal). The blob is opaque,
+**never an Arrow `RecordBatch`**, so it rides verbatim in
+`FlightData.data_body` exactly like the `MVG1`/`MVG2` geometry blob
+(phase-4-m2.md Decision 11). It is fetched by a *conventional* ticket
+`mili_viz_server::CATALOG_TICKET` (`catalog:current`) the client
+constructs — unlike geometry, whose ticket rides the `GeometryRef`
+broadcast — over **both** the in-process `VizService::fetch_catalog`
+seam (the path the current in-process client uses, mirroring
+`fetch_geometry`) **and** the Flight `DoGet` (a one-line ticket-prefix
+branch, for the deferred Phase 5 M5 remote mode — the transport story
+stays coherent with geometry). **No `mili_viz.proto`/blob/ticket
+format change; no new frozen contract.** This *does* touch the Phase 4
+`mili-viz-server` crate (the standing "no Phase 4 crate touched"
+constraint is explicitly lifted for this one approved mini-milestone)
+but adds no new RPC and no new proto message.
+
+`None` (stub `LoadedState` / no real DB / blob fails to decode) keeps
+the client's static `(catalog: M4+)` placeholder, so `ShellState`'s
+default `catalog: None` leaves the headless `render_shell_to_image`
+composite **byte-stable** (`bug-tracker.md` VB-001): the `Results · N`
+badge stays `DERIVED_RESULTS.len()` and the collapsed `primal` header
+keeps its exact pre-Decision-67 label. **Time-independent variables
+are not enumerated** — mili-rs has no TI accessor (only
+`copy_non_state_data`), so the `time-indep` sub-tree is an honest
+labelled placeholder, not a stub that pretends to be live; a real TI
+catalog is follow-up work (a mili-rs accessor + the same `T` tag the
+blob format already reserves).
+
 ## Resolved: File→Open / interactive load deferred (Part-1 item 3)
 
 **File→Open / interactive load (usability gap, not a bug).**

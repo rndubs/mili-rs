@@ -17,6 +17,7 @@ use mili_viz_proto::v1 as pb;
 use mili_viz_server::{spawn_in_process, VizService, CLIENT_ID_HEADER};
 use tonic::Request;
 
+use crate::catalog::{decode_catalog, ResultCatalog};
 use crate::mesh::{decode_mvg, Mesh};
 
 type BoxErr = Box<dyn Error + Send + Sync>;
@@ -175,5 +176,17 @@ impl Session {
             .fetch_geometry(&gref.flight_ticket)
             .ok_or("GeometryRef ticket did not resolve in the in-process store")?;
         Ok(decode_mvg(&blob)?)
+    }
+
+    /// Fetch + decode the result catalog (`phase-5-m3.md`
+    /// Decision 67). Mirrors [`Session::resolve_geometry`]: the
+    /// in-process client reads the catalog seam directly (the Flight
+    /// `DoGet` fronts the same blob for the deferred remote mode).
+    /// `None` when no real run is loaded or the blob does not decode —
+    /// the caller then keeps the static placeholder, so the headless
+    /// composite gate stays byte-stable (`bug-tracker.md` VB-001).
+    #[must_use]
+    pub fn fetch_catalog(&self) -> Option<ResultCatalog> {
+        decode_catalog(&self.svc.fetch_catalog()?)
     }
 }
