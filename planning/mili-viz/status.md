@@ -1022,6 +1022,30 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       path is windowed pointer input, **not headlessly verifiable in
       CI**. Full L3 focus mode (`Ctrl+\`, AI/tabs hidden too) and the
       persistence wiring remain.
+    - **Picking viewport highlight glyph (MVP-cut 4 remainder).** The
+      ray-cast + status-bar readout already landed; this adds the
+      missing viewport marker. `Pick` already carries the world-space
+      hit `point`; `apply_pick` now caches it in
+      `ShellState::pick_point` (a miss / `toggle_picking`-off clears
+      it, so no stale marker), default `None`. `overlays` projects it
+      through the live camera (the `project_bbox`/gizmo pattern) and
+      strokes a ring + crosshair in the accent amber — *not* chip-gated
+      (it is a picking-mode artifact, not one of the five HUD
+      overlays), drawn only when picking is on, a hit is cached **and**
+      a live camera is attached, so the headless composite path
+      (camera `None`, picking off, `pick_point None`) is byte-stable
+      (`bug-tracker.md` VB-001). Pure-client: no proto change, no new
+      `UiAction`, no `app.rs` change (the existing `apply_pick` call
+      feeds it), no Phase 4 crate touched. Gating test
+      `crates/mili-viz-client/tests/picking_highlight.rs` (always-on:
+      `apply_pick` cache/clear, byte-stable default, and a
+      deterministic no-GPU shape-count delta proving the glyph only
+      draws with picking+camera+hit; skip-on-absent composite render
+      proving the accent glyph composites over the unchanged mesh pass
+      while the default render shows none). The frozen proto still
+      carries no label catalog, so the `class N` mapping stays
+      deferred (design-first). The windowed click→ray-cast path is
+      **not headlessly verifiable in CI**.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path

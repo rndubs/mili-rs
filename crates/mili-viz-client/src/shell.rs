@@ -353,6 +353,11 @@ pub struct ShellState {
     /// Whether left-click does a client-side ray-cast pick instead of
     /// starting an orbit. Default off, driven by the `Picking` menu.
     pub picking: bool,
+    /// World-space point of the last ray-cast hit, for the viewport
+    /// highlight glyph (MVP-cut 4). `None` (the default, a miss, or
+    /// picking off) → no glyph, so the headless composite gate stays
+    /// byte-stable (`bug-tracker.md` VB-001).
+    pub pick_point: Option<[f32; 3]>,
     /// Classes whose materials are toggled **off** in the left-dock
     /// Materials section. Empty = all visible (the default, so the M3
     /// composite gate is unchanged). The proto's `MaterialsState` is
@@ -435,6 +440,7 @@ impl Default for ShellState {
             fps: 0.0,
             pick: "—".to_string(),
             picking: false,
+            pick_point: None,
             hidden_materials: std::collections::BTreeSet::new(),
             selected_result: None,
             bottom_tab: None,
@@ -505,6 +511,7 @@ impl ShellState {
         self.picking = !self.picking;
         if !self.picking {
             self.pick = "—".to_string();
+            self.pick_point = None;
         }
         UiAction::TogglePicking
     }
@@ -521,6 +528,9 @@ impl ShellState {
                 None => format!("node {} · tri {}", p.node, p.tri),
             },
         };
+        // Remember the hit point for the viewport highlight glyph; a
+        // miss clears it so a stale marker never lingers (MVP-cut 4).
+        self.pick_point = hit.map(|p| p.point);
     }
 
     /// Whether a class's materials are currently shown.
@@ -1294,6 +1304,36 @@ fn overlays(ui: &mut egui::Ui, rect: egui::Rect, state: &ShellState) {
                 let inset = rect.shrink2(egui::vec2(rect.width() * 0.18, rect.height() * 0.18));
                 let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
                 dashed_rect(&painter, inset, stroke);
+            }
+        }
+    }
+
+    // Picking highlight glyph (MVP-cut 4): a ring + crosshair over the
+    // last ray-cast hit, projected through the live camera so it
+    // tracks orbit/pan/zoom and per-state deform. Not chip-gated (it
+    // is a picking-mode artifact, not one of the five HUD overlays);
+    // only drawn when picking is on, a hit is cached, and a live
+    // camera is attached — so the headless composite path (camera
+    // `None`, picking off) is byte-stable (`bug-tracker.md` VB-001).
+    if state.picking {
+        if let Some(c) = state
+            .pick_point
+            .zip(state.camera.as_ref())
+            .and_then(|(p, cam)| {
+                let w = rect.width().max(1.0) as u32;
+                let h = rect.height().max(1.0) as u32;
+                cam.project(glam::Vec3::from(p), w, h)
+            })
+        {
+            let at = egui::pos2(
+                rect.min.x + c.x * rect.width(),
+                rect.min.y + c.y * rect.height(),
+            );
+            let accent = egui::Color32::from_rgb(255, 190, 60);
+            let stroke = egui::Stroke::new(1.5, accent);
+            painter.circle_stroke(at, 7.0, stroke);
+            for d in [egui::vec2(11.0, 0.0), egui::vec2(0.0, 11.0)] {
+                painter.line_segment([at - d, at + d], stroke);
             }
         }
     }
