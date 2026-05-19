@@ -12,6 +12,7 @@
 use egui::Ui;
 
 use crate::camera::Camera;
+use crate::catalog::ResultCatalog;
 
 /// The three non-agent session states M3 must render visibly
 /// (wireframes §"Session states"; the agent states are M6).
@@ -461,6 +462,12 @@ pub struct ShellState {
     /// World-space AABB `(min, max)` of the current-state hull, for
     /// the projected-bbox overlay. `None` → placeholder.
     pub model_aabb: Option<([f32; 3], [f32; 3])>,
+    /// Result catalog fetched over the side-channel after a `load`
+    /// (`phase-5-m3.md` Decision 67; MVP-cut 8). `None` (the default,
+    /// and the headless composite path) keeps the left-dock `primal`
+    /// sub-tree as the static `(catalog: M4+)` placeholder, so that
+    /// gate stays byte-stable (`bug-tracker.md` VB-001).
+    pub catalog: Option<ResultCatalog>,
 }
 
 impl Default for ShellState {
@@ -498,6 +505,7 @@ impl Default for ShellState {
             scene_frac: None,
             camera: None,
             model_aabb: None,
+            catalog: None,
         }
     }
 }
@@ -997,7 +1005,19 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                 }
             });
 
-        egui::CollapsingHeader::new(format!("Results · {}", DERIVED_RESULTS.len()))
+        // Primal svar names from the side-channel catalog
+        // (`phase-5-m3.md` Decision 67). Cloned up front so the
+        // selectable rows can call `state.select_result` without
+        // aliasing `state.catalog`. `None`/absent → empty, so the
+        // badge stays `DERIVED_RESULTS.len()` and the sub-tree keeps
+        // the static placeholder (byte-stable default, VB-001).
+        let primal: Vec<String> = state
+            .catalog
+            .as_ref()
+            .map(|c| c.primal.clone())
+            .unwrap_or_default();
+        let results_count = DERIVED_RESULTS.len() + primal.len();
+        egui::CollapsingHeader::new(format!("Results · {results_count}"))
             .default_open(true)
             .show(ui, |ui| {
                 egui::CollapsingHeader::new("derived")
@@ -1010,15 +1030,38 @@ fn left_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActi
                             }
                         }
                     });
-                egui::CollapsingHeader::new("primal")
+                // Header label is kept exactly `primal` when empty so
+                // the default (no-catalog) chrome is byte-identical to
+                // pre-Decision-67 (VB-001); the count badge appears
+                // only once a real catalog is attached.
+                let primal_label = if primal.is_empty() {
+                    "primal".to_string()
+                } else {
+                    format!("primal · {}", primal.len())
+                };
+                egui::CollapsingHeader::new(primal_label)
                     .default_open(false)
                     .show(ui, |ui| {
-                        ui.weak("(catalog: M4+)");
+                        if primal.is_empty() {
+                            // No real run loaded (or none queriable) —
+                            // the static placeholder, byte-stable.
+                            ui.weak("(catalog: M4+)");
+                        } else {
+                            for r in &primal {
+                                let sel = state.selected_result.as_deref() == Some(r.as_str());
+                                if ui.selectable_label(sel, r).clicked() {
+                                    actions.push(state.select_result(r));
+                                }
+                            }
+                        }
                     });
                 egui::CollapsingHeader::new("time-indep")
                     .default_open(false)
                     .show(ui, |ui| {
-                        ui.weak("(catalog: M4+)");
+                        // No mili-rs time-independent accessor yet
+                        // (`phase-5-m3.md` Decision 67) — honest
+                        // placeholder, not a stub that looks live.
+                        ui.weak("(time-indep: no catalog path yet)");
                     });
             });
 

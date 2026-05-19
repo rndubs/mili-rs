@@ -104,6 +104,7 @@ impl App {
                     self.shell.phase = SessionPhase::NotAttached;
                     self.shell.loaded = None;
                     self.shell.result = None;
+                    self.shell.catalog = None;
                     self.mesh = None;
                 }
                 _ => {}
@@ -154,6 +155,17 @@ impl App {
         // cached bounds is the trigger (`phase-5-m4.md` Decision 64).
         if new_run {
             self.bounds = None;
+            // Fetch the result catalog once per run over the
+            // side-channel (`phase-5-m3.md` Decision 67; MVP-cut 8).
+            // `None` (stub `LoadedState` / no real DB) keeps the
+            // static placeholder. Windowed-only — the headless
+            // `render_shell_to_image` path never reaches here, so the
+            // composite gate stays catalog-`None` byte-stable (VB-001).
+            self.shell.catalog = if l.db.is_empty() {
+                None
+            } else {
+                self.session.fetch_catalog()
+            };
         }
     }
 

@@ -1130,10 +1130,56 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       display in CI) is **not headlessly verifiable**; the pure
       (de)serialization + default-equivalence + explicit-path API are
       the pinned contract.
+    - **Primal result catalog via a Flight side-channel (MVP-cut 8;
+      `phase-5-m4.md` Decision 67).** Opened **design-first** (the
+      frozen proto carries no svar catalog); the maintainer chose the
+      Flight side-channel. The Phase 4 `mili-viz-server` enumerates the
+      loaded run's primal svars via mili-rs
+      `Database::queriable_svars(false,false)` — a *reshape*, no
+      formula/golden re-port — into a small **self-describing blob**
+      (`MVCAT1\n` + `P\t<name>` lines; opaque, never an Arrow
+      `RecordBatch`, so it rides `FlightData.data_body` exactly like
+      the `MVG1`/`MVG2` geometry blob). It is fetched by the
+      *conventional* `mili_viz_server::CATALOG_TICKET`
+      (`catalog:current`) over **both** the in-process
+      `VizService::fetch_catalog` seam (the path the current client
+      uses, mirroring `fetch_geometry`) and a one-line Flight `DoGet`
+      ticket-prefix branch (for the deferred Phase 5 M5 remote mode).
+      **No `mili_viz.proto`/blob/ticket/format change, no new RPC or
+      message.** Client: `catalog.rs::decode_catalog` (pure, mirroring
+      `decode_mvg`) → `ShellState::catalog: Option<ResultCatalog>`;
+      `app.rs` fetches it once per run in `apply_loaded` (windowed-only)
+      and the left-dock `primal` sub-tree lists the names (selectable →
+      the same `UiAction::Show` the command line emits) with a
+      `primal · N` badge. `None` (stub `LoadedState` / no real DB /
+      undecodable) keeps the static `(catalog: M4+)` placeholder and
+      the *exact* pre-Decision-67 collapsed `primal` label + `Results ·
+      DERIVED_RESULTS.len()` badge, so the default `ShellState`
+      (`catalog: None`) leaves `render_shell_to_image` byte-stable
+      (`bug-tracker.md` VB-001). `time-indep` stays an honest labelled
+      placeholder — mili-rs has no TI accessor (the blob format already
+      reserves a `T` tag for that follow-up). Gating tests
+      `crates/mili-viz-server/tests/catalog.rs` (always-on: no-DB ⇒
+      `fetch_catalog` `None`; skip-on-absent: well-formed blob + a
+      **real Flight `DoGet`** byte-identical to the in-process seam,
+      the M6 transport-swap-parity shape) and
+      `crates/mili-viz-client/tests/result_catalog.rs` (always-on:
+      `decode_catalog` round-trip / non-catalog rejection /
+      unknown-tag tolerance, default `catalog None`, wired shell paints
+      inert with and without a catalog; skip-on-absent composite:
+      `Session::fetch_catalog` over the in-process side-channel yields
+      a non-empty primal catalog and the populated left dock still
+      composites the mesh). The windowed `apply_loaded` fetch site is
+      not headlessly verifiable; the `Session::fetch_catalog` API it
+      calls is.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
-    sub-rects). No proto change; no Phase 4 crate touched.
+    sub-rects). The only proto-adjacent change is the
+    maintainer-approved Decision-67 catalog side-channel: **no
+    `mili_viz.proto` change**; the Phase 4 `mili-viz-server` is touched
+    for that one approved mini-milestone only (a `fetch_catalog` seam +
+    a one-line Flight `DoGet` branch, no new RPC/message).
 
 ## Update protocol
 

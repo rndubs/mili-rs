@@ -61,14 +61,18 @@ impl fpb::flight_service_server::FlightService for FlightGeometryService {
         request: Request<fpb::Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = request.into_inner().ticket;
-        let blob = self
-            .inner
-            .session
-            .lock()
-            .unwrap()
-            .geom
-            .get(&ticket)
-            .cloned();
+        // The conventional result-catalog ticket (`phase-5-m3.md`
+        // Decision 67) is served from the same session lock as
+        // geometry — no `.proto` change, the existing `DoGet` bulk
+        // boundary carries it. Geometry tickets are `geom:{seq}`.
+        let blob = {
+            let session = self.inner.session.lock().unwrap();
+            if ticket == crate::CATALOG_TICKET {
+                session.catalog_blob()
+            } else {
+                session.geom.get(&ticket).cloned()
+            }
+        };
         match blob {
             Some(blob) => {
                 let data = fpb::FlightData {

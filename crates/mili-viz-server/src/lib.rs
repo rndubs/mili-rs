@@ -40,6 +40,24 @@ pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
 pub use raw::{parse_line, parse_raw, to_raw};
 
+/// Conventional Flight ticket for the result catalog
+/// (`planning/mili-viz/phase-5-m3.md` Decision 67). The frozen proto
+/// carries **no svar catalog** anywhere, so — unlike geometry, whose
+/// ticket rides the `GeometryRef` broadcast — the catalog is fetched
+/// by a *well-known* ticket the client constructs. No `.proto` change:
+/// this reuses the existing Flight bulk-data boundary (`DoGet`) plus
+/// the in-process [`VizService::fetch_catalog`] seam, exactly mirroring
+/// the geometry transport.
+pub const CATALOG_TICKET: &[u8] = b"catalog:current";
+
+/// Magic + version of the self-describing catalog blob. Like the
+/// `MVG1`/`MVG2` geometry blob (phase-4-m2.md Decision 11) this is an
+/// opaque buffer, **never** an Arrow `RecordBatch`, so it rides
+/// verbatim in `FlightData.data_body`. Body: UTF-8 lines after the
+/// header, each `TAG\tNAME` (`P` = primal queriable svar). Future
+/// kinds (time-indep, derived) add tags without a format break.
+const CATALOG_MAGIC: &[u8] = b"MVCAT1\n";
+
 /// Metadata header carrying the caller's client id. In-process
 /// callers set this so broadcasts can be tagged with
 /// `origin_client_id` (the proto `Command` has no client field; the
@@ -154,6 +172,29 @@ impl Session {
             max,
         ))
     }
+
+    /// Build the self-describing result-catalog blob from the loaded
+    /// `mili-rs` run (`phase-5-m3.md` Decision 67). The primal section
+    /// is `Database::queriable_svars(false, false)` — a *reshape* of
+    /// the parsed svar table, never a re-port (the M5 "reuse, don't
+    /// re-port" boundary). `None` when no real run is loaded, exactly
+    /// like [`Session::geometry_ref`]: the client then keeps its
+    /// static placeholder and the headless composite gate is
+    /// unperturbed (`bug-tracker.md` VB-001). Time-independent
+    /// variables are not enumerated yet (mili-rs has no TI accessor —
+    /// the client labels that sub-tree accordingly).
+    fn catalog_blob(&self) -> Option<Vec<u8>> {
+        let db = self.db.as_ref()?;
+        let mut blob = CATALOG_MAGIC.to_vec();
+        for name in db.queriable_svars(false, false) {
+            // svar names are file identifiers (no tab/newline); the
+            // tab-delimited line stays unambiguous.
+            blob.extend_from_slice(b"P\t");
+            blob.extend_from_slice(name.as_bytes());
+            blob.push(b'\n');
+        }
+        Some(blob)
+    }
 }
 
 impl Session {
@@ -248,6 +289,17 @@ impl VizService {
     #[must_use]
     pub fn fetch_geometry(&self, ticket: &[u8]) -> Option<Vec<u8>> {
         self.inner.session.lock().unwrap().geom.get(ticket).cloned()
+    }
+
+    /// Resolve the conventional [`CATALOG_TICKET`] to the
+    /// self-describing result-catalog blob (`phase-5-m3.md`
+    /// Decision 67). The in-process client calls this directly (the
+    /// `fetch_geometry` pattern); the Flight `do_get` fronts the same
+    /// seam for the deferred remote mode. `None` ⇒ no real run loaded
+    /// (the client keeps its static placeholder).
+    #[must_use]
+    pub fn fetch_catalog(&self) -> Option<Vec<u8>> {
+        self.inner.session.lock().unwrap().catalog_blob()
     }
 
     /// The Arrow Flight adapter over this service's geometry store

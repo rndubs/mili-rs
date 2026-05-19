@@ -23,6 +23,7 @@
 
 mod app;
 mod camera;
+mod catalog;
 mod cli;
 mod colormap;
 mod egui_layer;
@@ -34,6 +35,7 @@ mod tweaks;
 
 pub use app::run;
 pub use camera::Camera;
+pub use catalog::{decode_catalog, ResultCatalog};
 pub use cli::{parse_args, CliArgs, CliOutcome};
 pub use colormap::{
     normalize as colormap_normalize, sample as colormap_sample,
