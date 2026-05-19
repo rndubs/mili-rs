@@ -427,7 +427,9 @@ impl App {
             | UiAction::ToggleOverlay(_)
             | UiAction::SelectBottomTab(_)
             | UiAction::CollapseBottomTabs
-            | UiAction::TogglePicking => None,
+            | UiAction::TogglePicking
+            | UiAction::SetTheme(_)
+            | UiAction::SetDockCollapsed(_) => None,
         };
         if let Some(cmd) = cmd {
             let _ = self.rt.block_on(self.session.execute(cmd));

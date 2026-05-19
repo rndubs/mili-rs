@@ -134,6 +134,34 @@ impl RenderMode {
     }
 }
 
+/// The egui visuals theme (wireframes §"Tweaks": *Theme — Dark / Light
+/// egui visuals*). The default [`Theme::Dark`] is exactly egui's
+/// default `Visuals::dark()`, so applying it is pixel-identical to the
+/// untouched M3 path — the byte-stable composite gate (`bug-tracker.md`
+/// VB-001) is unaffected by the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Theme::Dark => "dark",
+            Theme::Light => "light",
+        }
+    }
+    fn visuals(self) -> egui::Visuals {
+        match self {
+            Theme::Dark => egui::Visuals::dark(),
+            Theme::Light => egui::Visuals::light(),
+        }
+    }
+}
+
 /// The three peer bottom tabs (wireframes §"Bottom tabs";
 /// `phase-5-m3.5.md` Decision 51).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +265,17 @@ pub enum UiAction {
     /// deferred Phase 5 M5 remote mode). The subprocess path is
     /// windowed-only — not headlessly verifiable in CI.
     RunScript(String),
+    /// Pure-client theme switch (wireframes §"Tweaks"). Already applied
+    /// to [`ShellState`]; [`build_shell_ui`] sets the egui visuals from
+    /// it each frame. Returned for observability/persistence (the tweak
+    /// state "should persist between sessions"). No proto command.
+    SetTheme(Theme),
+    /// Pure-client left-dock collapse (wireframes §"Tweaks": *Left dock
+    /// collapsed — L1 ↔ left-rail-only*). Already applied to
+    /// [`ShellState`]; the shell renders the 28 px rail instead of the
+    /// full dock. Returned for observability/persistence. No proto
+    /// command.
+    SetDockCollapsed(bool),
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -267,6 +306,34 @@ s = griz.launch()
 print(s)
 ";
 
+/// The `Control` menu rows: a label plus the **already-existing,
+/// already-lowered** [`UiAction`] each emits (`wireframe-parity.md`
+/// "Menu bar"; MVP-cut item 1). The legacy griz `Control` Motif menu
+/// (`reference/griz/Src/gui.c`) is session/app control — Copyright,
+/// Material Mgr, Session save/load, Quit — all of which need a proto
+/// or windowed-lifecycle contract this slice deliberately does not
+/// touch. So `Control` instead hosts the session-control verbs that
+/// already have a `UiAction` and an `app.rs` lowering (the griz idiom
+/// of menus duplicating the toolbar / `Time` menu): transport,
+/// animate/stop, view-reset/fit. Pure data so the wiring is
+/// unit-testable without driving egui pointer input — the menu just
+/// iterates this and the windowed app lowers each variant exactly as
+/// the toolbar's clicks already do. No frozen-proto change, no new
+/// `UiAction`.
+#[must_use]
+pub fn control_menu_items() -> Vec<(&'static str, UiAction)> {
+    vec![
+        ("⏮ first state", UiAction::First),
+        ("◀ prev state", UiAction::Prev),
+        ("▶ next state", UiAction::Next),
+        ("⏭ last state", UiAction::Last),
+        ("▶/⏸ animate", UiAction::ToggleAnimate),
+        ("⏹ stop animate", UiAction::StopAnimate),
+        ("⟲ view reset", UiAction::ViewReset),
+        ("⊞ fit", UiAction::Fit),
+    ]
+}
+
 /// All shell state the layout is a pure function of.
 #[derive(Debug, Clone)]
 pub struct ShellState {
@@ -286,6 +353,11 @@ pub struct ShellState {
     /// Whether left-click does a client-side ray-cast pick instead of
     /// starting an orbit. Default off, driven by the `Picking` menu.
     pub picking: bool,
+    /// World-space point of the last ray-cast hit, for the viewport
+    /// highlight glyph (MVP-cut 4). `None` (the default, a miss, or
+    /// picking off) → no glyph, so the headless composite gate stays
+    /// byte-stable (`bug-tracker.md` VB-001).
+    pub pick_point: Option<[f32; 3]>,
     /// Classes whose materials are toggled **off** in the left-dock
     /// Materials section. Empty = all visible (the default, so the M3
     /// composite gate is unchanged). The proto's `MaterialsState` is
@@ -327,6 +399,14 @@ pub struct ShellState {
     /// Default [`RenderMode::Shaded`] keeps the M3 composite gate
     /// byte-stable.
     pub render_mode: RenderMode,
+    /// Active egui theme (wireframes §"Tweaks"), driven by the
+    /// Preferences menu. Default [`Theme::Dark`] == egui's default
+    /// visuals, so the M3 composite path is pixel-unchanged.
+    pub theme: Theme,
+    /// Whether the left dock is collapsed to a 28 px rail (wireframes
+    /// §"Tweaks": *Left dock collapsed*). Default `false` keeps the L1
+    /// full dock, so `scene_frac` / the composite gate are unchanged.
+    pub dock_collapsed: bool,
     /// The central viewport the panels leave, as `[x, y, w, h]`
     /// fractions of the full egui screen (`0..1`, top-left origin).
     /// `None` until the first [`build_shell_ui`] measures it. The
@@ -360,6 +440,7 @@ impl Default for ShellState {
             fps: 0.0,
             pick: "—".to_string(),
             picking: false,
+            pick_point: None,
             hidden_materials: std::collections::BTreeSet::new(),
             selected_result: None,
             bottom_tab: None,
@@ -374,6 +455,8 @@ impl Default for ShellState {
             legend_min: None,
             legend_max: None,
             render_mode: RenderMode::default(),
+            theme: Theme::default(),
+            dock_collapsed: false,
             scene_frac: None,
             camera: None,
             model_aabb: None,
@@ -406,6 +489,21 @@ impl ShellState {
         UiAction::SetRenderMode(mode)
     }
 
+    /// Switch the egui theme (wireframes §"Tweaks"). Pure client
+    /// state; the returned action is observability/persistence-only
+    /// (no proto command).
+    pub fn set_theme(&mut self, theme: Theme) -> UiAction {
+        self.theme = theme;
+        UiAction::SetTheme(theme)
+    }
+
+    /// Collapse/expand the left dock (wireframes §"Tweaks"). Pure
+    /// client state; observability/persistence-only (no proto command).
+    pub fn set_dock_collapsed(&mut self, collapsed: bool) -> UiAction {
+        self.dock_collapsed = collapsed;
+        UiAction::SetDockCollapsed(collapsed)
+    }
+
     /// Toggle client-side picking. Turning it off clears the readout
     /// back to `—`. Pure client state; the action is observability-only
     /// (no proto command).
@@ -413,6 +511,7 @@ impl ShellState {
         self.picking = !self.picking;
         if !self.picking {
             self.pick = "—".to_string();
+            self.pick_point = None;
         }
         UiAction::TogglePicking
     }
@@ -429,6 +528,9 @@ impl ShellState {
                 None => format!("node {} · tri {}", p.node, p.tri),
             },
         };
+        // Remember the hit point for the viewport highlight glyph; a
+        // miss clears it so a stale marker never lingers (MVP-cut 4).
+        self.pick_point = hit.map(|p| p.point);
     }
 
     /// Whether a class's materials are currently shown.
@@ -576,6 +678,12 @@ impl ShellState {
 /// mesh pass shows through (`phase-5-m3.md` Decision 45).
 pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
     let mut actions = Vec::new();
+    // Apply the tweak theme (wireframes §"Tweaks"). The default
+    // `Theme::Dark` is egui's own `Visuals::dark()`, so on the
+    // default-`ShellState` composite path this is pixel-identical to
+    // the untouched M3 chrome (`bug-tracker.md` VB-001); a runtime
+    // switch back to Dark also reverts cleanly.
+    ui.ctx().set_visuals(state.theme.visuals());
     // Full extent before any panel carves into it; the leftover
     // central rect is normalized against this below.
     let full = ui.max_rect();
@@ -584,7 +692,24 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
         .exact_size(26.0)
         .show_inside(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                let _ = ui.menu_button("Control", |_| {});
+                ui.menu_button("Control", |ui| {
+                    // Transport/animate/view need an attached run, like
+                    // the toolbar's equivalents; grey the whole menu
+                    // body when not attached rather than emit no-ops.
+                    let attached = state.phase != SessionPhase::NotAttached;
+                    ui.add_enabled_ui(attached, |ui| {
+                        for (i, (label, action)) in control_menu_items().into_iter().enumerate() {
+                            // griz groups: transport | animate | view.
+                            if i == 4 || i == 6 {
+                                ui.separator();
+                            }
+                            // A `Button` click auto-closes the menu.
+                            if ui.button(label).clicked() {
+                                actions.push(action);
+                            }
+                        }
+                    });
+                });
                 ui.menu_button("Rendering", |ui| {
                     for mode in [RenderMode::Shaded, RenderMode::Edges, RenderMode::Wireframe] {
                         let mark = if state.render_mode == mode {
@@ -602,6 +727,28 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     let mark = if state.picking { "● " } else { "○ " };
                     if ui.button(format!("{mark}enable picking")).clicked() {
                         actions.push(state.toggle_picking());
+                    }
+                });
+                // View / Preferences host (wireframes §"Tweaks"; the
+                // legacy griz menu bar has no settings menu — the
+                // wireframe maps the Tweaks set to a "View /
+                // Preferences" menu). MVP scope is the two tweaks that
+                // are pure-client and need no proto/contract change:
+                // Theme and Left-dock-collapse. "Show bottom tabs" is
+                // already reachable via the tab strip's ▾ hide;
+                // "AI panel position" is M6 (panel is a placeholder).
+                ui.menu_button("Preferences", |ui| {
+                    ui.label("Theme");
+                    for t in [Theme::Dark, Theme::Light] {
+                        let mark = if state.theme == t { "● " } else { "○ " };
+                        if ui.button(format!("{mark}{}", t.label())).clicked() {
+                            actions.push(state.set_theme(t));
+                        }
+                    }
+                    ui.separator();
+                    let mut collapsed = state.dock_collapsed;
+                    if ui.checkbox(&mut collapsed, "Left dock collapsed").clicked() {
+                        actions.push(state.set_dock_collapsed(collapsed));
                     }
                 });
                 for m in ["Results", "Time", "Plot", "Help"] {
@@ -624,12 +771,30 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
 
     bottom_tabs(ui, state, &mut actions);
 
-    egui::Panel::left("dock")
-        .resizable(true)
-        .default_size(230.0)
-        .show_inside(ui, |ui| {
-            left_dock(ui, state, &mut actions);
-        });
+    if state.dock_collapsed {
+        // L3-style left rail (wireframes §"Tweaks": *Left dock
+        // collapsed*): a 28 px strip with a click-to-expand glyph,
+        // mirroring the AI rail. Off by default so `scene_frac` / the
+        // composite gate are unchanged.
+        egui::Panel::left("dock")
+            .resizable(false)
+            .exact_size(28.0)
+            .show_inside(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    if ui.button("▸").on_hover_text("expand left dock").clicked() {
+                        actions.push(state.set_dock_collapsed(false));
+                    }
+                });
+            });
+    } else {
+        egui::Panel::left("dock")
+            .resizable(true)
+            .default_size(230.0)
+            .show_inside(ui, |ui| {
+                left_dock(ui, state, &mut actions);
+            });
+    }
 
     // Collapsed AI rail (28 px) — placeholder only; the panel + agent
     // loop are M6 (`phase-5-m3.md` Goal).
@@ -1139,6 +1304,36 @@ fn overlays(ui: &mut egui::Ui, rect: egui::Rect, state: &ShellState) {
                 let inset = rect.shrink2(egui::vec2(rect.width() * 0.18, rect.height() * 0.18));
                 let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
                 dashed_rect(&painter, inset, stroke);
+            }
+        }
+    }
+
+    // Picking highlight glyph (MVP-cut 4): a ring + crosshair over the
+    // last ray-cast hit, projected through the live camera so it
+    // tracks orbit/pan/zoom and per-state deform. Not chip-gated (it
+    // is a picking-mode artifact, not one of the five HUD overlays);
+    // only drawn when picking is on, a hit is cached, and a live
+    // camera is attached — so the headless composite path (camera
+    // `None`, picking off) is byte-stable (`bug-tracker.md` VB-001).
+    if state.picking {
+        if let Some(c) = state
+            .pick_point
+            .zip(state.camera.as_ref())
+            .and_then(|(p, cam)| {
+                let w = rect.width().max(1.0) as u32;
+                let h = rect.height().max(1.0) as u32;
+                cam.project(glam::Vec3::from(p), w, h)
+            })
+        {
+            let at = egui::pos2(
+                rect.min.x + c.x * rect.width(),
+                rect.min.y + c.y * rect.height(),
+            );
+            let accent = egui::Color32::from_rgb(255, 190, 60);
+            let stroke = egui::Stroke::new(1.5, accent);
+            painter.circle_stroke(at, 7.0, stroke);
+            for d in [egui::vec2(11.0, 0.0), egui::vec2(0.0, 11.0)] {
+                painter.line_segment([at - d, at + d], stroke);
             }
         }
     }

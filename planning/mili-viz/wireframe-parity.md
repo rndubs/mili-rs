@@ -37,10 +37,11 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Control · Results · Time · Plot · Help` items | 🔴 placeholder | the other 5 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Results · Time · Plot · Help` items | 🔴 placeholder | the other 4 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
 | `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode` | VB-003 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
-| View / Preferences (theme, layout tweaks) | ⬜ missing | no menu to host the Tweaks set | — |
+| View / Preferences (theme, layout tweaks) | ✅ done | `Preferences` menu hosts the Tweaks set: `Theme` (dark/light → `UiAction::SetTheme`, applied via egui visuals in `build_shell_ui`) + `Left dock collapsed` (→ `UiAction::SetDockCollapsed`, L1 ↔ 28 px rail). Pure-client, no proto change | status 23 |
 
 ## Toolbar
 
@@ -68,6 +69,7 @@ started.
 | title / state / legend | ✅ done | data-driven | status 16 |
 | axes gizmo | ✅ done | world X/Y/Z projected through the live camera basis (tracks orbit); static triad only on the headless/not-attached fallback | status 23 |
 | bbox | ✅ done | real per-state world AABB projected through the live camera (12 edges, tracks orbit/pan/zoom + deform); placeholder inset only when no live camera | status 23 |
+| Pick highlight glyph | ✅ done | ring+crosshair over the last ray-cast hit, projected through the live camera (tracks orbit/pan/zoom + deform); only when picking on + a cached hit + a live camera, so the headless/off default is byte-stable | status 23 |
 | Multi-client peer banner | ⬜ missing | — | M6 |
 | Not-attached card | ✅ done | — | status 16 |
 
@@ -96,7 +98,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | ⬜ missing | no surface at all; `let _ = Overlay::Title;` marks the unbuilt persistence hook | — |
+| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | 🟡 partial | `Preferences` menu surfaces **Theme** + **Left dock collapsed** (pure-client, `SetTheme`/`SetDockCollapsed`, returned for persistence). Bottom-tab hide is already reachable via the tab strip's `▾ hide`; **AI-panel position** is M6 (panel is a placeholder). Cross-session persistence of the returned actions still unbuilt (`app.rs` `let _ = Overlay::Title;` hook) | status 23 |
 
 ## Renderer / rendering modes
 
@@ -110,7 +112,7 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | File → Open / `rfd` picker | ⏸️ deferred | own milestone (maintainer decision); load via CLI `-i` / Layer-0 `load` only | status 21 |
-| Picking (client-side from cached `GeometryRef`) | 🟡 partial | ray-cast vs. cached hull → live status-bar readout (node/tri/scalar). Frozen proto has no label catalog, so no `class N` mapping; no highlight glyph yet | status 23 |
+| Picking (client-side from cached `GeometryRef`) | 🟡 partial | ray-cast vs. cached hull → live status-bar readout (node/tri/scalar) **+ viewport highlight glyph** (ring+crosshair over the cached hit, projected through the live camera so it tracks orbit/pan/zoom + deform; off-by-default/no-camera → no glyph, byte-stable). Remaining: the frozen proto has no label catalog, so still no `class N` mapping (design-first, deferred) | status 23 |
 | Agent / multi-client session states | ⬜ missing | thinking/running/interrupted/peer | M6 |
 | Remote mode (gRPC+Flight wired to `connect`/`attach`) | ⏸️ deferred | server transport done (status 11); client wiring is Phase 5 M5 | status 22 |
 
@@ -122,17 +124,24 @@ The maintainer-scoped MVP excludes the AI panel (M6) and remote mode
 (Phase 5 M5). The parity gaps that remain in-scope for MVP, roughly by
 leverage:
 
-1. **Menu bar** — 🟡 `Rendering` is now wired (VB-003); still to do:
-   `Control`, `Picking`, the View/Preferences host.
+1. **Menu bar** — 🟡 `Rendering` (VB-003), `Picking`, and `Control`
+   (session-control verbs, reusing the already-lowered
+   transport/animate/view `UiAction`s) are now wired; still to do:
+   the View/Preferences host.
 2. ✅ **Wireframe / element-edge render mode** (VB-003) + its
    `Rendering` toggle — done.
 3. ✅ **Materials enable/disable affordance** (server side already
    done, status 8 — GUI only) — done.
-4. 🟡 **Picking** + live status-bar readout — ray-cast + readout
-   landed; a viewport highlight glyph + label-catalog mapping remain.
+4. 🟡 **Picking** + live status-bar readout — ray-cast, readout
+   **and the viewport highlight glyph** landed; only the
+   label-catalog `class N` mapping remains (needs a non-frozen-proto
+   catalog path — design-first, deferred).
 5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. **File → Open** (lift the deferral if MVP needs it).
-7. **L3 focus mode + theme/tweaks surface.**
+7. 🟡 **L3 focus mode + theme/tweaks surface** — the `Preferences`
+   menu + Theme + Left-dock-collapse landed; the full L3 focus mode
+   (dock→icon rail *plus* AI/tabs hidden via `Ctrl+\`) and
+   cross-session tweak persistence remain.
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto
    catalog path — design first).
 9. 🟡 **Wire the scripting tab** — done as a `launch()`-based
