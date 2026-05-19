@@ -31,7 +31,7 @@ started.
 | ---- | ------ | ----- | --- |
 | L1 default layout (6 regions, egui panel mapping, default sizes) | ✅ done | `build_shell_ui` | status 16 |
 | L2 — AI panel expanded (28 px rail → 340 px dock) | ⬜ missing | right panel is a hard 28 px rail, no expand path | M6 |
-| L3 — focus mode (dock→icon rail, AI/tabs hidden, `Ctrl+\`) | 🟡 partial | dock→28 px **R/M/S/P icon rail** landed (`dock_collapsed` + `dock_rail_glyphs`, toggled from the Preferences menu). Remaining: AI/tabs auto-hide + the `Ctrl+\` one-shot toggle | status 23 |
+| L3 — focus mode (dock→icon rail, AI/tabs hidden, `Ctrl+\`) | ✅ done | `Ctrl+\` toggles `focus_mode` (`set_focus_mode` also collapses the dock to the R/M/S/P rail); the AI rail + bottom tabs are hidden; a rail glyph or a second `Ctrl+\` restores full L1. Default off → byte-stable | status 23 |
 
 ## Menu bar
 
@@ -139,9 +139,10 @@ leverage:
 5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. **File → Open** (lift the deferral if MVP needs it).
 7. 🟡 **L3 focus mode + theme/tweaks surface** — the `Preferences`
-   menu + Theme + Left-dock-collapse landed; the full L3 focus mode
-   (dock→icon rail *plus* AI/tabs hidden via `Ctrl+\`) and
-   cross-session tweak persistence remain.
+   menu + Theme + Left-dock-collapse, the R/M/S/P icon rail, and full
+   L3 focus mode (`Ctrl+\` → dock rail + AI/tabs hidden) all landed.
+   Only cross-session tweak persistence (the `app.rs`
+   `let _ = Overlay::Title;` hook) remains.
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto
    catalog path — design first).
 9. 🟡 **Wire the scripting tab** — done as a `launch()`-based

@@ -276,6 +276,12 @@ pub enum UiAction {
     /// full dock. Returned for observability/persistence. No proto
     /// command.
     SetDockCollapsed(bool),
+    /// Pure-client L3 focus-mode toggle (wireframes §"L3 — Focus
+    /// mode"; `Ctrl+\`). Already applied to [`ShellState`]
+    /// (`set_focus_mode` also collapses the dock); the shell hides the
+    /// AI rail + bottom tabs. Returned for observability/persistence.
+    /// No proto command.
+    SetFocusMode(bool),
 }
 
 /// Built-in derived result names the Phase 4 server supports
@@ -432,6 +438,12 @@ pub struct ShellState {
     /// §"Tweaks": *Left dock collapsed*). Default `false` keeps the L1
     /// full dock, so `scene_frac` / the composite gate are unchanged.
     pub dock_collapsed: bool,
+    /// L3 focus mode (wireframes §"L3 — Focus mode"): stripped to the
+    /// viewport — the AI rail + bottom tabs are hidden and the dock is
+    /// the icon rail. Toggled with `Ctrl+\`. Default `false` keeps the
+    /// full L1 chrome, so `scene_frac` / the composite gate are
+    /// unchanged (`bug-tracker.md` VB-001).
+    pub focus_mode: bool,
     /// The central viewport the panels leave, as `[x, y, w, h]`
     /// fractions of the full egui screen (`0..1`, top-left origin).
     /// `None` until the first [`build_shell_ui`] measures it. The
@@ -482,6 +494,7 @@ impl Default for ShellState {
             render_mode: RenderMode::default(),
             theme: Theme::default(),
             dock_collapsed: false,
+            focus_mode: false,
             scene_frac: None,
             camera: None,
             model_aabb: None,
@@ -527,6 +540,17 @@ impl ShellState {
     pub fn set_dock_collapsed(&mut self, collapsed: bool) -> UiAction {
         self.dock_collapsed = collapsed;
         UiAction::SetDockCollapsed(collapsed)
+    }
+
+    /// Toggle L3 focus mode (wireframes §"L3 — Focus mode"; `Ctrl+\`).
+    /// Entering also collapses the dock so the rail shows; exiting
+    /// restores it — so a single key round-trips the full L1 ↔ L3
+    /// chrome. Pure client state; observability/persistence-only (no
+    /// proto command).
+    pub fn set_focus_mode(&mut self, on: bool) -> UiAction {
+        self.focus_mode = on;
+        self.dock_collapsed = on;
+        UiAction::SetFocusMode(on)
     }
 
     /// Toggle client-side picking. Turning it off clears the readout
@@ -709,6 +733,13 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
     // the untouched M3 chrome (`bug-tracker.md` VB-001); a runtime
     // switch back to Dark also reverts cleanly.
     ui.ctx().set_visuals(state.theme.visuals());
+    // L3 focus-mode toggle (wireframes §"L3 — Focus mode"): `Ctrl+\`
+    // round-trips the full L1 ↔ stripped-viewport chrome. A key event
+    // is real input, so this only fires when the user presses it (the
+    // "no input ⇒ no actions" invariant holds without the key).
+    if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::Backslash)) {
+        actions.push(state.set_focus_mode(!state.focus_mode));
+    }
     // Full extent before any panel carves into it; the leftover
     // central rect is normalized against this below.
     let full = ui.max_rect();
@@ -794,7 +825,10 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
             status_bar(ui, state);
         });
 
-    bottom_tabs(ui, state, &mut actions);
+    // Bottom tabs are hidden in L3 focus mode (wireframes §"L3").
+    if !state.focus_mode {
+        bottom_tabs(ui, state, &mut actions);
+    }
 
     if state.dock_collapsed {
         // L3 focus-mode icon rail (wireframes §"L3 — Focus mode" /
@@ -809,7 +843,14 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     ui.add_space(6.0);
                     for (glyph, tip) in dock_rail_glyphs(state.picking) {
                         if ui.button(glyph).on_hover_text(tip).clicked() {
-                            actions.push(state.set_dock_collapsed(false));
+                            // In focus mode a glyph restores the full
+                            // L1 chrome (exit focus); otherwise it just
+                            // expands the dock.
+                            actions.push(if state.focus_mode {
+                                state.set_focus_mode(false)
+                            } else {
+                                state.set_dock_collapsed(false)
+                            });
                         }
                     }
                 });
@@ -824,16 +865,19 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
     }
 
     // Collapsed AI rail (28 px) — placeholder only; the panel + agent
-    // loop are M6 (`phase-5-m3.md` Goal).
-    egui::Panel::right("ai")
-        .resizable(false)
-        .exact_size(28.0)
-        .show_inside(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(8.0);
-                ui.label("AI");
+    // loop are M6 (`phase-5-m3.md` Goal). Hidden in L3 focus mode
+    // (wireframes §"L3").
+    if !state.focus_mode {
+        egui::Panel::right("ai")
+            .resizable(false)
+            .exact_size(28.0)
+            .show_inside(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    ui.label("AI");
+                });
             });
-        });
+    }
 
     // The leftover space is the central viewport: a transparent
     // region the full-surface mesh pass shows through; the five
