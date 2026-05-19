@@ -948,6 +948,31 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       world X/Y/Z through the camera basis. `camera`/`model_aabb`
       default `None` (headless composite / not-attached) → the M3
       placeholder inset + static triad, so that gate stays byte-stable.
+    - **Scripting runner wired (MVP-cut 9).** The Decision-49 disabled
+      placeholder is now a working runner: an enabled monospace editor
+      (seeded with a `griz.launch()` template), a Run button, a
+      streamed stdout/stderr pane and the `venv:…·attach:…` line.
+      `ShellState::run_script` gates blank/in-flight and emits the
+      pure-client `UiAction::RunScript`; the windowed app spawns a
+      `pygriz` subprocess (`$GRIZ_PYTHON` else `python3`, the landed
+      Phase 6 M2 `griz`/`launch()` made importable via a
+      `python/pygriz/src`-prepended `PYTHONPATH`) on a worker thread and
+      streams its output back through a channel drained each frame
+      (`poll_script`, mirroring `ingest_deltas`). `attach()`-into-*this*
+      GUI is **not** wired: the in-process client writes no
+      `~/.griz/sessions` file, so a script that drives *this* viewport
+      needs the deferred Phase 5 M5 remote transport — the runner uses
+      `launch()` (a headless server it owns) in the interim, mirroring
+      the Decision-49/50 "ship what's landed, document the forward
+      path" precedent. A `pip install`ed managed venv (decision 3's
+      production shape) is also forward work. `script*` fields default
+      inert (`bottom_tab: None`, no subprocess) so the M3 composite
+      gate stays byte-stable. Gating test
+      `crates/mili-viz-client/tests/scripting_runner.rs` (always-on
+      run-gate/stream/finish + headless paint; skip-on-absent composite
+      render proving the open body composites and the collapsed seam is
+      byte-stable). The `pygriz` **subprocess** itself is windowed-only
+      and **not headlessly verifiable in CI**.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
