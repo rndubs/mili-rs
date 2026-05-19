@@ -98,7 +98,7 @@ started.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | 🟡 partial | `Preferences` menu surfaces **Theme** + **Left dock collapsed** (pure-client, `SetTheme`/`SetDockCollapsed`, returned for persistence). Bottom-tab hide is already reachable via the tab strip's `▾ hide`; **AI-panel position** is M6 (panel is a placeholder). Cross-session persistence of the returned actions still unbuilt (`app.rs` `let _ = Overlay::Title;` hook) | status 23 |
+| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | ✅ done | `Preferences` menu surfaces **Theme** + **Left dock collapsed** (pure-client, `SetTheme`/`SetDockCollapsed`). Bottom-tab hide is already reachable via the tab strip's `▾ hide`; **AI-panel position** is M6 (panel is a placeholder). Cross-session persistence built: a `serde` `PersistedTweaks` (the 5 overlay chips + theme + dock-collapse — the wireframe-justified set) is loaded into `ShellState` at windowed startup from `$XDG_CONFIG_HOME`/`$HOME/.config/mili-viz/tweaks.json` and re-written when a persisted `UiAction` fires (`is_persisted_action`). No config ⇒ `PersistedTweaks::default` == default-shell snapshot, so the headless composite gate is disk-free + byte-stable (VB-001) | status 23 |
 
 ## Renderer / rendering modes
 
@@ -138,11 +138,11 @@ leverage:
    catalog path — design-first, deferred).
 5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. **File → Open** (lift the deferral if MVP needs it).
-7. 🟡 **L3 focus mode + theme/tweaks surface** — the `Preferences`
-   menu + Theme + Left-dock-collapse, the R/M/S/P icon rail, and full
-   L3 focus mode (`Ctrl+\` → dock rail + AI/tabs hidden) all landed.
-   Only cross-session tweak persistence (the `app.rs`
-   `let _ = Overlay::Title;` hook) remains.
+7. ✅ **L3 focus mode + theme/tweaks surface** — the `Preferences`
+   menu + Theme + Left-dock-collapse, the R/M/S/P icon rail, full L3
+   focus mode (`Ctrl+\` → dock rail + AI/tabs hidden), and
+   cross-session tweak persistence (the `serde` `PersistedTweaks`
+   config, replacing the `app.rs` hook) all landed.
 8. **Primal / time-indep result catalog** (needs a non-frozen-proto
    catalog path — design first).
 9. 🟡 **Wire the scripting tab** — done as a `launch()`-based

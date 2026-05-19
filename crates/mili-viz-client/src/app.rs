@@ -25,7 +25,7 @@ use crate::egui_layer::EguiPaint;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer;
 use crate::session::Session;
-use crate::shell::{build_shell_ui, Overlay, ResultInfo, SessionPhase, ShellState, UiAction};
+use crate::shell::{build_shell_ui, ResultInfo, SessionPhase, ShellState, UiAction};
 
 struct WindowState {
     window: Arc<Window>,
@@ -801,9 +801,15 @@ impl App {
         for a in &actions {
             self.apply_action(a);
         }
-        // Persisted-toggle hook (overlay on/off between sessions) is a
-        // tweak surface — out of M3 (wireframes §"Tweaks").
-        let _ = Overlay::Title;
+        // Cross-session tweak persistence (wireframes §"Tweaks";
+        // MVP-cut 7): when a frame mutated a persisted field (an
+        // overlay chip, Theme or Left-dock-collapse) re-write the
+        // per-user config. Windowed-only — the headless
+        // `render_shell_to_image` path never reaches here, so the M3
+        // composite gate stays disk-free and byte-stable (VB-001).
+        if actions.iter().any(crate::tweaks::is_persisted_action) {
+            crate::tweaks::save(&crate::tweaks::PersistedTweaks::from_state(&self.shell));
+        }
     }
 }
 
@@ -821,6 +827,11 @@ pub fn run(root: Option<String>) -> Result<(), Box<dyn std::error::Error + Send 
     let (script_tx, script_rx) = std::sync::mpsc::channel();
 
     let mut shell = ShellState::default();
+    // Restore cross-session tweaks (wireframes §"Tweaks"; MVP-cut 7).
+    // No config file ⇒ `PersistedTweaks::default`, whose `apply_to`
+    // leaves `shell` byte-identical to `ShellState::default()`, so a
+    // fresh machine is exactly the byte-stable default (VB-001).
+    crate::tweaks::load().apply_to(&mut shell);
     if root.is_some() {
         shell.phase = SessionPhase::AttachedIdle;
     }

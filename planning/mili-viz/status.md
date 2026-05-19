@@ -1020,8 +1020,8 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       Light+collapsed render still composites over the unchanged mesh
       pass while visibly relighting the chrome). The menu-open click
       path is windowed pointer input, **not headlessly verifiable in
-      CI**. Full L3 focus mode (`Ctrl+\`, AI/tabs hidden too) and the
-      persistence wiring remain.
+      CI**. (Full L3 focus mode and the cross-session persistence
+      wiring both landed in follow-up bullets below.)
     - **Picking viewport highlight glyph (MVP-cut 4 remainder).** The
       ray-cast + status-bar readout already landed; this adds the
       missing viewport marker. `Pick` already carries the world-space
@@ -1091,9 +1091,45 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       hidden; skip-on-absent composite render proving the default seam
       is unperturbed and the focus render drops the AI-rail chrome
       while still compositing the mesh). The windowed key path is
-      exercised by the synthetic-event leg; only cross-session
-      persistence of the tweak flags remains (the `app.rs`
-      `let _ = Overlay::Title;` hook).
+      exercised by the synthetic-event leg; cross-session persistence
+      of the tweak flags landed in the next bullet.
+    - **Cross-session tweak persistence (MVP-cut 7 remainder — the
+      last `wireframe-parity.md` MVP-cut item 7 piece).** The `app.rs`
+      `let _ = Overlay::Title;` placeholder hook is now a real
+      `serde`-backed config. A new `tweaks.rs` defines `PersistedTweaks`
+      — the **wireframe-justified** set from
+      `griz_wgpu_wireframes/README.md` §"Tweaks": the five overlay-chip
+      states ("should persist between sessions") + the two Tweaks-table
+      preferences (**Theme**, **Left dock collapsed**). `stride` /
+      `focus_mode` are deliberately *not* persisted (runtime modes, not
+      preferences). The windowed `run` loads it into `ShellState` at
+      startup; `redraw` re-writes it whenever a frame's actions include
+      a persisted one (`is_persisted_action` — exactly
+      `ToggleOverlay`/`SetTheme`/`SetDockCollapsed`). Path is the XDG
+      base-dir spec (`$XDG_CONFIG_HOME` absolute, else
+      `$HOME/.config`) + `mili-viz/tweaks.json`, with a
+      `MILI_VIZ_CONFIG` override; an unresolvable/unwritable config is
+      a silent no-op (losing persistence never breaks the GUI).
+      `PersistedTweaks::default` is *by construction*
+      `from_state(&ShellState::default())`, so a **missing** config
+      restores the byte-identical default shell — the headless
+      `render_shell_to_image` path never touches disk and stays
+      byte-stable (`bug-tracker.md` VB-001). No frozen-proto change,
+      no new `UiAction`, no Phase 4 crate touched (serde/serde_json
+      added to the client crate only). Gating test
+      `crates/mili-viz-client/tests/tweaks_persistence.rs` (always-on:
+      default == default-shell snapshot, absent-file load == default +
+      `apply_to` leaves the byte-stable defaults, loss-free JSON +
+      on-disk round-trip via the explicit-path API, `apply_to` purity
+      — only the persisted fields move, and `is_persisted_action`
+      classifies exactly the three tweak actions; skip-on-absent
+      composite render proving a restored-from-absent state is
+      **pixel-identical** to the untouched default and a JSON
+      round-tripped Light+collapsed config still composites + relights
+      the chrome). The windowed disk read/write itself (no event loop /
+      display in CI) is **not headlessly verifiable**; the pure
+      (de)serialization + default-equivalence + explicit-path API are
+      the pinned contract.
     Gating: existing `mili-viz-client` / `mili-viz-server` suites stay
     green (the M3 composite `render_shell_to_image` path is byte-stable
     — it still renders full-surface; only the windowed `render_in` path
