@@ -294,19 +294,25 @@ expanded by `scripting.md` / `client.md`. None started.
       `crates/mili-viz-server/tests/m6_transport.rs`
       `remote_transport_grpc_and_flight_over_tcp`; M1's six + M2 +
       M3 + M4 + M5 + M5b tests unchanged and green.
-- [ ] **M7 — volumetric geometry contract (`MVG3`).** 🟡 **Planned.**
+- [x] **M7 — volumetric geometry contract (`MVG3`).** ✅ **Landed.**
       `MVG3` is a strict superset of `MVG2` ridden through the
       free-form `GeometryRef.layout` tag (zero `.proto` change),
       adds a per-superclass element-edge buffer (fixes the
-      hex-face-diagonal wireframe artifact, VB-005), a `tri_flags`
-      column (bit 0 = interior), and an opt-in interior-triangle
-      emit toggled via a reserved `MaterialVisibility{ material:
-      u32::MAX }` sentinel. **Supersedes
-      [`phase-4-m2.md`](phase-4-m2.md) Decision 11 additively** —
-      `MVG1`/`MVG2` decoders stay live, the M2/M3/M4 + Phase 5
-      composite gates stay byte-stable. Scope/decisions:
-      [`phase-4-m7.md`](phase-4-m7.md) (72–74). Gating test
-      `crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`.
+      hex-face-diagonal wireframe artifact, VB-005 — Decision 73's
+      Hex/Tet/Quad/Tri/Wedge/Pyramid tables), a `tri_flags` column
+      (bit 0 = interior), and an opt-in interior-triangle emit
+      toggled via a reserved `MaterialVisibility{ material:
+      u32::MAX }` sentinel (Decision 74). Encoder activates `MVG3`
+      only when `materials[u32::MAX] == true`; otherwise the
+      M2/M3/M4 path stays byte-identical (VB-001 — verified by the
+      gating test's "revert restores byte-identical blob" leg).
+      Client `Mesh` gains `element_edges`/`tri_flags`. Scope/
+      decisions: [`phase-4-m7.md`](phase-4-m7.md) (72–74). Gating
+      test
+      `crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`
+      (skip-on-absent end-to-end) + five in-module unit tests on
+      the volumetric build helpers (always-on: 12-edge Hex,
+      multi-superclass table counts, two-hex interior dedup).
 - [ ] **M8 — cut-plane operator.** 🟡 **Planned.** Wires the
       frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528`
       stub since [`phase-4-m1.md`](phase-4-m1.md) Δ1). Closed

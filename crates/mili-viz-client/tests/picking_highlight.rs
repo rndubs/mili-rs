@@ -52,6 +52,8 @@ fn quad() -> Mesh {
         normals: vec![[0.0, 0.0, 1.0]; 4],
         indices: vec![0, 1, 2, 0, 2, 3],
         scalars: Some(vec![10.0, 20.0, 30.0, 40.0]),
+        element_edges: None,
+        tri_flags: None,
     }
 }
 

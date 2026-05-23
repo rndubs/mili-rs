@@ -138,16 +138,14 @@ impl Session {
         let db = self.db.as_ref()?;
         let scalar = topo.vertex_scalar(db, svar, self.state);
         let materials = &self.materials;
-        let ((blob, num_indices), layout, min, max) = match &scalar {
+        let ((blob, layout, num_indices), min, max) = match &scalar {
             Some((s, lo, hi)) => (
                 topo.encode(db, self.state, Some(s), materials),
-                geometry::LAYOUT_SCALAR,
                 *lo,
                 *hi,
             ),
             None => (
                 topo.encode(db, self.state, None, materials),
-                geometry::LAYOUT,
                 0.0,
                 0.0,
             ),
