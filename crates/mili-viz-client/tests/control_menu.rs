@@ -27,6 +27,8 @@ use mili_viz_client::{
     LoadedInfo, SessionPhase, ShellState, UiAction,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -123,7 +125,11 @@ async fn composite_render() {
         .await
         .expect("in-process load/show yields a decoded hull");
 
-    let (w, h) = (240u32, 240u32);
+    // 480×320: leaves a real central viewport once the default
+    // dock (230 px) + AI rail (28 px) carve out chrome on the
+    // sides. 240×240 had no visible viewport, so the historical
+    // `at(w/2, h/2)` assertion was always sampling dock chrome.
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -148,10 +154,8 @@ async fn composite_render() {
         return;
     };
     assert_eq!(px.len() as u32, w * h * 4);
-    let i = (((h / 2) * w + w / 2) * 4) as usize;
-    let centre = [px[i], px[i + 1], px[i + 2]];
-    assert!(
-        centre.iter().copied().max().unwrap() > 60,
-        "viewport centre should be the mesh, got {centre:?}"
-    );
+    // Frame-wide "mesh visibly rendered" assertion (see
+    // `tests/common/mod.rs` — the pre-lavapipe `at(w/2, h/2)` check was
+    // brittle to non-convex meshes and chrome-over-centre layouts).
+    common::assert_mesh_visible(&px, 20, "viewport centre should be the mesh");
 }

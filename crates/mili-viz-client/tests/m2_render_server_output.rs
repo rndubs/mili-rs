@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use mili_viz_client::{decode_mvg, fetch_server_mesh, render_mesh_to_image, Camera};
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -132,12 +134,12 @@ async fn render_server_output() {
         "corner should be the clear color, got {corner:?}"
     );
 
-    // The auto-framed bounding sphere fills the viewport, so the
-    // center ray hits the hull — it is the lit mesh, not the clear
-    // color (shaded base * ambient is ≳80 on the brightest channel).
-    let center_px = at(w / 2, h / 2);
-    assert!(
-        center_px.iter().copied().max().unwrap() > 60,
-        "center should be the rendered mesh, got {center_px:?}"
-    );
+    // Frame-wide "mesh visibly rendered" assertion — see
+    // `tests/common/mod.rs`. The historical `at(w/2, h/2)` check was
+    // brittle: non-convex corpus meshes like `serial/basic1` (a
+    // bar71-family quarter-pipe shape) have a bounding-sphere centre
+    // that can fall in a hollow line of sight with no triangle. The
+    // mesh-pixel-count heuristic exercises the pipeline end-to-end
+    // without depending on a particular hull shape.
+    common::assert_mesh_visible(&px, 20, "auto-framed hull should render visibly");
 }

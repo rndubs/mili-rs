@@ -28,6 +28,8 @@ use mili_viz_client::{
     build_shell_ui, fetch_server_mesh, render_shell_to_image, Camera, SessionPhase, ShellState,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -141,7 +143,9 @@ async fn composite_render() {
     let mesh = fetch_server_mesh(&path.to_string_lossy(), "")
         .await
         .expect("in-process load/show yields a decoded hull");
-    let (w, h) = (200u32, 200u32);
+    // 480×320 so a real central viewport exists past the default
+    // dock+AI-rail chrome (see `tests/common/mod.rs`).
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -153,13 +157,5 @@ async fn composite_render() {
         );
         return;
     };
-    let at = |x: u32, y: u32| {
-        let i = ((y * w + x) * 4) as usize;
-        [px[i], px[i + 1], px[i + 2]]
-    };
-    let c = at(w / 2, h / 2);
-    assert!(
-        c.iter().copied().max().unwrap() > 60,
-        "default not-attached composite still shows the mesh: {c:?}"
-    );
+    common::assert_mesh_visible(&px, 20, "default not-attached composite still shows the mesh");
 }

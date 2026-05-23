@@ -23,6 +23,8 @@ use mili_viz_client::{
     ShellState, UiAction,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -155,7 +157,9 @@ async fn composite_render() {
         .await
         .expect("in-process load/show yields a decoded hull");
 
-    let (w, h) = (240u32, 240u32);
+    // 480×320 so a real central viewport exists past the default
+    // dock+AI-rail chrome (see `tests/common/mod.rs`).
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -185,11 +189,7 @@ async fn composite_render() {
         return;
     };
     assert_eq!(p1.len() as u32, w * h * 4);
-    let c1 = at(&p1, w / 2, h / 2);
-    assert!(
-        c1.iter().copied().max().unwrap() > 60,
-        "L1: viewport centre is the mesh, got {c1:?}"
-    );
+    common::assert_mesh_visible(&p1, 20, "L1: viewport centre is the mesh");
 
     // (b) Focus mode — still composites the mesh; the rightmost column
     // (the 28 px AI rail in L1) is now scene, not rail chrome, so the
@@ -199,11 +199,7 @@ async fn composite_render() {
     l3.dock_collapsed = true;
     let p3 = render_shell_to_image(w, h, &camera, &mesh, None, &mut l3)
         .expect("adapter was present for render (a)");
-    let c3 = at(&p3, w / 2, h / 2);
-    assert!(
-        c3.iter().copied().max().unwrap() > 60,
-        "L3: viewport centre still the mesh, got {c3:?}"
-    );
+    common::assert_mesh_visible(&p3, 20, "L3: viewport centre still the mesh");
     let col = |px: &[u8], x: u32| -> u64 {
         (10..h - 10)
             .map(|y| {

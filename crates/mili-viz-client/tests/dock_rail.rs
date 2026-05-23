@@ -27,6 +27,8 @@ use mili_viz_client::{
     SessionPhase, ShellState, UiAction,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -122,7 +124,10 @@ async fn composite_render() {
         .await
         .expect("in-process load/show yields a decoded hull");
 
-    let (w, h) = (240u32, 240u32);
+    // 480×320 so a real central viewport exists once the default
+    // dock (230 px) + AI rail (28 px) are subtracted (240×240 had no
+    // visible viewport — the `at(w/2, h/2)` checks sampled chrome).
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -152,11 +157,7 @@ async fn composite_render() {
         return;
     };
     assert_eq!(epx.len() as u32, w * h * 4);
-    let ec = at(&epx, w / 2, h / 2);
-    assert!(
-        ec.iter().copied().max().unwrap() > 60,
-        "expanded: viewport centre is the mesh, got {ec:?}"
-    );
+    common::assert_mesh_visible(&epx, 20, "expanded: viewport centre is the mesh");
 
     // (b) Collapsed icon rail — the 28 px rail still composites over
     // the unchanged mesh pass; the mesh is now visible much closer to
@@ -165,11 +166,7 @@ async fn composite_render() {
     collapsed.dock_collapsed = true;
     let cpx = render_shell_to_image(w, h, &camera, &mesh, None, &mut collapsed)
         .expect("adapter was present for render (a)");
-    let cc = at(&cpx, w / 2, h / 2);
-    assert!(
-        cc.iter().copied().max().unwrap() > 60,
-        "collapsed: viewport centre still the mesh, got {cc:?}"
-    );
+    common::assert_mesh_visible(&cpx, 20, "collapsed: viewport centre still the mesh");
     // Just right of the 28 px rail there is now scene, not dock chrome:
     // the column at x≈34 differs between the two layouts.
     let col = |px: &[u8]| -> u64 {
