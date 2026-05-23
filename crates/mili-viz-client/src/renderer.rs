@@ -203,7 +203,15 @@ impl Renderer {
             label: Some("camera bind group layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // FRAGMENT is needed for the edge pass — `edges.wgsl`
+                // reads `viewport_and_width.z` (line width) in its
+                // fragment stage for the analytical-AA alpha taper.
+                // VERTEX-only would pass wgpu validation on the mesh
+                // pipeline but trip "shader stage not in visibility
+                // flags" when the edge pipeline is created on a real
+                // device (the headless tests in this container don't
+                // catch it — they skip-on-absent).
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
