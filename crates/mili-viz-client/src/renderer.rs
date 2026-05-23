@@ -66,15 +66,41 @@ const BASE_COLOR: [f32; 3] = [0.62, 0.68, 0.80];
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
+    /// `(viewport_px.x, viewport_px.y, line_width_px, _pad)`. Consumed
+    /// by the screen-space line-quad edge pass (`edges.wgsl`) for
+    /// pixel-correct line widths; the mesh shader sees the same struct
+    /// (binding compatibility) but reads only `view_proj`.
+    viewport_and_width: [f32; 4],
 }
+
+/// Pixel width of the screen-space line-quad edge pass. 1.5 px reads as
+/// a crisp ~2-px line after the analytical 1-px AA feather and 4×
+/// MSAA — tweak here if you want chunkier or thinner edges.
+const LINE_WIDTH_PX: f32 = 1.5;
+
+/// The 6 corners of the per-instance line quad (two triangles). `.x` ∈
+/// `{0,1}` picks the start/end endpoint; `.y` ∈ `{-1,+1}` picks which
+/// side of the line the corner extrudes toward. Built once per
+/// `Renderer` and reused for every frame and every edge.
+const EDGE_CORNERS: [[f32; 2]; 6] = [
+    [0.0, -1.0],
+    [1.0, -1.0],
+    [1.0, 1.0],
+    [0.0, -1.0],
+    [1.0, 1.0],
+    [0.0, 1.0],
+];
 
 struct MeshBuffers {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
-    /// Unique-edge `LineList` indices (VB-003); shares
-    /// `vertex_buffer`. Empty edge buffers are never drawn.
-    edge_index_buffer: wgpu::Buffer,
+    /// Per-instance endpoint pairs for the screen-space line-quad edge
+    /// pass — packed `[ax, ay, az, bx, by, bz]` per edge, stride 24.
+    /// `edge_count` is the **instance count** (number of edges), so the
+    /// pass draws `6` corners × `edge_count` instances. Empty edge
+    /// buffers (a degenerate, no-triangle mesh) are never drawn.
+    edge_endpoint_buffer: wgpu::Buffer,
     edge_count: u32,
 }
 
@@ -97,6 +123,10 @@ pub struct Renderer {
     translucent_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    /// Static 6-corner quad shared by every edge instance. Built once
+    /// in `new_with_samples` so `upload_mesh` only has to rebuild the
+    /// per-instance endpoint buffer.
+    edge_corner_buffer: wgpu::Buffer,
     mesh: Option<MeshBuffers>,
     mode: RenderMode,
     /// MSAA sample count for the mesh + edge + translucent pipelines.
@@ -238,18 +268,24 @@ impl Renderer {
             cache: None,
         });
 
-        // Edge / wireframe line pipeline (VB-003). Reuses the camera
-        // bind group and the same vertex buffer (only `position`,
-        // attribute 0, is read). Depth-tested `LessEqual` with **zero**
-        // depth bias: wgpu 29 rejects a non-zero `DepthBiasState` on a
-        // non-triangle topology (`LineList`) at pipeline creation
-        // (VB-004). The edges are extracted from the triangle mesh and
-        // share its exact vertices, so along a coincident face edge the
-        // interpolated depth equals the triangle's and `LessEqual`
-        // alone keeps the line on top of the fill in the overlay mode —
-        // no bias needed for the common case (minor z-fight only where
-        // a line crosses a *different*, near-coincident face; see
-        // bug-tracker VB-004).
+        // Edge / wireframe pass — screen-space line quads. Each input
+        // edge is one **instance** of a 6-vertex triangle quad that the
+        // vertex shader expands along the screen-space normal to a
+        // `LINE_WIDTH_PX`-wide ribbon with a 1-px AA feather. Two
+        // vertex buffers:
+        //   slot 0 — per-vertex `corner: vec2<f32>` from the static
+        //            `edge_corner_buffer` built below;
+        //   slot 1 — per-instance `(endpoint_a, endpoint_b)` packed
+        //            into `MeshBuffers.edge_endpoint_buffer` by
+        //            `upload_mesh`.
+        // Alpha-blended over the filled hull so the AA feather
+        // composites cleanly; depth-test `LessEqual` + depth-write on
+        // keeps the original overlay / self-occluding semantics
+        // (front edges on top of the fill; back edges hidden in the
+        // wireframe mode). The VB-004 `LineList`-only zero-bias rule
+        // no longer applies (we are TriangleList now); leaving bias at
+        // default keeps behaviour identical for the common "line and
+        // face share verts" case.
         let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mili-viz edge shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
@@ -261,11 +297,20 @@ impl Renderer {
                 module: &edge_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
-                }],
+                buffers: &[
+                    // Per-vertex quad corner.
+                    wgpu::VertexBufferLayout {
+                        array_stride: (std::mem::size_of::<f32>() * 2) as u64,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &wgpu::vertex_attr_array![0 => Float32x2],
+                    },
+                    // Per-instance endpoint pair (two vec3 packed).
+                    wgpu::VertexBufferLayout {
+                        array_stride: (std::mem::size_of::<f32>() * 6) as u64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &wgpu::vertex_attr_array![1 => Float32x3, 2 => Float32x3],
+                    },
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &edge_shader,
@@ -273,12 +318,12 @@ impl Renderer {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None,
                 ..Default::default()
             },
@@ -292,6 +337,12 @@ impl Renderer {
             multisample,
             multiview_mask: None,
             cache: None,
+        });
+
+        let edge_corner_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("edge corner quad"),
+            contents: bytemuck::cast_slice(&EDGE_CORNERS),
+            usage: wgpu::BufferUsages::VERTEX,
         });
 
         // Translucent fill pipeline (Phase 5 M7 Decision 81). Reuses
@@ -359,6 +410,7 @@ impl Renderer {
             translucent_pipeline,
             uniform_buffer,
             bind_group,
+            edge_corner_buffer,
             mesh: None,
             mode: RenderMode::default(),
             sample_count,
@@ -442,23 +494,38 @@ impl Renderer {
             .element_edges
             .clone()
             .unwrap_or_else(|| mesh.edge_indices());
-        let edge_count = edges.len() as u32;
+        // Pack the per-instance endpoint pairs the screen-space line
+        // quad pipeline consumes: one `[ax, ay, az, bx, by, bz]` per
+        // edge. `edge_count` is the instance count.
+        let endpoints: Vec<[f32; 6]> = edges
+            .chunks_exact(2)
+            .map(|p| {
+                let a = mesh.positions[p[0] as usize];
+                let b = mesh.positions[p[1] as usize];
+                [a[0], a[1], a[2], b[0], b[1], b[2]]
+            })
+            .collect();
+        let edge_count = endpoints.len() as u32;
         // wgpu rejects a zero-sized buffer; a degenerate (no-triangle)
-        // mesh keeps a 1-pair placeholder that `edge_count == 0` never
-        // draws.
-        let edges_payload: &[u32] = if edges.is_empty() { &[0, 0] } else { &edges };
-        let edge_index_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mesh edge indices"),
-                contents: bytemuck::cast_slice(edges_payload),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+        // mesh keeps a 1-instance placeholder that `edge_count == 0`
+        // never draws.
+        let endpoints_payload: &[[f32; 6]] = if endpoints.is_empty() {
+            &[[0.0; 6]]
+        } else {
+            &endpoints
+        };
+        let edge_endpoint_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mesh edge endpoints"),
+                    contents: bytemuck::cast_slice(endpoints_payload),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
         self.mesh = Some(MeshBuffers {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
-            edge_index_buffer,
+            edge_endpoint_buffer,
             edge_count,
         });
     }
@@ -492,6 +559,11 @@ impl Renderer {
         let vp: Mat4 = camera.view_projection(proj_w, proj_h);
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
+            // The edge pass needs the **scene** viewport size in pixels
+            // (not the framebuffer) — that's what `set_viewport` shrinks
+            // the rasterisation to, and the screen-space line-quad math
+            // is in pixel units of that rect.
+            viewport_and_width: [proj_w as f32, proj_h as f32, LINE_WIDTH_PX, 0.0],
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -630,11 +702,15 @@ impl Renderer {
                     pass.draw_indexed(0..m.index_count, 0, 0..1);
                 }
                 if draw_edges {
+                    // Screen-space line quads: 6 corners × `edge_count`
+                    // instances. Slot 0 is the shared corner quad, slot
+                    // 1 is the per-instance endpoint pair built by
+                    // `upload_mesh`.
                     pass.set_pipeline(&self.edge_pipeline);
                     pass.set_bind_group(0, &self.bind_group, &[]);
-                    pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
-                    pass.set_index_buffer(m.edge_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..m.edge_count, 0, 0..1);
+                    pass.set_vertex_buffer(0, self.edge_corner_buffer.slice(..));
+                    pass.set_vertex_buffer(1, m.edge_endpoint_buffer.slice(..));
+                    pass.draw(0..6, 0..m.edge_count);
                 }
             }
         }

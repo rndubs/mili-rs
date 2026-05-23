@@ -4,8 +4,13 @@
 // MVG2 scalar, or the uniform M2 base when no scalar (phase-5-m3.md
 // Decision 47).
 
+// `viewport_and_width` is unused here; it exists so this struct matches
+// the layout `edges.wgsl` expects from the same shared uniform buffer
+// (mesh + edge pipelines share one bind group). The mesh pass only
+// reads `view_proj`.
 struct Uniforms {
     view_proj: mat4x4<f32>,
+    viewport_and_width: vec4<f32>,
 };
 
 @group(0) @binding(0)

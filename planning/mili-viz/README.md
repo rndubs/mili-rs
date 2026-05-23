@@ -206,25 +206,44 @@ See [`status.md`](status.md) and the per-milestone
   `run_script`, `-V` → version, `-w <w> <h>` → window size. The rest
   of griz's flags (`reference/griz/Src/viewer.c:2900`) are
   Motif/X11/launcher-specific and dropped. Client-only; no proto.
-- **Edge rendering — thicker / anti-aliased lines.** Open follow-up.
-  Today the VB-003 element-edge pass uses `wgpu::PrimitiveTopology::LineList`,
-  which is fixed at 1 device pixel (core WebGPU has no `lineWidth`).
-  We landed **4× MSAA on the windowed path** (`renderer.rs`
-  `Renderer::new_with_samples`, called with `4` from `app.rs`) plus a
-  black edge colour (`edges.wgsl`) which fixes ~80% of the broken-edge
-  look — but at HiDPI the lines still read thin. If we ever want
-  variable-width, crisply anti-aliased edges, the proper fix is a
-  **screen-space line-quad pass**: expand each edge to two triangles
-  in the vertex shader using the endpoints + a screen-space normal,
-  then do an AA falloff in the fragment shader. ~60 lines of new
-  WGSL, a new pipeline, and a `tweaks.rs` thickness knob; the
-  `Mesh::edge_indices` / `element_edges` wiring upstream of it stays
-  put. An alternative is a **barycentric wireframe** rendered inside
-  the mesh fragment shader (cheapest GPU cost) but it conflicts with
-  the current indexed vertex sharing — needs un-indexing or vertex
-  duplication. MSAA was deliberately kept off the headless paths
-  (`render_mesh_to_image*`, `render_shell_to_image`) so the VB-001 /
-  status 23 byte-stable composite gate stays pixel-exact.
+- **Edge rendering — thicker / anti-aliased lines.** ✅ Resolved.
+  The original VB-003 element-edge pass used
+  `wgpu::PrimitiveTopology::LineList`, which core WebGPU fixes at 1
+  device pixel (no `lineWidth`). At native / HiDPI the edges read as
+  broken / partly invisible. Two changes landed in order:
+  1. **4× MSAA on the windowed path + black edge colour** —
+     `Renderer::new_with_samples` (called with `4` from `app.rs`) +
+     `edges.wgsl` colour swap. Fixed ~80% of the look but the lines
+     were still thin at HiDPI.
+  2. **Screen-space line-quad pass** — the current edge pipeline. The
+     `LineList` topology is gone; each input edge is now one
+     **instance** of a 2-triangle quad that the vertex shader expands
+     along the screen-space normal by `LINE_WIDTH_PX + 1 px`. The
+     fragment shader tapers alpha analytically across the 1-px
+     feather (`alpha = clamp(half_width + 0.5 − |dist_px|, 0, 1)`),
+     so the line edge is anti-aliased independently of MSAA and
+     scales cleanly with the chosen pixel width. `LINE_WIDTH_PX` is a
+     const in `renderer.rs` (1.5 px today); promote to a
+     `tweaks.rs`-persisted slider if and when "Preferences →
+     Wireframe thickness" is asked for. The pipeline is alpha-blended
+     with depth-test `LessEqual` + depth-write on, preserving the
+     overlay / self-occluding semantics of the original pass. The
+     shared `Uniforms` gained a `viewport_and_width: vec4<f32>` field
+     (mesh shader also declares it for binding compatibility but
+     reads only `view_proj`). VB-004's zero-bias rule no longer
+     applies (TriangleList), though the bias stays at default to keep
+     z-fight behaviour identical to before.
+
+  Alternative considered and **not** taken: a **barycentric
+  wireframe** rendered inside the mesh fragment shader (cheapest GPU
+  cost — one pass, no extra geometry). It conflicts with the current
+  indexed vertex sharing — would need un-indexing or vertex
+  duplication, plus you lose the `element_edges` filter that VB-005
+  uses to avoid drawing face diagonals on hex elements. Keep in the
+  back pocket if the screen-space pass ever becomes a hotspot on
+  enormous edge counts. MSAA is still deliberately off the headless
+  paths (`render_mesh_to_image*`, `render_shell_to_image`) so the
+  VB-001 / status 23 byte-stable composite gate stays pixel-exact.
 - **Client wireframe + AI-first design.** Resolved — see
   `client.md`. The window mirrors griz's shape (left dock for
   Results/Materials/Surfaces, center viewport, bottom tabs for
