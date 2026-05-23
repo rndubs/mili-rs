@@ -9,10 +9,17 @@
 //! that are unit-tested directly, and the layout is exercised
 //! head­lessly by running the function with synthetic `RawInput`.
 
+use std::time::{Duration, Instant};
+
 use egui::Ui;
 
 use crate::camera::Camera;
 use crate::catalog::ResultCatalog;
+
+/// Wall-clock interval between drag-time preview `Cmd::Cutplane` emits
+/// (`phase-5-m8.md` Decision 85 — 30 Hz). Frame-rate independent: a
+/// 60 Hz frame loop must not emit two commands per frame.
+pub const CUT_PREVIEW_INTERVAL: Duration = Duration::from_millis(33);
 
 /// The three non-agent session states M3 must render visibly
 /// (wireframes §"Session states"; the agent states are M6).
@@ -150,6 +157,94 @@ impl RenderMode {
             RenderMode::Translucent => "translucent",
             RenderMode::Xray => "x-ray",
         }
+    }
+}
+
+/// A cut-plane the gizmo edits. Origin + (unit-ish) normal in world
+/// units, matching the frozen `Cmd::Cutplane` `ox..oz` / `nx..nz`
+/// fields (`phase-5-m8.md` Decision 86; `phase-4-m8.md` Decision 75).
+/// The `relative` toggle stays `false` — the gizmo always emits an
+/// absolute plane; clearing is a zero-normal `Cmd::Cutplane` per
+/// `phase-4-m8.md`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CutPlaneState {
+    pub origin: [f32; 3],
+    pub normal: [f32; 3],
+}
+
+/// Lower a [`CutPlaneState`] to the frozen `Cmd::Cutplane`
+/// (`phase-5-m8.md` § "What lands"). Absolute plane (`relative` stays
+/// `false`); `slice_only` is M9 territory and stays unset.
+#[must_use]
+pub fn cutplane_cmd(plane: CutPlaneState) -> mili_viz_proto::v1::command::Cmd {
+    mili_viz_proto::v1::command::Cmd::Cutplane(mili_viz_proto::v1::CutPlane {
+        ox: f64::from(plane.origin[0]),
+        oy: f64::from(plane.origin[1]),
+        oz: f64::from(plane.origin[2]),
+        nx: f64::from(plane.normal[0]),
+        ny: f64::from(plane.normal[1]),
+        nz: f64::from(plane.normal[2]),
+        relative: false,
+        slice_only: None,
+    })
+}
+
+impl CutPlaneState {
+    /// Seed the gizmo at the **mesh AABB centre** with the camera's
+    /// view-plane normal (`phase-5-m8.md` Decision 86). The view-plane
+    /// normal is the camera basis' forward axis (negated — it points
+    /// from the eye toward the scene; the cut keep-side is the far
+    /// half-space so this orients "cut the half nearest the viewer").
+    #[must_use]
+    pub fn from_aabb_and_camera(aabb: ([f32; 3], [f32; 3]), camera: &Camera) -> Self {
+        let (lo, hi) = aabb;
+        let origin = [
+            0.5 * (lo[0] + hi[0]),
+            0.5 * (lo[1] + hi[1]),
+            0.5 * (lo[2] + hi[2]),
+        ];
+        let (_, _, fwd) = camera.basis();
+        Self {
+            origin,
+            normal: fwd.to_array(),
+        }
+    }
+}
+
+/// Wall-clock throttle for gizmo-drag preview emits
+/// (`phase-5-m8.md` Decision 85). A 30 Hz cap on the drag-time
+/// `Cmd::Cutplane` stream; drag-end is the un-throttled canonical
+/// commit (call [`CutThrottle::reset`] then emit unconditionally).
+#[derive(Debug, Clone, Default)]
+pub struct CutThrottle {
+    last_emit_at: Option<Instant>,
+}
+
+impl CutThrottle {
+    #[must_use]
+    pub fn new() -> Self {
+        Self { last_emit_at: None }
+    }
+
+    /// Return `true` (and mark `now` as the last emit) iff at least
+    /// [`CUT_PREVIEW_INTERVAL`] has elapsed since the last preview;
+    /// otherwise return `false` and leave state unchanged. Pure;
+    /// caller-injected clock for testability.
+    pub fn try_preview(&mut self, now: Instant) -> bool {
+        let pass = match self.last_emit_at {
+            None => true,
+            Some(t) => now.duration_since(t) >= CUT_PREVIEW_INTERVAL,
+        };
+        if pass {
+            self.last_emit_at = Some(now);
+        }
+        pass
+    }
+
+    /// Forget the last emit so the next preview / commit fires
+    /// unconditionally. Called at drag-start and drag-end.
+    pub fn reset(&mut self) {
+        self.last_emit_at = None;
     }
 }
 
@@ -308,6 +403,28 @@ pub enum UiAction {
     /// AI rail + bottom tabs. Returned for observability/persistence.
     /// No proto command.
     SetFocusMode(bool),
+    /// Commit a cut plane unconditionally (Phase 5 M8 Decision 85).
+    /// Lowered by the windowed app to the frozen `Cmd::Cutplane`;
+    /// includes both the canonical drag-end commit and any
+    /// out-of-drag menu emit. State already mutated via
+    /// [`ShellState::set_cut_plane`].
+    SetCutPlane(CutPlaneState),
+    /// In-drag preview emit; the windowed app gates this through the
+    /// [`CutThrottle`] (30 Hz wall-clock; Decision 85) and also drops
+    /// it entirely when interactive clip is off (Decision 86). State
+    /// already mutated.
+    PreviewCutPlane(CutPlaneState),
+    /// Clear the active cut. Lowered to a zero-normal `Cmd::Cutplane`
+    /// which the server (`phase-4-m8.md`) treats as a clear.
+    ClearCut,
+    /// Toggle gizmo visibility (Rendering → Cut menu row;
+    /// `phase-5-m8.md` § "What lands"). Pure-client; no proto.
+    SetCutGizmoVisible(bool),
+    /// Toggle interactive-clip preview emission
+    /// (Preferences → Interactive clip; Decision 86). Pure-client;
+    /// cross-session-persisted via `tweaks.json`. Already applied to
+    /// [`ShellState`]; observability/persistence-only.
+    SetInteractiveClip(bool),
 }
 
 /// Static fallback derived-result names, shown only until a real
@@ -500,6 +617,19 @@ pub struct ShellState {
     /// sub-tree as the static `(catalog: M4+)` placeholder, so that
     /// gate stays byte-stable (`bug-tracker.md` VB-001).
     pub catalog: Option<ResultCatalog>,
+    /// Active cut plane (`phase-5-m8.md` Decisions 84–86). `None` means
+    /// "no cut" — keeps the M2/M3/M4/MVP-polish composite path
+    /// byte-stable (`bug-tracker.md` VB-001).
+    pub cut_plane: Option<CutPlaneState>,
+    /// Whether the Rendering → Cut gizmo overlay is drawn over the
+    /// viewport. Default `false`. Pure-client; no proto.
+    pub cut_gizmo_visible: bool,
+    /// Whether drag-time `Cmd::Cutplane` previews are emitted
+    /// (Preferences → Interactive clip). Default `true` matches griz's
+    /// `cutpln` live-feel; flipping off suppresses preview emits for
+    /// low-bandwidth links (the drag-end commit still fires). Cross-
+    /// session-persisted via `tweaks.json` (Decision 86).
+    pub interactive_clip: bool,
 }
 
 impl Default for ShellState {
@@ -539,6 +669,9 @@ impl Default for ShellState {
             camera: None,
             model_aabb: None,
             catalog: None,
+            cut_plane: None,
+            cut_gizmo_visible: false,
+            interactive_clip: true,
         }
     }
 }
@@ -651,6 +784,45 @@ impl ShellState {
             class_name: class_name.to_string(),
             visible,
         }
+    }
+
+    /// Commit a cut plane (Phase 5 M8 Decision 85; the canonical
+    /// drag-end commit or any out-of-drag menu emit). Mutates the
+    /// state; the returned action is lowered to `Cmd::Cutplane` by
+    /// the windowed app, unconditionally (no throttle).
+    pub fn set_cut_plane(&mut self, plane: CutPlaneState) -> UiAction {
+        self.cut_plane = Some(plane);
+        UiAction::SetCutPlane(plane)
+    }
+
+    /// Emit a drag-time preview update (Phase 5 M8 Decision 85). The
+    /// windowed app gates these through the [`CutThrottle`] and drops
+    /// them entirely when [`ShellState::interactive_clip`] is `false`.
+    /// State mutated for visual immediacy regardless of whether the
+    /// emit lands on the wire.
+    pub fn preview_cut_plane(&mut self, plane: CutPlaneState) -> UiAction {
+        self.cut_plane = Some(plane);
+        UiAction::PreviewCutPlane(plane)
+    }
+
+    /// Clear the active cut. Lowers to a zero-normal `Cmd::Cutplane`
+    /// which the server treats as a clear (`phase-4-m8.md`).
+    pub fn clear_cut(&mut self) -> UiAction {
+        self.cut_plane = None;
+        UiAction::ClearCut
+    }
+
+    /// Show/hide the gizmo overlay (Rendering → Cut row).
+    pub fn set_cut_gizmo_visible(&mut self, on: bool) -> UiAction {
+        self.cut_gizmo_visible = on;
+        UiAction::SetCutGizmoVisible(on)
+    }
+
+    /// Toggle interactive-clip preview emission
+    /// (Preferences → Interactive clip; Decision 86 — persisted).
+    pub fn set_interactive_clip(&mut self, on: bool) -> UiAction {
+        self.interactive_clip = on;
+        UiAction::SetInteractiveClip(on)
     }
 
     /// Toggle a bottom tab: open it, or collapse the body if it is
@@ -842,6 +1014,27 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     if ui.button(format!("{mark}include interior")).clicked() {
                         actions.push(state.set_interior_mode(!state.interior_on));
                     }
+                    ui.separator();
+                    // Cut sub-section (Phase 5 M8 § "What lands"):
+                    // gizmo-visible toggle + clear-cut row. The plane
+                    // itself is edited via the gizmo overlay (drag) and
+                    // seeded at the mesh AABB centre on first show
+                    // (Decision 86).
+                    let mark = if state.cut_gizmo_visible {
+                        "● "
+                    } else {
+                        "○ "
+                    };
+                    if ui.button(format!("{mark}show cut gizmo")).clicked() {
+                        actions.push(state.set_cut_gizmo_visible(!state.cut_gizmo_visible));
+                    }
+                    let cut_active = state.cut_plane.is_some();
+                    if ui
+                        .add_enabled(cut_active, egui::Button::new("clear cut"))
+                        .clicked()
+                    {
+                        actions.push(state.clear_cut());
+                    }
                 });
                 ui.menu_button("Picking", |ui| {
                     let mark = if state.picking { "● " } else { "○ " };
@@ -869,6 +1062,15 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     let mut collapsed = state.dock_collapsed;
                     if ui.checkbox(&mut collapsed, "Left dock collapsed").clicked() {
                         actions.push(state.set_dock_collapsed(collapsed));
+                    }
+                    ui.separator();
+                    // Preferences → Interactive clip (Phase 5 M8
+                    // Decision 86; persisted via tweaks.json). When off,
+                    // the drag-time preview path is suppressed — only
+                    // the canonical drag-end commit lands on the wire.
+                    let mut live = state.interactive_clip;
+                    if ui.checkbox(&mut live, "Interactive clip").clicked() {
+                        actions.push(state.set_interactive_clip(live));
                     }
                 });
                 for m in ["Results", "Time", "Plot", "Help"] {
@@ -1421,6 +1623,17 @@ fn status_bar(ui: &mut egui::Ui, state: &ShellState) {
         ui.monospace(proto_cell());
         ui.separator();
         ui.monospace(format!("pick: {}", state.pick));
+        // Status-bar cut readout (`phase-5-m8.md` § "What lands"): when
+        // a cut plane is active, show its origin + normal in compact
+        // form. Hidden by default so the byte-stable M3/MVP-polish
+        // status-bar composite (VB-001) is unperturbed.
+        if let Some(c) = state.cut_plane {
+            ui.separator();
+            ui.monospace(format!(
+                "cut: o=({:.2},{:.2},{:.2}) n=({:.2},{:.2},{:.2})",
+                c.origin[0], c.origin[1], c.origin[2], c.normal[0], c.normal[1], c.normal[2],
+            ));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace(format!("fps {:.0}", state.fps));
             // Honest local peer count, attached state only. The
@@ -1521,6 +1734,18 @@ fn overlays(ui: &mut egui::Ui, rect: egui::Rect, state: &ShellState) {
                 let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(90));
                 dashed_rect(&painter, inset, stroke);
             }
+        }
+    }
+
+    // Cut-plane gizmo overlay (`phase-5-m8.md` Decision 84): a flat
+    // disk + normal arrow drawn through the live camera as **egui
+    // shapes only** — no new wgpu pipeline (VB-001 / the M3 additive
+    // seam stays untouched). Drawn only when the user opted in via
+    // Rendering → Cut, a plane is set, and a live camera is attached;
+    // the headless composite path (camera `None`) is byte-stable.
+    if state.cut_gizmo_visible {
+        if let Some((plane, cam)) = state.cut_plane.zip(state.camera.as_ref()) {
+            draw_cut_gizmo(&painter, rect, plane, cam);
         }
     }
 
@@ -1642,6 +1867,51 @@ fn legend(
             fg,
         );
     }
+}
+
+/// Paint the cut-plane gizmo handles (`phase-5-m8.md` Decision 84):
+/// a small ring at the plane origin + a normal-direction arrow,
+/// projected through the live camera. Pure egui shapes — no new wgpu
+/// pipeline (VB-001 / the M3 additive seam is untouched).
+fn draw_cut_gizmo(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    plane: CutPlaneState,
+    camera: &Camera,
+) {
+    let w = rect.width().max(1.0) as u32;
+    let h = rect.height().max(1.0) as u32;
+    let origin = glam::Vec3::from(plane.origin);
+    let n_world = glam::Vec3::from(plane.normal).normalize_or_zero();
+    if n_world.length_squared() < 1e-12 {
+        return;
+    }
+    // Arrow shaft length scales with the camera's view radius so the
+    // gizmo stays at a sensible screen size regardless of model scale.
+    let len = (camera.distance * 0.15).max(1e-3);
+    let tip_world = origin + n_world * len;
+    let Some(o_f) = camera.project(origin, w, h) else {
+        return;
+    };
+    let Some(t_f) = camera.project(tip_world, w, h) else {
+        return;
+    };
+    let o = egui::pos2(
+        rect.min.x + o_f.x * rect.width(),
+        rect.min.y + o_f.y * rect.height(),
+    );
+    let t = egui::pos2(
+        rect.min.x + t_f.x * rect.width(),
+        rect.min.y + t_f.y * rect.height(),
+    );
+    let accent = egui::Color32::from_rgb(255, 160, 70);
+    let stroke = egui::Stroke::new(1.5, accent);
+    // Origin handle: filled disc + stroked ring.
+    painter.circle_filled(o, 3.0, accent);
+    painter.circle_stroke(o, 8.0, stroke);
+    // Normal handle: shaft + tip cap.
+    painter.line_segment([o, t], stroke);
+    painter.circle_filled(t, 4.0, accent);
 }
 
 fn axes_gizmo(painter: &egui::Painter, rect: egui::Rect, camera: Option<&Camera>) {

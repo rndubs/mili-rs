@@ -50,6 +50,11 @@ pub struct PersistedTweaks {
     pub overlay_bbox: bool,
     pub theme: ThemePref,
     pub dock_collapsed: bool,
+    /// Phase 5 M8 Decision 86: whether drag-time `Cmd::Cutplane`
+    /// previews are emitted. Default `true` matches griz's `cutpln`
+    /// live-feel; `false` suppresses preview emits for low-bandwidth
+    /// links. Persisted across sessions like Theme.
+    pub interactive_clip: bool,
 }
 
 impl Default for PersistedTweaks {
@@ -75,6 +80,7 @@ impl PersistedTweaks {
                 Theme::Light => ThemePref::Light,
             },
             dock_collapsed: s.dock_collapsed,
+            interactive_clip: s.interactive_clip,
         }
     }
 
@@ -93,6 +99,7 @@ impl PersistedTweaks {
             ThemePref::Light => Theme::Light,
         };
         s.dock_collapsed = self.dock_collapsed;
+        s.interactive_clip = self.interactive_clip;
     }
 
     /// Pretty JSON for the on-disk file.
@@ -140,7 +147,10 @@ impl PersistedTweaks {
 pub fn is_persisted_action(a: &UiAction) -> bool {
     matches!(
         a,
-        UiAction::ToggleOverlay(_) | UiAction::SetTheme(_) | UiAction::SetDockCollapsed(_)
+        UiAction::ToggleOverlay(_)
+            | UiAction::SetTheme(_)
+            | UiAction::SetDockCollapsed(_)
+            | UiAction::SetInteractiveClip(_)
     )
 }
 
