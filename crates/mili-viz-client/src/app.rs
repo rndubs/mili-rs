@@ -25,7 +25,7 @@ use crate::egui_layer::EguiPaint;
 use crate::mesh::Mesh;
 use crate::renderer::Renderer;
 use crate::session::Session;
-use crate::shell::{build_shell_ui, ResultInfo, SessionPhase, ShellState, UiAction};
+use crate::shell::{build_shell_ui, CutThrottle, ResultInfo, SessionPhase, ShellState, UiAction};
 
 struct WindowState {
     window: Arc<Window>,
@@ -67,6 +67,10 @@ struct App {
     /// frame loop drains it into [`ShellState`].
     script_tx: std::sync::mpsc::Sender<ScriptMsg>,
     script_rx: std::sync::mpsc::Receiver<ScriptMsg>,
+    /// 30 Hz wall-clock throttle for in-drag `Cmd::Cutplane` preview
+    /// emits (`phase-5-m8.md` Decision 85). The drag-end commit and
+    /// any out-of-drag menu action emit unconditionally.
+    cut_throttle: CutThrottle,
 }
 
 /// A message from the scripting-runner worker thread.
@@ -439,6 +443,32 @@ impl App {
                 }
                 None
             }
+            UiAction::SetCutPlane(plane) => {
+                // Drag-end / out-of-drag commit (`phase-5-m8.md`
+                // Decision 85): unconditional, no throttle. Reset the
+                // throttle so the next drag-burst's first preview
+                // fires immediately.
+                self.cut_throttle.reset();
+                Some(crate::shell::cutplane_cmd(*plane))
+            }
+            UiAction::PreviewCutPlane(plane) => {
+                // Drag-time preview (Decision 85): suppressed entirely
+                // when interactive-clip is off (Decision 86); otherwise
+                // throttled at 30 Hz wall-clock so a 60 Hz frame loop
+                // emits at most one command per ~33 ms window.
+                if self.shell.interactive_clip && self.cut_throttle.try_preview(Instant::now()) {
+                    Some(crate::shell::cutplane_cmd(*plane))
+                } else {
+                    None
+                }
+            }
+            UiAction::ClearCut => {
+                // `phase-4-m8.md`: a zero-normal plane clears the
+                // server-side cut state. The frozen proto's `relative`
+                // / `slice_only` defaults are right (false / unset).
+                self.cut_throttle.reset();
+                Some(pb::command::Cmd::Cutplane(pb::CutPlane::default()))
+            }
             UiAction::RunScript(src) => {
                 // Pure-client (`client.md` decision 3): spawn the
                 // managed `pygriz` subprocess; output streams back
@@ -455,7 +485,9 @@ impl App {
             | UiAction::TogglePicking
             | UiAction::SetTheme(_)
             | UiAction::SetDockCollapsed(_)
-            | UiAction::SetFocusMode(_) => None,
+            | UiAction::SetFocusMode(_)
+            | UiAction::SetCutGizmoVisible(_)
+            | UiAction::SetInteractiveClip(_) => None,
         };
         if let Some(cmd) = cmd {
             let _ = self.rt.block_on(self.session.execute(cmd));
@@ -875,6 +907,7 @@ pub fn run(root: Option<String>) -> Result<(), Box<dyn std::error::Error + Send 
         last_cursor: None,
         script_tx,
         script_rx,
+        cut_throttle: CutThrottle::new(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())

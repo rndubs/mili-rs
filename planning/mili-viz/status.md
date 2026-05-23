@@ -12,11 +12,9 @@
 >   batch (`MVG3` blob → cut-plane → slice; see
 >   [`phase-4-m7.md`](phase-4-m7.md) / [`phase-4-m8.md`](phase-4-m8.md)
 >   / [`phase-4-m9.md`](phase-4-m9.md)).
-> - **Phase 5 (`mili-viz` client): 🟢 M1–M4 + MVP polish landed;
->   M5/M6 not started; 🟡 M7–M9 PLANNED** — sibling client UI for
->   the volumetric batch (render modes + cut gizmo + slice gizmo;
->   see [`phase-5-m7.md`](phase-5-m7.md) /
->   [`phase-5-m8.md`](phase-5-m8.md) /
+> - **Phase 5 (`mili-viz` client): 🟢 M1–M4 + MVP polish landed,
+>   M7 + M8 ✅ landed; M5/M6 not started; 🟡 M9 PLANNED** — last
+>   slice of the volumetric batch (slice gizmo;
 >   [`phase-5-m9.md`](phase-5-m9.md)).
 > - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 landed;
 >   M4/M5/M6 not started.**
@@ -116,7 +114,7 @@
 | [`phase-4-m8.md`](phase-4-m8.md) | Phase 4 M8 cut-plane operator: wires the long-frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528` stub), closed clipped hull (kept-side ∪ cap), per-superclass marching tables, rayon parallel-per-element, session-state that composes with `show`/state-step/material toggles. Decisions 75–77 | 🟡 planned (drafted 2026-05-23) |
 | [`phase-4-m9.md`](phase-4-m9.md) | Phase 4 M9 slice operator: additive `slice_only: bool` on `CutPlane` (**second** post-M1 proto change), cap-only emit, scalar interpolation linear along straddled edges, composes with cut. Decisions 78–80 | 🟡 planned (drafted 2026-05-23) |
 | [`phase-5-m7.md`](phase-5-m7.md) | Phase 5 M7 render modes consuming `MVG3`: `Translucent`/`Xray`/`Interior` arms; `Edges`/`Wireframe` prefer `Mesh::element_edges` (VB-005 client side), fall back to extractor (byte-stable for older servers); interior is a server round-trip via the M7 sentinel. Decisions 81–83 | 🟡 planned (drafted 2026-05-23) |
-| [`phase-5-m8.md`](phase-5-m8.md) | Phase 5 M8 cut-plane gizmo + Rendering→Cut UI: egui-overlay handle (no new `wgpu` pipeline), 30 Hz gesture-throttled preview with drag-end commit, `Preferences → Interactive clip` suppress for low-bandwidth links. Decisions 84–86 | 🟡 planned (drafted 2026-05-23) |
+| [`phase-5-m8.md`](phase-5-m8.md) | Phase 5 M8 cut-plane gizmo + Rendering→Cut UI: egui-overlay handle (no new `wgpu` pipeline), 30 Hz wall-clock-throttled preview with un-throttled drag-end commit, `Preferences → Interactive clip` suppress for low-bandwidth links (cross-session-persisted via `tweaks.json`). Decisions 84–86 | ✅ pinned + landed (2026-05-23) |
 | [`phase-5-m9.md`](phase-5-m9.md) | Phase 5 M9 slice gizmo + Rendering→Slice UI: thin sibling to M8 (shared gizmo machinery), distinct status-bar readout, slice-cap colormap-painted when a result is mapped; slice always opaque by default. Decisions 87–89 | 🟡 planned (drafted 2026-05-23) |
 | [`README.md`](README.md) | Server/client split, crate layout, transport + renderer stack, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` authoritative) |
 | [`scripting.md`](scripting.md) | Scripting = second pure-Python client of `mili-viz-proto`; camera server-authoritative; `attach()` to a running GUI; `grizinit` via `run_script()`. Implementation home: Phase 6 | ✅ resolved |
@@ -467,16 +465,30 @@ expanded by `scripting.md` / `client.md`. None started.
       (81–83). Gating test
       `crates/mili-viz-client/tests/m7_render_modes.rs::{render_mode_arms_have_distinct_labels, interior_toggle_is_pure_observable_and_emits_no_proto_directly, decode_mvg3_roundtrips_all_four_flag_bits, mvg2_decode_has_no_mvg3_columns, element_edges_supersede_triangle_extraction_on_mvg3, render_modes_differ_translucent_and_xray}`
       (five always-on + one skip-on-absent composite-render).
-- [ ] **M8 — cut-plane gizmo + Rendering→Cut UI.** 🟡 **Planned.**
+- [x] **M8 — cut-plane gizmo + Rendering→Cut UI.** ✅ **Landed.**
       Client UI for Phase 4 M8's server operator. `egui`-overlay
-      gizmo (no new `wgpu` pipeline; reuses the M3 additive-paint
-      seam), 30 Hz gesture-throttled preview with drag-end
-      commit, `Preferences → Interactive clip` suppress for
-      low-bandwidth links (cross-session-persisted via the
-      existing `PersistedTweaks`). Lowers to the typed
-      `Cmd::Cutplane`. Scope/decisions:
-      [`phase-5-m8.md`](phase-5-m8.md) (84–86). Gating test
-      `crates/mili-viz-client/tests/m8_cut_gizmo.rs`.
+      gizmo (origin disc + normal arrow drawn through the live
+      camera as additional egui shapes only — no new `wgpu`
+      pipeline; the M3 additive-paint seam stays untouched per
+      VB-001), 30 Hz wall-clock-throttled preview with un-
+      throttled drag-end commit (Decision 85), Rendering → Cut
+      menu rows (show-gizmo toggle, clear-cut emits a zero-
+      normal `Cmd::Cutplane` that the server treats as a clear),
+      `Preferences → Interactive clip` toggle (default on; off
+      suppresses preview emits, drag-end commit still fires —
+      cross-session-persisted via `tweaks.json` like Theme).
+      Lowers to the typed `Cmd::Cutplane` via
+      `crate::shell::cutplane_cmd`. Status-bar cut readout
+      shows `cut: o=(...) n=(...)` when active. Zero proto
+      change; zero `crates/mili-viz-server` change. Scope/
+      decisions: [`phase-5-m8.md`](phase-5-m8.md) (84–86).
+      Gating test
+      `crates/mili-viz-client/tests/m8_cut_gizmo.rs` (15
+      always-on: state transitions, throttle math at 60 Hz →
+      30 Hz, lowering identity, `interactive_clip` persistence
+      round-trip + `is_persisted_action`, paint with the gizmo
+      on; 1 skip-on-absent composite render vs. `basic1.pltA`
+      — `bar71.pltA` is not in the fixture tree).
 - [ ] **M9 — slice gizmo + Rendering→Slice UI.** 🟡 **Planned.**
       Thin sibling of M8: shared gizmo machinery, distinct
       status-bar readout, slice-cap colormap-painted when a
@@ -873,13 +885,19 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       older servers (VB-005 fix activates only when `MVG3` is
       present). Gating test
       `crates/mili-viz-client/tests/m7_render_modes.rs`.
-    - **Phase 5 M8 — cut-plane gizmo + Rendering→Cut UI**
+    - ✅ **Phase 5 M8 — cut-plane gizmo + Rendering→Cut UI**
       ([`phase-5-m8.md`](phase-5-m8.md), Decisions 84–86).
-      `egui`-overlay gizmo (no new `wgpu` pipeline), 30 Hz
-      gesture-throttled preview + drag-end commit,
-      `Preferences → Interactive clip` suppress for low-bandwidth
-      links. Gating test
-      `crates/mili-viz-client/tests/m8_cut_gizmo.rs`.
+      **Landed.** `egui`-overlay gizmo (origin disc + normal
+      arrow as additional egui shapes — no new `wgpu`
+      pipeline; M3 additive seam untouched per VB-001), 30 Hz
+      wall-clock-throttled preview + un-throttled drag-end
+      commit, Rendering → Cut menu (show-gizmo toggle, clear-
+      cut zero-normal `Cmd::Cutplane`), `Preferences →
+      Interactive clip` suppress for low-bandwidth links
+      (cross-session-persisted via `tweaks.json`). Zero proto
+      change; zero `crates/mili-viz-server` change. Gating test
+      `crates/mili-viz-client/tests/m8_cut_gizmo.rs::{defaults_are_the_byte_stable_m7_polish_values, set_cut_plane_mutates_and_returns_commit_action, preview_cut_plane_mutates_and_returns_preview_action, clear_cut_drops_the_plane_and_emits_clear, gizmo_visibility_and_interactive_clip_are_pure_toggles, seed_from_aabb_centres_origin_and_uses_view_normal, throttle_first_call_passes_and_subsequent_within_window_blocks, throttle_blocks_60hz_into_30hz, throttle_reset_re_arms_for_drag_end_commit, lowering_copies_origin_normal_and_keeps_proto3_defaults, clear_lowering_is_a_zero_normal_default_cutplane, interactive_clip_persists_through_tweaks_round_trip, absent_tweaks_file_keeps_interactive_clip_default_on, is_persisted_action_classifies_interactive_clip_toggle, shell_paints_input_free_with_gizmo_on_and_cut_active, composite_render_with_gizmo}`
+      (15 always-on + 1 skip-on-absent).
     - **Phase 5 M9 — slice gizmo + Rendering→Slice UI**
       ([`phase-5-m9.md`](phase-5-m9.md), Decisions 87–89). Thin
       sibling of M8: shared gizmo machinery, slice-cap

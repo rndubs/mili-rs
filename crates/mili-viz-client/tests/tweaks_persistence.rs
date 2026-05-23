@@ -94,6 +94,7 @@ fn json_round_trip_is_loss_free() {
         overlay_bbox: false,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        interactive_clip: false,
     };
     let back = PersistedTweaks::from_json(&t.to_json()).expect("valid JSON round-trips");
     assert_eq!(back, t, "serialize → deserialize is identity");
@@ -125,6 +126,7 @@ fn apply_to_is_pure_and_touches_only_persisted_fields() {
         overlay_bbox: false,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        interactive_clip: false,
     };
     t.apply_to(&mut s);
 
@@ -178,6 +180,7 @@ fn save_to_then_load_from_round_trips_on_disk() {
         overlay_bbox: true,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        interactive_clip: false,
     };
     t.save_to(&path)
         .expect("save creates the parent dir + file");
