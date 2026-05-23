@@ -33,10 +33,15 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
+mod agent;
 mod clip;
 mod flight;
 mod geometry;
 mod raw;
+pub use agent::{
+    encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, MockAgent, TurnSnapshot,
+    AGENT_MOCK_ORIGIN,
+};
 pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
 pub use raw::{parse_line, parse_raw, to_raw};
@@ -289,8 +294,10 @@ impl Session {
             materials: Some(pb::MaterialsState {
                 visible: self.materials.clone().into_iter().collect(),
             }),
-            // Δ8: late joiner gets the running transcript. Empty in
-            // M1 — the agent loop is M6 (Decision 6).
+            // Δ8 carrier; populated by [`VizService::snapshot_full`]
+            // in M6 (phase-5-m6.md Decision 97) — left
+            // [`pb::AgentTranscript::default`] here so the M1/M2/M3
+            // session-state path stays single-purpose.
             agent: Some(pb::AgentTranscript::default()),
         }
     }
@@ -301,7 +308,57 @@ struct Inner {
     tx: tokio::sync::broadcast::Sender<pb::StateDelta>,
     agent: bool,
     expected_token: Option<String>,
+    /// Phase 5 M6 Decision 94. `None` ⇒ no LLM wired in; `agent_chat`
+    /// returns a clear `ok=false` error and `CAP_AGENT` advertises
+    /// only if `agent == true` (the M1 builder contract is preserved
+    /// — a deployment can advertise the capability without a backend
+    /// for testing).
+    backend: Option<Arc<dyn AgentBackend>>,
+    /// Phase 5 M6 Decision 98. The in-flight turn's id + cancel flag.
+    /// `Interrupt` looks the id up here and flips the flag; the
+    /// backend observes it via `AgentTurnCtx::cancelled`.
+    active_turn: Mutex<Option<ActiveTurn>>,
+    /// Phase 5 M6 Decision 97. One entry per landed user turn; the
+    /// opening `DELTA_SNAPSHOT` for any new subscriber carries
+    /// these as `AgentTranscript.messages` so a late joiner sees the
+    /// running conversation. Caps at [`AGENT_TRANSCRIPT_CAP`] to keep
+    /// the snapshot small.
+    transcript: Mutex<Vec<TurnRecord>>,
+    /// Phase 5 M6 Decision 99. Live peer count broadcast detail; read
+    /// by `subscribe` after the new receiver lands, included in the
+    /// next `Status` event.
+    peer_count: std::sync::atomic::AtomicU64,
 }
+
+#[derive(Clone)]
+struct ActiveTurn {
+    turn_id: String,
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// One landed user turn — the user's message, the assistant's emitted
+/// tokens concatenated into one body string, and the dense one-liner
+/// tool-call summaries the client renders inline (`client.md` §"AI
+/// Assistant panel"). The pre-turn snapshot for revert (Decision 97)
+/// lives **client-side** in the windowed app's `ShellState` so a peer
+/// that observed the `UserTurn` delta can revert from its own
+/// observed state; the server-side carrier here is only for the
+/// late-joiner transcript replay.
+#[derive(Clone, Debug)]
+struct TurnRecord {
+    turn_id: String,
+    user_text: String,
+    assistant_text: String,
+    tool_lines: Vec<String>,
+    final_status: pb::AgentStatusKind,
+    final_detail: String,
+}
+
+/// Bound on the running transcript carried in `Snapshot.agent`
+/// (`phase-5-m6.md` Decision 97). Late joiners get this many trailing
+/// turns; older turns are dropped so the snapshot payload stays
+/// small.
+const AGENT_TRANSCRIPT_CAP: usize = 64;
 
 /// The `MiliViz` service. Construct with [`VizService::builder`].
 #[derive(Clone)]
@@ -311,10 +368,13 @@ pub struct VizService {
 
 /// Builder for [`VizService`]. `agent(true)` advertises the `agent`
 /// capability (a real deployment sets this iff an LLM backend is
-/// configured — Decision 6); the implementation is still M6.
+/// configured — Decision 6). `agent_backend(MockAgent)` (Phase 5 M6
+/// Decision 94) plugs in the loop that actually runs turns and
+/// implicitly sets `agent` to `true` if not yet set.
 pub struct VizServiceBuilder {
     agent: bool,
     expected_token: Option<String>,
+    backend: Option<Arc<dyn AgentBackend>>,
 }
 
 impl VizServiceBuilder {
@@ -330,6 +390,17 @@ impl VizServiceBuilder {
         self
     }
 
+    /// Plug an [`AgentBackend`] (Phase 5 M6 Decision 94). Implicitly
+    /// flips on the `agent` capability — a deployment with a wired
+    /// backend should always advertise the capability so the client
+    /// renders the panel; a deployment without one stays panel-less.
+    #[must_use]
+    pub fn agent_backend<B: AgentBackend>(mut self, backend: B) -> Self {
+        self.backend = Some(Arc::new(backend));
+        self.agent = true;
+        self
+    }
+
     #[must_use]
     pub fn build(self) -> VizService {
         let (tx, _) = tokio::sync::broadcast::channel(BROADCAST_CAP);
@@ -339,6 +410,10 @@ impl VizServiceBuilder {
                 tx,
                 agent: self.agent,
                 expected_token: self.expected_token,
+                backend: self.backend,
+                active_turn: Mutex::new(None),
+                transcript: Mutex::new(Vec::new()),
+                peer_count: std::sync::atomic::AtomicU64::new(0),
             }),
         }
     }
@@ -350,6 +425,7 @@ impl VizService {
         VizServiceBuilder {
             agent: false,
             expected_token: None,
+            backend: None,
         }
     }
 
@@ -381,6 +457,154 @@ impl VizService {
     #[must_use]
     pub fn flight_service(&self) -> FlightGeometryService {
         FlightGeometryService::new(Arc::clone(&self.inner))
+    }
+
+    /// Phase 5 M6 Decision 95 — `pub(crate)` so [`agent::AgentTurnCtx`]
+    /// can allocate a `StateDelta.seq` for its bare `DELTA_AGENT`
+    /// events through the same monotonic counter the dispatch path
+    /// uses. The lock is brief; callers do not hold it across awaits.
+    pub(crate) fn next_seq_value(&self) -> u64 {
+        let mut s = self.inner.session.lock().unwrap();
+        s.seq += 1;
+        s.seq
+    }
+
+    /// Build the running `AgentTranscript` for the opening
+    /// `DELTA_SNAPSHOT` (Decision 97). Late joiners see the same
+    /// conversation as every other peer.
+    fn build_transcript(&self) -> pb::AgentTranscript {
+        let turns = self.inner.transcript.lock().unwrap();
+        let mut messages = Vec::with_capacity(turns.len() * 2);
+        for t in turns.iter() {
+            messages.push(pb::AgentMessage {
+                role: "user".to_string(),
+                text: t.user_text.clone(),
+                tool_lines: Vec::new(),
+                turn_id: t.turn_id.clone(),
+            });
+            messages.push(pb::AgentMessage {
+                role: "assistant".to_string(),
+                text: t.assistant_text.clone(),
+                tool_lines: t.tool_lines.clone(),
+                turn_id: t.turn_id.clone(),
+            });
+        }
+        let last_status = turns.last().map_or(
+            pb::AgentStatus {
+                kind: pb::AgentStatusKind::AgentIdle as i32,
+                detail: format!(
+                    "peers={}",
+                    self.inner
+                        .peer_count
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                ),
+            },
+            |t| pb::AgentStatus {
+                kind: t.final_status as i32,
+                detail: if t.final_detail.is_empty() {
+                    format!(
+                        "peers={}",
+                        self.inner
+                            .peer_count
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                    )
+                } else {
+                    t.final_detail.clone()
+                },
+            },
+        );
+        pb::AgentTranscript {
+            messages,
+            status: Some(last_status),
+        }
+    }
+
+    /// Allocate a delta seq and broadcast a `DELTA_AGENT` carrying
+    /// `event`. Used by `agent_chat` for the `UserTurn` echo and by
+    /// `close_turn` for the closing `Status`.
+    fn broadcast_agent_event(&self, event: pb::AgentEvent) {
+        let seq = self.next_seq_value();
+        let _ = self.inner.tx.send(pb::StateDelta {
+            seq,
+            origin_client_id: AGENT_MOCK_ORIGIN.to_string(),
+            kind: pb::DeltaKind::DeltaAgent as i32,
+            payload: Some(pb::state_delta::Payload::Agent(event)),
+        });
+    }
+
+    /// Phase 5 M6 Decision 99 — broadcast the live peer count as a
+    /// `DELTA_AGENT` `Status` event with `detail = "peers=N"`. The
+    /// client parses this out of the detail field to drive the
+    /// wireframes §"Session states" peer banner / status-bar cell.
+    fn broadcast_peer_status(&self, peers: u64) {
+        let ev = pb::AgentEvent {
+            turn_id: String::new(),
+            ev: Some(pb::agent_event::Ev::Status(pb::AgentStatus {
+                kind: pb::AgentStatusKind::AgentIdle as i32,
+                detail: format!("peers={peers}"),
+            })),
+        };
+        self.broadcast_agent_event(ev);
+    }
+
+    /// Finalize a turn record (Decision 97) and broadcast the closing
+    /// `Status` (Decision 98). Drops the active-turn slot so the next
+    /// `agent_chat` opens fresh.
+    fn close_turn(&self, turn_id: &str, kind: pb::AgentStatusKind, detail: String) {
+        let peers = self.inner.tx.receiver_count() as u64;
+        self.inner
+            .peer_count
+            .store(peers, std::sync::atomic::Ordering::SeqCst);
+        let pieces = if detail.is_empty() {
+            format!("peers={peers}")
+        } else {
+            format!("{detail}; peers={peers}")
+        };
+        {
+            let mut active = self.inner.active_turn.lock().unwrap();
+            if active.as_ref().is_some_and(|a| a.turn_id == turn_id) {
+                *active = None;
+            }
+        }
+        {
+            let mut turns = self.inner.transcript.lock().unwrap();
+            if let Some(t) = turns.iter_mut().find(|t| t.turn_id == turn_id) {
+                t.final_status = kind;
+                t.final_detail = pieces.clone();
+            }
+            if turns.len() > AGENT_TRANSCRIPT_CAP {
+                let excess = turns.len() - AGENT_TRANSCRIPT_CAP;
+                turns.drain(0..excess);
+            }
+        }
+        let ev = pb::AgentEvent {
+            turn_id: turn_id.to_string(),
+            ev: Some(pb::agent_event::Ev::Status(pb::AgentStatus {
+                kind: kind as i32,
+                detail: pieces,
+            })),
+        };
+        self.broadcast_agent_event(ev);
+    }
+
+    /// Append the assistant token / tool-line into the turn record so
+    /// late joiners see the running transcript. The broadcast itself
+    /// is the backend's job (via `AgentTurnCtx`); this is a parallel
+    /// fold for the journal carried in `Snapshot.agent`.
+    pub(crate) fn record_turn_event(&self, turn_id: &str, ev: &pb::agent_event::Ev) {
+        use pb::agent_event::Ev;
+        let mut turns = self.inner.transcript.lock().unwrap();
+        let Some(t) = turns.iter_mut().find(|t| t.turn_id == turn_id) else {
+            return;
+        };
+        match ev {
+            Ev::Token(tok) => t.assistant_text.push_str(&tok.text),
+            Ev::ToolBegin(b) => t.tool_lines.push(b.summary.clone()),
+            // ToolEnd / Status / UserTurn don't extend the transcript
+            // text — UserTurn was already folded at turn-open time,
+            // and status / tool-end are presentational.
+            _ => {}
+        }
     }
 
     /// Dispatch one parsed command: mutate state, assign a seq, build
@@ -860,17 +1084,36 @@ impl MiliViz for VizService {
         // Take the opening snapshot and subscribe under the same lock
         // so a concurrent Execute cannot slip a delta between the
         // snapshot and the first streamed item (late-subscriber
-        // ordering guarantee).
+        // ordering guarantee). The opening snapshot now carries the
+        // populated `AgentTranscript` for the late-joiner replay
+        // (phase-5-m6.md Decision 97).
         let (snapshot_delta, rx) = {
             let s = self.inner.session.lock().unwrap();
+            let mut snap = s.snapshot();
+            snap.agent = Some(self.build_transcript());
             let delta = pb::StateDelta {
                 seq: s.seq,
                 origin_client_id: String::new(),
                 kind: pb::DeltaKind::DeltaSnapshot as i32,
-                payload: Some(pb::state_delta::Payload::Snapshot(s.snapshot())),
+                payload: Some(pb::state_delta::Payload::Snapshot(snap)),
             };
             (delta, self.inner.tx.subscribe())
         };
+
+        // Phase 5 M6 Decision 99: broadcast the new peer count to
+        // every prior subscriber so the banner / status-bar peer cell
+        // updates. The fresh subscriber already gets the count from
+        // the opening snapshot's transcript status. Gated on the
+        // agent capability so the M1 acceptance gate (which uses a
+        // vanilla `.agent(false)` server, the byte-stable default)
+        // sees no extra `DELTA_AGENT` traffic.
+        let peers = self.inner.tx.receiver_count() as u64;
+        self.inner
+            .peer_count
+            .store(peers, std::sync::atomic::Ordering::SeqCst);
+        if self.inner.agent {
+            self.broadcast_peer_status(peers);
+        }
 
         let want2 = want.clone();
         let tail = BroadcastStream::new(rx).filter_map(move |item| match item {
@@ -910,32 +1153,165 @@ impl MiliViz for VizService {
 
     async fn agent_chat(
         &self,
-        _request: Request<pb::AgentChatRequest>,
+        request: Request<pb::AgentChatRequest>,
     ) -> Result<Response<pb::AgentChatReply>, Status> {
-        Err(Status::unimplemented(
-            "AgentChat is frozen in M1; the agent loop is Phase 4/5 M6 \
-             (phase-4-m1.md Decisions 6 & 7)",
-        ))
+        // Phase 5 M6 (phase-5-m6.md Decisions 94–98) — the M1 frozen
+        // stub is gone. A server with no backend configured returns a
+        // clear ok=false error (not Status::unimplemented; the wire
+        // surface is implemented, the deployment just hasn't wired a
+        // backend). With a backend, dispatch one turn.
+        let Some(backend) = self.inner.backend.clone() else {
+            return Ok(Response::new(pb::AgentChatReply {
+                ok: false,
+                error: "no agent backend configured (build the server \
+                        with VizService::builder().agent_backend(...))"
+                    .to_string(),
+                turn_id: String::new(),
+            }));
+        };
+        let req = request.into_inner();
+        let turn_id = format!("turn-{}", self.next_seq_value());
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let origin = AGENT_MOCK_ORIGIN.to_string();
+
+        // Register the active turn (Decision 98). The pre-turn
+        // snapshot for revert (Decision 97) is the client's job —
+        // every peer that observed this `UserTurn` delta has the
+        // matching session state to snapshot for itself.
+        *self.inner.active_turn.lock().unwrap() = Some(ActiveTurn {
+            turn_id: turn_id.clone(),
+            cancel: cancel.clone(),
+        });
+
+        // Broadcast the user-turn echo so all peers see the message
+        // (`client.md` §"Design principle" — shared transcript).
+        let user_text = req.text.clone();
+        let had_frame = req.attach_frame;
+        let ev = pb::AgentEvent {
+            turn_id: turn_id.clone(),
+            ev: Some(pb::agent_event::Ev::UserTurn(pb::AgentUserTurn {
+                text: user_text.clone(),
+                had_frame,
+            })),
+        };
+        self.broadcast_agent_event(ev);
+
+        // Open the assistant transcript row for this turn. Tokens fold
+        // into `assistant_text`; tool-call summaries fold into
+        // `tool_lines`. Completed at turn end (Decision 97).
+        self.inner.transcript.lock().unwrap().push(TurnRecord {
+            turn_id: turn_id.clone(),
+            user_text,
+            assistant_text: String::new(),
+            tool_lines: Vec::new(),
+            final_status: pb::AgentStatusKind::AgentRunning,
+            final_detail: String::new(),
+        });
+
+        // Run the turn on the current tokio runtime. The dispatcher
+        // closure proxies VizService::dispatch — `client.md` §"Design
+        // principle": every agent action flows through the same seam
+        // typed Execute uses, broadcasting as an ordinary StateDelta
+        // tagged with the agent's origin_client_id.
+        let svc = self.clone();
+        let dispatcher: agent::Dispatcher = {
+            let svc = svc.clone();
+            Arc::new(move |cmd, origin| svc.dispatch(cmd, origin))
+        };
+        let next_seq: agent::SeqAllocator = {
+            let svc = svc.clone();
+            Arc::new(move || svc.next_seq_value())
+        };
+        let recorder: agent::EventRecorder = {
+            let svc = svc.clone();
+            Arc::new(move |id: &str, ev: &pb::agent_event::Ev| svc.record_turn_event(id, ev))
+        };
+        let ctx = AgentTurnCtx {
+            turn_id: turn_id.clone(),
+            request: req,
+            origin_client_id: origin,
+            tx: self.inner.tx.clone(),
+            next_seq,
+            dispatcher,
+            recorder,
+            cancel: cancel.clone(),
+        };
+        let turn_id_for_task = turn_id.clone();
+        let svc_for_task = svc.clone();
+        tokio::spawn(async move {
+            backend.run_turn(ctx).await;
+            // Closing status: interrupted iff the cancel flag was
+            // flipped during the turn, idle otherwise. The peer-count
+            // detail piggyback (Decision 99) rides on every status so
+            // the banner stays live.
+            let (kind, detail) = if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                (pb::AgentStatusKind::AgentInterrupted, String::new())
+            } else {
+                (pb::AgentStatusKind::AgentIdle, String::new())
+            };
+            svc_for_task.close_turn(&turn_id_for_task, kind, detail);
+        });
+
+        Ok(Response::new(pb::AgentChatReply {
+            ok: true,
+            error: String::new(),
+            turn_id,
+        }))
     }
 
     async fn interrupt(
         &self,
-        _request: Request<pb::InterruptRequest>,
+        request: Request<pb::InterruptRequest>,
     ) -> Result<Response<pb::InterruptReply>, Status> {
-        Err(Status::unimplemented(
-            "Interrupt is frozen in M1; the agent loop is Phase 4/5 M6 \
-             (phase-4-m1.md Decisions 6 & 7)",
-        ))
+        // Phase 5 M6 Decision 98. Empty `turn_id` is "cancel whatever
+        // is in flight" (the frozen-proto convention — see
+        // proto/mili_viz.proto:437). An out-of-date turn_id (no
+        // active turn or stale id) is a no-op success — the user's
+        // intent was "stop", and there is nothing to stop.
+        let req = request.into_inner();
+        let active = self.inner.active_turn.lock().unwrap().clone();
+        match active {
+            Some(at) if req.turn_id.is_empty() || at.turn_id == req.turn_id => {
+                at.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Response::new(pb::InterruptReply {
+                    ok: true,
+                    error: String::new(),
+                }))
+            }
+            _ => Ok(Response::new(pb::InterruptReply {
+                ok: true,
+                error: String::new(),
+            })),
+        }
     }
 
     async fn capture_frame(
         &self,
-        _request: Request<pb::FrameRequest>,
+        request: Request<pb::FrameRequest>,
     ) -> Result<Response<pb::FrameReply>, Status> {
-        Err(Status::unimplemented(
-            "CaptureFrame is frozen in M1; it needs the offscreen \
-             renderer (Phase 4 M6 / Phase 5)",
-        ))
+        // Phase 5 M6 Decision 96 — the RPC is no longer
+        // Status::unimplemented; a deterministic placeholder PNG/JPEG
+        // satisfies the contract surface. Production server-side
+        // wgpu offscreen rendering is a separate milestone.
+        let req = request.into_inner();
+        match encode_placeholder_frame(req.width, req.height, &req.format) {
+            Ok((bytes, fmt)) => Ok(Response::new(pb::FrameReply {
+                ok: true,
+                error: String::new(),
+                image: bytes,
+                format: fmt,
+                width: req.width,
+                height: req.height,
+            })),
+            Err(e) => Ok(Response::new(pb::FrameReply {
+                ok: false,
+                error: e,
+                image: vec![],
+                format: req.format,
+                width: req.width,
+                height: req.height,
+            })),
+        }
     }
 }
 

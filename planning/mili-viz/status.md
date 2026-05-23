@@ -12,9 +12,10 @@
 >   batch (`MVG3` blob → cut-plane → slice; see
 >   [`phase-4-m7.md`](phase-4-m7.md) / [`phase-4-m8.md`](phase-4-m8.md)
 >   / [`phase-4-m9.md`](phase-4-m9.md)).
-> - **Phase 5 (`mili-viz` client): 🟢 M1–M5 + MVP polish landed,
->   M7 + M8 + M9 ✅ landed → the volumetric batch is now complete on
->   the client side; M6 remains not started.**
+> - **Phase 5 (`mili-viz` client): 🟢 M1–M9 + MVP polish all landed.**
+>   The agent integration polish (M6) and the volumetric batch
+>   (M7/M8/M9) are now complete on the client side; Phase 5 itself is
+>   complete with no remaining work.
 > - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 landed;
 >   M4/M5/M6 not started.**
 >
@@ -33,9 +34,10 @@
   all landed. Per-milestone scope/decisions in
   [`phase-4-m1.md`](phase-4-m1.md) through [`phase-4-m6.md`](phase-4-m6.md);
   the frozen `mili_viz.proto` was untouched after M1.
-- **Phase 5 (`mili-viz` client): 🟢 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅,
-  M3.5 ✅, M4 ✅, M5 ✅ landed (+ the MVP-polish rollup; see "Immediate
-  next steps" item 23). M6 ⏳ not started.**
+- **Phase 5 (`mili-viz` client): 🟢 COMPLETE — M1 ✅, M2 ✅, M3 ✅,
+  M3.5 ✅, M4 ✅, M5 ✅, M6 ✅, M7 ✅, M8 ✅, M9 ✅ landed (+ the
+  MVP-polish rollup; see "Immediate next steps" item 23).** Phase 5
+  is complete; only Phase 6 M4/M5/M6 remain.
   - **M1 — `wgpu` renderer skeleton.** New standalone
     `crates/mili-viz-client` (`wgpu` 29 / `winit` 0.30 / `glam`, no
     mili dep); orbit `Camera` field-aligned to the frozen
@@ -135,6 +137,7 @@
 | [`phase-6-m3.md`](phase-6-m3.md) | Phase 6 M3 Layer-1 object API; every call lowers to a typed `Command` oneof (never `raw`); Layer-0 ≡ Layer-1 pinned two ways (fake-stub + identical-`DELTA_SNAPSHOT`). `crates/` byte-for-byte untouched. Decisions 59–61 | ✅ pinned + landed (2026-05-18) |
 | [`phase-5-m4.md`](phase-5-m4.md) | Phase 5 M4 local view manipulation + pre-M4 hardening: predict-and-reconcile mouse orbit, radians end-to-end, client-side colormap/legend, HiDPI fix, griz-subset CLI. Decisions 62–66 | ✅ pinned + landed (2026-05-18) |
 | [`phase-5-m5.md`](phase-5-m5.md) | Phase 5 M5 remote mode: `Session::connect_tcp`/`Session::attach` ride the Phase 4 M6 wire (one tuned `tonic::Channel` cloned for `MiliVizClient`+`FlightServiceClient`; Flight `DoGet` blob is byte-identical to in-process `fetch_geometry`); CLI `-r`/`--remote <host:port>` + `--attach [<id>]`; HPC-latency tuning (`tcp_nodelay`, TCP+HTTP/2 keep-alives, 10 s `connect_timeout`). No proto change. Decisions 90–93 | ✅ pinned + landed (2026-05-23) |
+| [`phase-5-m6.md`](phase-5-m6.md) | Phase 5 M6 agent integration polish: lights up the frozen `AgentChat`/`Interrupt`/`CaptureFrame`/`DELTA_AGENT`/`Snapshot.agent` surface with `AgentBackend` trait + always-on `MockAgent` (real LLM backend gated separately); commands flow through the existing `VizService::dispatch` seam (tagged with the agent's `origin_client_id` per `client.md` §"Design principle"); per-turn client-side snapshot for `↶ revert to here`; `CaptureFrame` returns a deterministic placeholder PNG (production wgpu offscreen swap deferred); peer count rides `AgentStatus.detail = "peers=N"` gated on the `agent` capability. Zero `.proto` change. Decisions 94–99 | ✅ pinned + landed (2026-05-23) |
 | [`phase-4-m7.md`](phase-4-m7.md) | Phase 4 M7 volumetric geometry contract (`MVG3`): superset of `MVG2`, length-prefixed, free-form-tag carrier (zero `.proto` change), per-superclass element-edge buffer (fixes the hex-face-diagonal wireframe artifact / VB-005), opt-in interior-triangle emit via `MaterialVisibility` sentinel. **Supersedes `phase-4-m2.md` Decision 11 additively.** Decisions 72–74 | 🟡 planned (drafted 2026-05-23) |
 | [`phase-4-m8.md`](phase-4-m8.md) | Phase 4 M8 cut-plane operator: wires the long-frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528` stub), closed clipped hull (kept-side ∪ cap), per-superclass marching tables, rayon parallel-per-element, session-state that composes with `show`/state-step/material toggles. Decisions 75–77 | 🟡 planned (drafted 2026-05-23) |
 | [`phase-4-m9.md`](phase-4-m9.md) | Phase 4 M9 slice operator: additive `slice_only: bool` on `CutPlane` (**second** post-M1 proto change), cap-only emit, scalar interpolation linear along straddled edges, composes with cut. Decisions 78–80 | 🟡 planned (drafted 2026-05-23) |
@@ -464,8 +467,9 @@ expanded by `scripting.md` / `client.md`. None started.
       unchanged and green. _(The AI Assistant panel — formerly
       mislabeled "M3.5" here — is Phase 5 M6 per `client.md`
       §"Phasing".)_
-- [ ] **M4 — local view manipulation** (rotate/zoom without server
+- [x] **M4 — local view manipulation** (rotate/zoom without server
       round-trip; reconcile against server-authoritative camera).
+      Landed in the M4 PR (see Decisions 62–66 / item 21 below).
 - [x] **M5 — remote mode.** ✅ **Landed.** `Session::connect_tcp`
       and `Session::attach` over the Phase 4 M6 wire — one tuned
       `tonic::Channel` cloned for `MiliVizClient` +
@@ -485,7 +489,63 @@ expanded by `scripting.md` / `client.md`. None started.
       Gating test
       `crates/mili-viz-client/tests/m5_remote_mode.rs::{cli_dispatches_remote_attach_and_default_distinctly, cli_rejects_mixed_or_double_transports, attach_explicit_id_missing_is_a_clear_error, attach_empty_dir_is_a_clear_error, attach_with_dead_pid_id_still_attempts_connect_and_fails_cleanly, remote_session_resolves_geometry_byte_identical_to_in_process, remote_session_fetches_catalog_via_flight, attach_round_trip_resolves_a_real_running_server}`
       (5 always-on + 3 skip-on-absent against `serial/basic1`).
-- [ ] **M6 — agent integration polish** (`client.md`).
+- [x] **M6 — agent integration polish.** ✅ **Landed.** The agent
+      surface frozen since Phase 4 M1 Decision 1 Δ4–Δ9 (`AgentChat`,
+      `Interrupt`, `CaptureFrame`, `DELTA_AGENT`, `AgentEvent`,
+      `AgentTranscript`, `Snapshot.agent`,
+      `HelloReply.capabilities[agent]`) is now lit up end-to-end with
+      **zero `.proto` change**. Server: a new
+      `crates/mili-viz-server/src/agent.rs` carries an
+      `AgentBackend` trait + the always-on `MockAgent` deterministic
+      backend (Decision 94); `VizService::builder().agent_backend(...)`
+      plugs one in and implicitly flips the `CAP_AGENT` advertisement.
+      `agent_chat` spawns one turn task that broadcasts `UserTurn` /
+      `Status(thinking)` / streamed `Token`s / `ToolBegin`/`ToolEnd`
+      pair around a real command dispatched through the **same
+      `VizService::dispatch`** seam typed `Execute` uses (Decision 95
+      — `client.md` §"Design principle"), then `Status(idle)` (or
+      `Status(interrupted)` on barge-in — Decision 98). `interrupt`
+      flips an `Arc<AtomicBool>` the backend observes between emits.
+      `capture_frame` returns a deterministic placeholder PNG/JPEG via
+      the `image` crate (Decision 96 — a real server-side wgpu
+      offscreen renderer is a separate follow-up). The opening
+      `DELTA_SNAPSHOT` now carries a populated `AgentTranscript`
+      (Decision 97 — late joiners see the running conversation).
+      Each `subscribe` broadcasts the peer count via an idle-status
+      `Status.detail = "peers=N"` piggyback (Decision 99 — the
+      free-form detail field is the only protocol-stable carrier);
+      gated on the `agent` capability so the M1 acceptance gate's
+      vanilla `.agent(false)` server stays byte-stable. Client:
+      `crates/mili-viz-client/src/ai_panel.rs` carries `AiPanelState`
+      (capability gate, expand/collapse, transcript rows, composer
+      buffer, attached-frame toggle, status pill, per-turn snapshots
+      for client-side revert); `shell.rs` paints the wireframes-spec
+      panel (header + transcript + composer + 📷 attach / Send /
+      ⏹ Stop / `↶ revert to here`); `app.rs` ingests `DELTA_AGENT`
+      events, lowers `UiAction::{AgentChat, AgentInterrupt,
+      AgentRevert, SetAiExpanded, ToggleAttachFrame}` to the frozen
+      RPCs, and stashes a `TurnSnapshot` synchronously off each
+      `agent_chat` reply (revert lowers to typed `SetState` / `Show` /
+      `View(SetCamera)` — no `raw`). The windowed in-process arm
+      plugs in `MockAgent` by default so the panel lights up against
+      a vanilla `cargo run`; a real LLM backend is gated separately
+      (Decision 94 — its dep tree + config UX live behind a future
+      Cargo feature). Scope/decisions
+      [`phase-5-m6.md`](phase-5-m6.md) (94–99). Gating tests:
+      `crates/mili-viz-server/tests/m6_agent.rs` (10 always-on:
+      capability+backend matrix / full agent_chat broadcast in order
+      / interrupt mid-turn + noop / CaptureFrame PNG+JPEG+zero / late
+      subscriber transcript replay / peer-count broadcast) and
+      `crates/mili-viz-client/tests/m6_agent_panel.rs` (10 always-on:
+      panel hidden absent CAP_AGENT / cap+expanded paints cleanly /
+      event-to-row folding / submit-clears intents / Stop-swap-on-
+      in-flight / peers parsing / revert typed-command pin /
+      turn-boundary race-safe ordering); the M1 acceptance gate's
+      `frozen_stubs_unimplemented` test (`acceptance.rs`) was
+      updated in place to assert both the no-backend and
+      backend-wired arms. M1–M5/M7/M8/M9 + Phase 6 M1–M3 + MVP-polish
+      gating tests unchanged and green. `cargo clippy --workspace
+      --all-targets` clean.
 - [x] **M7 — render modes consuming `MVG3`.** ✅ **Landed.**
       Sibling to Phase 4 M7 on the client side.
       `RenderMode::{Translucent, Xray}` arms (alpha-blended fill
@@ -987,6 +1047,75 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     once the gating test ships). Independent of the still-open
     Phase 5 M5 (remote mode) and Phase 6 M4–M6 — the batch can
     interleave with either track.
+
+25. ✅ **DONE (coding Phase 5 M6 — agent integration polish).** The
+    agent surface frozen since Phase 4 M1 Decision 1 Δ4–Δ9
+    (`AgentChat` / `Interrupt` / `CaptureFrame` / `DELTA_AGENT` /
+    `AgentEvent` / `AgentTranscript` / `Snapshot.agent` /
+    `HelloReply.capabilities[agent]`) is now lit up end-to-end with
+    **zero `.proto` change** — the contract was pinned nine
+    milestones ago precisely so M6 could land without re-opening it.
+    Server-side `crates/mili-viz-server/src/agent.rs` carries the
+    `AgentBackend` trait + always-on `MockAgent`
+    (`VizService::builder().agent_backend(...)` plugs one in and
+    flips `CAP_AGENT`); the `MiliViz::agent_chat` / `interrupt` /
+    `capture_frame` impls run a turn-task that broadcasts the
+    `UserTurn` echo / streamed `Token`s / `ToolBegin`/`ToolEnd` pair
+    around an ordinary `VizService::dispatch` call (so the agent's
+    commands tag with `AGENT_MOCK_ORIGIN` and broadcast as any other
+    `StateDelta` — `client.md` §"Design principle"), then the
+    closing `Status(idle|interrupted)`. `Interrupt` flips an
+    `Arc<AtomicBool>` the backend observes between emits;
+    `CaptureFrame` returns a deterministic placeholder PNG/JPEG via
+    the `image` crate (Decision 96 — production server-side wgpu
+    offscreen is a separate follow-up). Peer count rides
+    `AgentStatus.detail = "peers=N"` (Decision 99), gated on the
+    `agent` capability so the M1 acceptance gate's vanilla
+    `.agent(false)` server stays byte-stable (every prior gating
+    test green by construction). Client-side
+    `crates/mili-viz-client/src/ai_panel.rs` carries `AiPanelState`
+    + the `↶ revert to here` typed-command lowering (`SetState` /
+    `Show` / `View(SetCamera)` — no `raw`); `shell.rs` paints the
+    wireframes-spec panel chrome (collapsed rail / expanded panel
+    with header, transcript, composer, 📷 attach / Send / ⏹ Stop);
+    `app.rs` ingests `DELTA_AGENT` events, lowers the new
+    `UiAction::{AgentChat, AgentInterrupt, AgentRevert,
+    SetAiExpanded, ToggleAttachFrame}` to the frozen RPCs, and
+    stashes a `TurnSnapshot` synchronously off each `agent_chat`
+    reply. Windowed in-process arm plugs in `MockAgent` by default
+    so a vanilla `cargo run` lights up the panel; a real
+    Anthropic / local-model backend stays a future Cargo-feature
+    follow-up (Decision 94). Scope/decisions
+    [`phase-5-m6.md`](phase-5-m6.md) (94–99). Gating tests:
+    `m6_agent.rs::{capability_advertised_without_backend_returns_clear_error,
+    backend_present_lights_up_agent_chat,
+    agent_chat_broadcasts_user_status_token_tool_pair_and_dispatched_delta,
+    interrupt_causes_an_interrupted_status_to_broadcast,
+    interrupt_with_no_active_turn_is_a_clean_noop_success,
+    capture_frame_returns_a_png_of_requested_extent,
+    capture_frame_returns_non_empty_jpeg,
+    capture_frame_rejects_zero_extent_cleanly,
+    late_subscriber_sees_populated_transcript_in_opening_snapshot,
+    second_subscriber_triggers_peer_count_broadcast_to_first}`
+    (server-side; 10 always-on) and
+    `m6_agent_panel.rs::{cap_agent_false_hides_the_panel,
+    cap_agent_true_expanded_panel_paints_without_input_actions,
+    ingest_event_folds_full_turn_into_ordered_rows,
+    submit_returns_intent_and_clears_buffers,
+    in_flight_status_is_the_stop_swap_signal,
+    peer_count_parses_assorted_details,
+    peer_count_drives_panel_state,
+    revert_lowers_to_typed_setstate_show_setcamera_sequence,
+    revert_without_camera_emits_setstate_and_show_only,
+    turn_boundary_inserts_between_user_and_assistant}` (client-side;
+    10 always-on). The M1 acceptance gate's
+    `frozen_stubs_unimplemented` test was updated in place to assert
+    both the no-backend and backend-wired arms; `cargo test
+    --workspace --exclude mili-py` green; `cargo clippy --workspace
+    --all-targets` clean. **Phase 5 (`mili-viz` client) is now
+    complete** — only Phase 6 M4 (`pygriz` live sync), M5 (query
+    payoff), and M6 (output + remote tuning) remain across the
+    whole `mili-viz` track.
 
 ## Update protocol
 

@@ -21,6 +21,7 @@
 
 #![allow(clippy::pedantic)]
 
+mod ai_panel;
 mod app;
 mod camera;
 mod catalog;
@@ -33,6 +34,9 @@ mod session;
 mod shell;
 mod tweaks;
 
+pub use ai_panel::{
+    parse_peer_count, AgentChatIntent, AgentStatus, AiPanelState, TranscriptRow, TurnSnapshot,
+};
 pub use app::run;
 pub use camera::Camera;
 pub use catalog::{decode_catalog, ResultCatalog};

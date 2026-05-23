@@ -1,7 +1,7 @@
 # `mili-viz` — client / server visualization stack
 
-> **Status: Phase 4 (server) ✅ COMPLETE; Phase 5 (client) 🟢 IN
-> PROGRESS; Phase 6 (`pygriz` scripting client) 🟢 IN PROGRESS.**
+> **Status: Phase 4 (server) ✅ COMPLETE; Phase 5 (client) ✅
+> COMPLETE; Phase 6 (`pygriz` scripting client) 🟢 IN PROGRESS.**
 > This README is the original architecture/rationale; the live
 > tracker, the open design questions, and the concrete next steps
 > are in **[`status.md`](status.md) — start there.** Crates landed:
@@ -143,7 +143,14 @@ See [`status.md`](status.md) and the per-milestone
    over the landed gRPC + Flight TCP transport; HPC-latency tuning:
    `tcp_nodelay`, TCP + HTTP/2 keep-alives, explicit connect
    timeout).
-7. **M6** ⏳ — agent integration polish (`client.md`).
+7. **M6** ✅ — agent integration polish (`client.md`). Lights up the
+   frozen Phase 4 M1 Decision 1 Δ4–Δ9 surface
+   (`AgentChat`/`Interrupt`/`CaptureFrame`/`DELTA_AGENT`/
+   `Snapshot.agent`) with an `AgentBackend` trait + always-on
+   `MockAgent` (real LLM backend gated separately), client-side
+   per-turn snapshot + typed-command revert, and a
+   `peers=N`-via-`AgentStatus.detail` peer count. Zero `.proto`
+   change. See [`phase-5-m6.md`](phase-5-m6.md) Decisions 94–99.
 
 ## Phase 6 (`pygriz` scripting client) milestones
 

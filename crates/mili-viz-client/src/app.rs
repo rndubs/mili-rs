@@ -99,6 +99,13 @@ impl App {
                     if let Some(c) = s.camera {
                         self.apply_camera(&c);
                     }
+                    // Phase 5 M6 Decision 97 — populate the panel's
+                    // running transcript from the opening snapshot's
+                    // `Snapshot.agent` so a late joiner sees the
+                    // conversation already in flight.
+                    if let Some(t) = s.agent {
+                        self.apply_agent_transcript(&t);
+                    }
                 }
                 Some(pb::state_delta::Payload::Loaded(l)) => self.apply_loaded(&l),
                 Some(pb::state_delta::Payload::State(n)) => self.shell.state = n,
@@ -110,6 +117,10 @@ impl App {
                     self.shell.result = None;
                     self.shell.catalog = None;
                     self.mesh = None;
+                    self.shell.ai.clear();
+                }
+                Some(pb::state_delta::Payload::Agent(ev)) => {
+                    self.shell.ai.ingest_event(&ev);
                 }
                 _ => {}
             }
@@ -173,6 +184,66 @@ impl App {
                 // pattern as `resolve_geometry`/`execute`.
                 self.rt.block_on(self.session.fetch_catalog())
             };
+        }
+    }
+
+    /// Phase 5 M6 Decision 97 — populate the panel's running
+    /// transcript from the opening snapshot's `AgentTranscript`. A
+    /// late joiner walks the replay rows into `AiPanelState`. The
+    /// status detail's `peers=N` piggyback (Decision 99) propagates
+    /// through as if we'd received a fresh `Status` event.
+    fn apply_agent_transcript(&mut self, t: &pb::AgentTranscript) {
+        // Only populate when we haven't already built the transcript
+        // from a local turn (otherwise re-opening the subscription
+        // would duplicate). The default state has empty rows.
+        if !self.shell.ai.rows.is_empty() {
+            return;
+        }
+        for m in &t.messages {
+            if m.role == "user" {
+                self.shell.ai.ingest_event(&pb::AgentEvent {
+                    turn_id: m.turn_id.clone(),
+                    ev: Some(pb::agent_event::Ev::UserTurn(pb::AgentUserTurn {
+                        text: m.text.clone(),
+                        had_frame: false,
+                    })),
+                });
+            } else if m.role == "assistant" && !m.text.is_empty() {
+                self.shell.ai.ingest_event(&pb::AgentEvent {
+                    turn_id: m.turn_id.clone(),
+                    ev: Some(pb::agent_event::Ev::Token(pb::AgentToken {
+                        text: m.text.clone(),
+                    })),
+                });
+            }
+            // Re-attach the tool lines as completed tool rows so the
+            // dense one-liners render even on the replay path.
+            for (i, line) in m.tool_lines.iter().enumerate() {
+                let call_id = format!("{}-replay-{i}", m.turn_id);
+                self.shell.ai.ingest_event(&pb::AgentEvent {
+                    turn_id: m.turn_id.clone(),
+                    ev: Some(pb::agent_event::Ev::ToolBegin(pb::AgentToolBegin {
+                        call_id: call_id.clone(),
+                        summary: line.clone(),
+                        detail: String::new(),
+                    })),
+                });
+                self.shell.ai.ingest_event(&pb::AgentEvent {
+                    turn_id: m.turn_id.clone(),
+                    ev: Some(pb::agent_event::Ev::ToolEnd(pb::AgentToolEnd {
+                        call_id,
+                        ok: true,
+                        result_summary: String::new(),
+                        delta_seq: 0,
+                    })),
+                });
+            }
+        }
+        if let Some(st) = &t.status {
+            self.shell.ai.ingest_event(&pb::AgentEvent {
+                turn_id: String::new(),
+                ev: Some(pb::agent_event::Ev::Status(st.clone())),
+            });
         }
     }
 
@@ -514,6 +585,83 @@ impl App {
                 self.spawn_script(src.clone());
                 None
             }
+            UiAction::AgentChat { text, attach_frame } => {
+                // Phase 5 M6 (`phase-5-m6.md` Decisions 94–96):
+                // CaptureFrame the pending viewport (Decision 96 — a
+                // small placeholder server-side; production is the
+                // separate offscreen-renderer milestone) and pin its
+                // bytes onto the outgoing AgentChat request. The
+                // active turn id from AgentChatReply parks on the
+                // panel so the next Stop click knows what to cancel.
+                let (frame, fmt) = if *attach_frame {
+                    self.rt
+                        .block_on(self.session.capture_frame(640, 360, "png".to_string()))
+                        .unwrap_or_default()
+                } else {
+                    (Vec::new(), String::new())
+                };
+                let res = self
+                    .rt
+                    .block_on(self.session.agent_chat(text.clone(), frame, fmt));
+                match res {
+                    Ok(turn_id) => {
+                        self.shell.ai.active_turn_id = Some(turn_id.clone());
+                        // Capture the pre-turn snapshot client-side
+                        // (Decision 97). The matching `UserTurn`
+                        // delta has already been broadcast by the
+                        // server and will fold into the transcript
+                        // via `ingest_deltas`; the turn-boundary row
+                        // is inserted by `record_snapshot` once we
+                        // observe the user row land.
+                        self.shell.ai.stash_snapshot(crate::ai_panel::TurnSnapshot {
+                            turn_id,
+                            state: self.shell.state,
+                            result_name: self
+                                .shell
+                                .result
+                                .as_ref()
+                                .map_or_else(String::new, |r| r.name.clone()),
+                            result_component: self
+                                .shell
+                                .result
+                                .as_ref()
+                                .map_or_else(String::new, |r| r.component.clone()),
+                            camera: self.shell.camera.map(|cam| pb::CameraState {
+                                azimuth: f64::from(cam.azimuth),
+                                elevation: f64::from(cam.elevation),
+                                distance: f64::from(cam.distance),
+                                fx: f64::from(cam.focus.x),
+                                fy: f64::from(cam.focus.y),
+                                fz: f64::from(cam.focus.z),
+                            }),
+                        });
+                    }
+                    Err(_e) => {
+                        // Surfaced on the next status broadcast; the
+                        // panel renders the `Error` pill if the server
+                        // emits one. No transcript noise here.
+                    }
+                }
+                None
+            }
+            UiAction::AgentInterrupt { turn_id } => {
+                // Phase 5 M6 Decision 98 — barge-in. Empty turn_id is
+                // "current turn" per the frozen-proto convention.
+                let _ = self.rt.block_on(self.session.interrupt(turn_id.clone()));
+                None
+            }
+            UiAction::AgentRevert { turn_id } => {
+                // Phase 5 M6 Decision 97 — `↶ revert to here`. Lower
+                // the client-side per-turn snapshot to typed commands
+                // and execute them in order; no `raw`.
+                if let Some(snap) = self.shell.ai.snapshot_for(turn_id) {
+                    let cmds = snap.lower();
+                    for cmd in cmds {
+                        let _ = self.rt.block_on(self.session.execute(cmd));
+                    }
+                }
+                None
+            }
             // Client-only: already applied to ShellState by the UI.
             UiAction::SetStride(_)
             | UiAction::ToggleOverlay(_)
@@ -525,7 +673,9 @@ impl App {
             | UiAction::SetFocusMode(_)
             | UiAction::SetCutGizmoVisible(_)
             | UiAction::SetInteractiveClip(_)
-            | UiAction::SetSliceGizmoVisible(_) => None,
+            | UiAction::SetSliceGizmoVisible(_)
+            | UiAction::SetAiExpanded(_)
+            | UiAction::ToggleAttachFrame => None,
         };
         if let Some(cmd) = cmd {
             let _ = self.rt.block_on(self.session.execute(cmd));
@@ -925,7 +1075,17 @@ pub fn run(
     use crate::cli::TransportChoice;
     let rt = tokio::runtime::Runtime::new()?;
     let session = match transport {
-        None => rt.block_on(Session::connect_in_process(root.as_deref()))?,
+        None => {
+            // Phase 5 M6 — the windowed in-process arm plugs in a
+            // MockAgent so the AI Assistant panel lights up against a
+            // vanilla `cargo run` (Decision 94). Real LLM backends
+            // are a separate follow-up; the mock is the documented
+            // default.
+            let svc = mili_viz_server::VizService::builder()
+                .agent_backend(mili_viz_server::MockAgent)
+                .build();
+            rt.block_on(Session::connect_in_process_with(svc, root.as_deref()))?
+        }
         Some(TransportChoice::Remote(endpoint)) => {
             rt.block_on(Session::connect_tcp(&endpoint, root.as_deref()))?
         }
@@ -941,6 +1101,9 @@ pub fn run(
     // leaves `shell` byte-identical to `ShellState::default()`, so a
     // fresh machine is exactly the byte-stable default (VB-001).
     crate::tweaks::load().apply_to(&mut shell);
+    // Phase 5 M6 — surface the negotiated `CAP_AGENT` so the AI
+    // Assistant panel only renders against agent-capable servers.
+    shell.ai.cap_agent = session.has_cap_agent();
     if root.is_some() {
         shell.phase = SessionPhase::AttachedIdle;
     }
