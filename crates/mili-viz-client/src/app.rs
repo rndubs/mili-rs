@@ -469,6 +469,36 @@ impl App {
                 self.cut_throttle.reset();
                 Some(pb::command::Cmd::Cutplane(pb::CutPlane::default()))
             }
+            UiAction::SetSlicePlane(plane) => {
+                // Phase 5 M9 § "What lands" — canonical drag-end /
+                // out-of-drag commit. Unconditional; resets the shared
+                // throttle so the next drag-burst's first preview
+                // fires immediately.
+                self.cut_throttle.reset();
+                Some(crate::shell::slice_cmd(*plane))
+            }
+            UiAction::PreviewSlicePlane(plane) => {
+                // Phase 5 M9 — in-drag preview. Same throttle + the
+                // same interactive-clip gate the cut sibling uses
+                // (`phase-5-m8.md` Decisions 85/86); only difference is
+                // the `slice_cmd` lowering.
+                if self.shell.interactive_clip && self.cut_throttle.try_preview(Instant::now()) {
+                    Some(crate::shell::slice_cmd(*plane))
+                } else {
+                    None
+                }
+            }
+            UiAction::ClearSlice => {
+                // `phase-4-m9.md`: a zero-normal plane with
+                // `slice_only=true` clears the server-side slice
+                // state (the same `Plane::from_proto` None-on-zero
+                // lever the cut path uses).
+                self.cut_throttle.reset();
+                Some(pb::command::Cmd::Cutplane(pb::CutPlane {
+                    slice_only: Some(true),
+                    ..pb::CutPlane::default()
+                }))
+            }
             UiAction::RunScript(src) => {
                 // Pure-client (`client.md` decision 3): spawn the
                 // managed `pygriz` subprocess; output streams back
@@ -487,7 +517,8 @@ impl App {
             | UiAction::SetDockCollapsed(_)
             | UiAction::SetFocusMode(_)
             | UiAction::SetCutGizmoVisible(_)
-            | UiAction::SetInteractiveClip(_) => None,
+            | UiAction::SetInteractiveClip(_)
+            | UiAction::SetSliceGizmoVisible(_) => None,
         };
         if let Some(cmd) = cmd {
             let _ = self.rt.block_on(self.session.execute(cmd));

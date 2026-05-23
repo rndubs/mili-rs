@@ -174,7 +174,11 @@ pub struct CutPlaneState {
 
 /// Lower a [`CutPlaneState`] to the frozen `Cmd::Cutplane`
 /// (`phase-5-m8.md` § "What lands"). Absolute plane (`relative` stays
-/// `false`); `slice_only` is M9 territory and stays unset.
+/// `false`); `slice_only` stays `None` — the proto3 default the
+/// server's M8 cut arm reads (the M9 sibling [`slice_cmd`] sets
+/// `Some(true)` instead). Keeping `None` (not `Some(false)`) preserves
+/// byte-stability against M8-only clients (`m8_cut_gizmo.rs`
+/// `lowering_copies_origin_normal_and_keeps_proto3_defaults` pins it).
 #[must_use]
 pub fn cutplane_cmd(plane: CutPlaneState) -> mili_viz_proto::v1::command::Cmd {
     mili_viz_proto::v1::command::Cmd::Cutplane(mili_viz_proto::v1::CutPlane {
@@ -186,6 +190,27 @@ pub fn cutplane_cmd(plane: CutPlaneState) -> mili_viz_proto::v1::command::Cmd {
         nz: f64::from(plane.normal[2]),
         relative: false,
         slice_only: None,
+    })
+}
+
+/// Lower a [`CutPlaneState`] as a **slice** verb (`phase-5-m9.md` § "What
+/// lands"). Same byte shape as [`cutplane_cmd`] but with `slice_only =
+/// Some(true)` — the server's M9 arm
+/// (`crates/mili-viz-server/src/clip.rs` `ClipMode::Slice`) reads this
+/// flag and emits cap-only triangles tagged
+/// [`mili_viz_server::CAP_MATERIAL`]-sibling `u32::MAX - 2`. Composes
+/// server-side with any active cut (`phase-4-m9.md` Decision 80).
+#[must_use]
+pub fn slice_cmd(plane: CutPlaneState) -> mili_viz_proto::v1::command::Cmd {
+    mili_viz_proto::v1::command::Cmd::Cutplane(mili_viz_proto::v1::CutPlane {
+        ox: f64::from(plane.origin[0]),
+        oy: f64::from(plane.origin[1]),
+        oz: f64::from(plane.origin[2]),
+        nx: f64::from(plane.normal[0]),
+        ny: f64::from(plane.normal[1]),
+        nz: f64::from(plane.normal[2]),
+        relative: false,
+        slice_only: Some(true),
     })
 }
 
@@ -425,6 +450,26 @@ pub enum UiAction {
     /// cross-session-persisted via `tweaks.json`. Already applied to
     /// [`ShellState`]; observability/persistence-only.
     SetInteractiveClip(bool),
+    /// Phase 5 M9 Decision 87 — commit a slice plane unconditionally.
+    /// Lowered by the windowed app to [`slice_cmd`] (the
+    /// `slice_only: Some(true)` variant of `Cmd::Cutplane`); covers the
+    /// canonical drag-end commit and any out-of-drag menu emit. State
+    /// already mutated via [`ShellState::set_slice_plane`].
+    SetSlicePlane(CutPlaneState),
+    /// Phase 5 M9 — in-drag slice preview. Gated by the windowed app
+    /// through the same [`CutThrottle`] as the cut sibling (one wall-
+    /// clock 30 Hz budget for both verbs — a user only drags one
+    /// gizmo at a time) and dropped entirely when interactive clip is
+    /// off (Decision 86). State already mutated.
+    PreviewSlicePlane(CutPlaneState),
+    /// Phase 5 M9 — clear the active slice. Lowers to a zero-normal
+    /// `Cmd::Cutplane { slice_only: Some(true), .. }` which the server
+    /// (`phase-4-m9.md`) treats as a slice clear (the same
+    /// `Plane::from_proto` `None`-on-zero-normal lever the cut uses).
+    ClearSlice,
+    /// Phase 5 M9 — toggle the slice gizmo overlay (Rendering → Slice
+    /// row). Pure-client; no proto.
+    SetSliceGizmoVisible(bool),
 }
 
 /// Static fallback derived-result names, shown only until a real
@@ -630,6 +675,15 @@ pub struct ShellState {
     /// low-bandwidth links (the drag-end commit still fires). Cross-
     /// session-persisted via `tweaks.json` (Decision 86).
     pub interactive_clip: bool,
+    /// Active slice plane (`phase-5-m9.md` Decisions 87–89). `None`
+    /// means "no slice" — independent of [`ShellState::cut_plane`] so
+    /// the two verbs **compose** (`phase-4-m9.md` Decision 80). Default
+    /// `None` keeps the M2/M3/M4/MVP-polish + M8 composite path
+    /// byte-stable (`bug-tracker.md` VB-001).
+    pub slice_plane: Option<CutPlaneState>,
+    /// Whether the Rendering → Slice gizmo overlay is drawn over the
+    /// viewport. Default `false`. Pure-client; no proto.
+    pub slice_gizmo_visible: bool,
 }
 
 impl Default for ShellState {
@@ -672,6 +726,8 @@ impl Default for ShellState {
             cut_plane: None,
             cut_gizmo_visible: false,
             interactive_clip: true,
+            slice_plane: None,
+            slice_gizmo_visible: false,
         }
     }
 }
@@ -823,6 +879,40 @@ impl ShellState {
     pub fn set_interactive_clip(&mut self, on: bool) -> UiAction {
         self.interactive_clip = on;
         UiAction::SetInteractiveClip(on)
+    }
+
+    /// Commit a slice plane (`phase-5-m9.md` Decision 87; the canonical
+    /// drag-end commit or any out-of-drag menu emit). Mutates the
+    /// state; the returned action is lowered to [`slice_cmd`] by the
+    /// windowed app, unconditionally (no throttle).
+    pub fn set_slice_plane(&mut self, plane: CutPlaneState) -> UiAction {
+        self.slice_plane = Some(plane);
+        UiAction::SetSlicePlane(plane)
+    }
+
+    /// Emit a drag-time slice preview update (`phase-5-m9.md`). The
+    /// windowed app gates these through the same [`CutThrottle`] the
+    /// cut sibling uses and drops them entirely when
+    /// [`ShellState::interactive_clip`] is `false`. State mutated for
+    /// visual immediacy regardless of whether the emit lands on the
+    /// wire.
+    pub fn preview_slice_plane(&mut self, plane: CutPlaneState) -> UiAction {
+        self.slice_plane = Some(plane);
+        UiAction::PreviewSlicePlane(plane)
+    }
+
+    /// Clear the active slice. Lowers to a zero-normal
+    /// `Cmd::Cutplane { slice_only: Some(true), .. }` which the server
+    /// treats as a slice clear (`phase-4-m9.md`).
+    pub fn clear_slice(&mut self) -> UiAction {
+        self.slice_plane = None;
+        UiAction::ClearSlice
+    }
+
+    /// Show/hide the slice gizmo overlay (Rendering → Slice row).
+    pub fn set_slice_gizmo_visible(&mut self, on: bool) -> UiAction {
+        self.slice_gizmo_visible = on;
+        UiAction::SetSliceGizmoVisible(on)
     }
 
     /// Toggle a bottom tab: open it, or collapse the body if it is
@@ -1034,6 +1124,28 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                         .clicked()
                     {
                         actions.push(state.clear_cut());
+                    }
+                    ui.separator();
+                    // Slice sub-section (Phase 5 M9 § "What lands"):
+                    // gizmo-visible toggle + clear-slice row, parallel
+                    // to the Cut block above. The slice and cut planes
+                    // compose server-side (`phase-4-m9.md` Decision 80)
+                    // so this menu does not force a "pick one" between
+                    // them — both can be active at once.
+                    let mark = if state.slice_gizmo_visible {
+                        "● "
+                    } else {
+                        "○ "
+                    };
+                    if ui.button(format!("{mark}show slice gizmo")).clicked() {
+                        actions.push(state.set_slice_gizmo_visible(!state.slice_gizmo_visible));
+                    }
+                    let slice_active = state.slice_plane.is_some();
+                    if ui
+                        .add_enabled(slice_active, egui::Button::new("clear slice"))
+                        .clicked()
+                    {
+                        actions.push(state.clear_slice());
                     }
                 });
                 ui.menu_button("Picking", |ui| {
@@ -1634,6 +1746,18 @@ fn status_bar(ui: &mut egui::Ui, state: &ShellState) {
                 c.origin[0], c.origin[1], c.origin[2], c.normal[0], c.normal[1], c.normal[2],
             ));
         }
+        // Status-bar slice readout (`phase-5-m9.md` § "What lands"):
+        // distinct from the cut line so when both compose (Decision 80)
+        // the user sees two readouts. Hidden by default so the
+        // byte-stable M3/MVP-polish status-bar composite (VB-001) is
+        // unperturbed.
+        if let Some(s) = state.slice_plane {
+            ui.separator();
+            ui.monospace(format!(
+                "slice: o=({:.2},{:.2},{:.2}) n=({:.2},{:.2},{:.2})",
+                s.origin[0], s.origin[1], s.origin[2], s.normal[0], s.normal[1], s.normal[2],
+            ));
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace(format!("fps {:.0}", state.fps));
             // Honest local peer count, attached state only. The
@@ -1745,7 +1869,15 @@ fn overlays(ui: &mut egui::Ui, rect: egui::Rect, state: &ShellState) {
     // the headless composite path (camera `None`) is byte-stable.
     if state.cut_gizmo_visible {
         if let Some((plane, cam)) = state.cut_plane.zip(state.camera.as_ref()) {
-            draw_cut_gizmo(&painter, rect, plane, cam);
+            draw_plane_gizmo(&painter, rect, plane, cam, CUT_GIZMO_COLOR);
+        }
+    }
+    // Slice-plane gizmo overlay (`phase-5-m9.md` Decision 87): shares
+    // the M8 `draw_plane_gizmo` machinery, contrasting colour so the
+    // two are distinguishable when both verbs compose (Decision 80).
+    if state.slice_gizmo_visible {
+        if let Some((plane, cam)) = state.slice_plane.zip(state.camera.as_ref()) {
+            draw_plane_gizmo(&painter, rect, plane, cam, SLICE_GIZMO_COLOR);
         }
     }
 
@@ -1869,15 +2001,26 @@ fn legend(
     }
 }
 
-/// Paint the cut-plane gizmo handles (`phase-5-m8.md` Decision 84):
-/// a small ring at the plane origin + a normal-direction arrow,
-/// projected through the live camera. Pure egui shapes — no new wgpu
-/// pipeline (VB-001 / the M3 additive seam is untouched).
-fn draw_cut_gizmo(
+/// Cut-gizmo accent colour (`phase-5-m8.md` Decision 84) — the
+/// existing M8 orange.
+pub const CUT_GIZMO_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 160, 70);
+
+/// Slice-gizmo accent colour (`phase-5-m9.md` Decision 87) — a
+/// contrasting cyan so cut + slice handles are distinguishable when
+/// both verbs compose (`phase-4-m9.md` Decision 80).
+pub const SLICE_GIZMO_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 200, 240);
+
+/// Paint a plane gizmo's handles (`phase-5-m8.md` Decision 84;
+/// `phase-5-m9.md` Decision 87 reuses verbatim with a different
+/// accent): a small ring at the plane origin + a normal-direction
+/// arrow, projected through the live camera. Pure egui shapes — no
+/// new wgpu pipeline (VB-001 / the M3 additive seam is untouched).
+fn draw_plane_gizmo(
     painter: &egui::Painter,
     rect: egui::Rect,
     plane: CutPlaneState,
     camera: &Camera,
+    accent: egui::Color32,
 ) {
     let w = rect.width().max(1.0) as u32;
     let h = rect.height().max(1.0) as u32;
@@ -1904,7 +2047,6 @@ fn draw_cut_gizmo(
         rect.min.x + t_f.x * rect.width(),
         rect.min.y + t_f.y * rect.height(),
     );
-    let accent = egui::Color32::from_rgb(255, 160, 70);
     let stroke = egui::Stroke::new(1.5, accent);
     // Origin handle: filled disc + stroked ring.
     painter.circle_filled(o, 3.0, accent);

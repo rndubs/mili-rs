@@ -13,9 +13,8 @@
 >   [`phase-4-m7.md`](phase-4-m7.md) / [`phase-4-m8.md`](phase-4-m8.md)
 >   / [`phase-4-m9.md`](phase-4-m9.md)).
 > - **Phase 5 (`mili-viz` client): 🟢 M1–M4 + MVP polish landed,
->   M7 + M8 ✅ landed; M5/M6 not started; 🟡 M9 PLANNED** — last
->   slice of the volumetric batch (slice gizmo;
->   [`phase-5-m9.md`](phase-5-m9.md)).
+>   M7 + M8 + M9 ✅ landed → the volumetric batch is now complete on
+>   the client side; M5/M6 remain not started.**
 > - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 landed;
 >   M4/M5/M6 not started.**
 >
@@ -898,11 +897,30 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
       change; zero `crates/mili-viz-server` change. Gating test
       `crates/mili-viz-client/tests/m8_cut_gizmo.rs::{defaults_are_the_byte_stable_m7_polish_values, set_cut_plane_mutates_and_returns_commit_action, preview_cut_plane_mutates_and_returns_preview_action, clear_cut_drops_the_plane_and_emits_clear, gizmo_visibility_and_interactive_clip_are_pure_toggles, seed_from_aabb_centres_origin_and_uses_view_normal, throttle_first_call_passes_and_subsequent_within_window_blocks, throttle_blocks_60hz_into_30hz, throttle_reset_re_arms_for_drag_end_commit, lowering_copies_origin_normal_and_keeps_proto3_defaults, clear_lowering_is_a_zero_normal_default_cutplane, interactive_clip_persists_through_tweaks_round_trip, absent_tweaks_file_keeps_interactive_clip_default_on, is_persisted_action_classifies_interactive_clip_toggle, shell_paints_input_free_with_gizmo_on_and_cut_active, composite_render_with_gizmo}`
       (15 always-on + 1 skip-on-absent).
-    - **Phase 5 M9 — slice gizmo + Rendering→Slice UI**
-      ([`phase-5-m9.md`](phase-5-m9.md), Decisions 87–89). Thin
-      sibling of M8: shared gizmo machinery, slice-cap
-      colormap-painted when a result is mapped. Gating test
-      `crates/mili-viz-client/tests/m9_slice_gizmo.rs`.
+    - ✅ **Phase 5 M9 — slice gizmo + Rendering→Slice UI**
+      ([`phase-5-m9.md`](phase-5-m9.md), Decisions 87–89).
+      **Landed.** Thin sibling of M8: independent
+      `ShellState.slice_plane` slot composing with `cut_plane`
+      server-side per Decision 80, shared `draw_plane_gizmo`
+      machinery with a contrasting slice-gizmo colour
+      ([`SLICE_GIZMO_COLOR`](../../crates/mili-viz-client/src/shell.rs)
+      cyan vs M8 orange), shared `CutThrottle` across both verbs
+      (one drag at a time), new `slice_cmd` lowering that flips
+      `slice_only = Some(true)` while `cutplane_cmd` keeps
+      `slice_only = None` (M8 byte-stability), Rendering → Slice
+      menu rows (show-gizmo toggle + clear-slice → zero-normal
+      `Cmd::Cutplane { slice_only: Some(true) }`), distinct
+      `slice: o=(…) n=(…)` status-bar readout that coexists with
+      the M8 cut readout. Slice-cap colormap-painted falls out of
+      the existing M3/M7 per-vertex-scalar path (the server already
+      interpolates scalars onto cap vertices, so no client-side
+      material-id branch is needed). Slice is always opaque by
+      default (Decision 89 — translucency is the M7 `RenderMode`
+      lever). Zero proto change (M9 server already shipped the
+      additive `optional bool slice_only = 8`); zero
+      `crates/mili-viz-server` change. Gating test
+      `crates/mili-viz-client/tests/m9_slice_gizmo.rs::{defaults_are_the_byte_stable_m8_polish_values, set_slice_plane_mutates_and_returns_commit_action, preview_slice_plane_mutates_and_returns_preview_action, clear_slice_drops_the_plane_and_emits_clear, slice_gizmo_visibility_is_a_pure_toggle, slice_and_cut_compose_in_shell_state, slice_lowering_sets_slice_only_some_true, cut_and_slice_lowerings_differ_only_in_slice_only_flag, clear_slice_lowering_pin, shared_throttle_blocks_a_cut_then_slice_burst, slice_actions_are_not_persisted, slice_and_cut_gizmo_colours_are_distinct, rendering_menu_emits_slice_actions_through_the_shell, shell_paints_input_free_with_both_gizmos_on_and_planes_active, composite_render_with_slice_gizmo}`
+      (14 always-on + 1 skip-on-absent).
 
     Ordering rationale: each Phase 5 Mn consumes Phase 4 Mn's
     server contract, so the natural land order is M7 → M7,
