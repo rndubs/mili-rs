@@ -78,6 +78,15 @@ struct Uniforms {
 /// MSAA — tweak here if you want chunkier or thinner edges.
 const LINE_WIDTH_PX: f32 = 1.5;
 
+/// Dihedral-angle threshold for [`RenderMode::FeatureEdges`]
+/// (`planning/mili-viz/feature-edges.md` Decision 101). Triangle pairs
+/// folding by more than this — plus boundary and non-manifold edges —
+/// are kept; the rest of the mesh subdivision is hidden. 30° is the de
+/// facto default across ParaView / Blender Auto-Smooth / OpenSCAD; a
+/// future Preferences slider can wire the value through without
+/// re-opening the milestone.
+const FEATURE_EDGE_ANGLE_DEG: f32 = 30.0;
+
 /// The 6 corners of the per-instance line quad (two triangles). `.x` ∈
 /// `{0,1}` picks the start/end endpoint; `.y` ∈ `{-1,+1}` picks which
 /// side of the line the corner extrudes toward. Built once per
@@ -102,6 +111,13 @@ struct MeshBuffers {
     /// buffers (a degenerate, no-triangle mesh) are never drawn.
     edge_endpoint_buffer: wgpu::Buffer,
     edge_count: u32,
+    /// Same packing as `edge_endpoint_buffer`, but holding only the
+    /// dihedral-feature edges (silhouette + creases) used by
+    /// [`RenderMode::FeatureEdges`]. Computed at upload via
+    /// [`Mesh::compute_feature_edges`]; reuses the same edge pipeline
+    /// — only the per-instance buffer differs.
+    feature_edge_endpoint_buffer: wgpu::Buffer,
+    feature_edge_count: u32,
 }
 
 /// A device + pipeline that can draw an uploaded indexed [`Mesh`] into
@@ -529,12 +545,40 @@ impl Renderer {
                     contents: bytemuck::cast_slice(endpoints_payload),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
+
+        // Feature / "geometry-only" edges (RenderMode::FeatureEdges) —
+        // computed once per upload; reuses the edge pipeline verbatim.
+        let feature_edges = mesh.compute_feature_edges(FEATURE_EDGE_ANGLE_DEG.to_radians());
+        let feature_endpoints: Vec<[f32; 6]> = feature_edges
+            .chunks_exact(2)
+            .map(|p| {
+                let a = mesh.positions[p[0] as usize];
+                let b = mesh.positions[p[1] as usize];
+                [a[0], a[1], a[2], b[0], b[1], b[2]]
+            })
+            .collect();
+        let feature_edge_count = feature_endpoints.len() as u32;
+        let feature_payload: &[[f32; 6]] = if feature_endpoints.is_empty() {
+            &[[0.0; 6]]
+        } else {
+            &feature_endpoints
+        };
+        let feature_edge_endpoint_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mesh feature edge endpoints"),
+                    contents: bytemuck::cast_slice(feature_payload),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
         self.mesh = Some(MeshBuffers {
             vertex_buffer,
             index_buffer,
             index_count: mesh.indices.len() as u32,
             edge_endpoint_buffer,
             edge_count,
+            feature_edge_endpoint_buffer,
+            feature_edge_count,
         });
     }
 
@@ -688,10 +732,22 @@ impl Renderer {
                 let translucent_fill =
                     matches!(self.mode, RenderMode::Translucent | RenderMode::Xray);
                 let draw_fill = self.mode != RenderMode::Wireframe;
+                // FeatureEdges binds the dihedral-feature buffer; every
+                // other edge-drawing mode binds the full element-edge
+                // buffer.
+                let feature_buf = matches!(self.mode, RenderMode::FeatureEdges);
+                let (edge_buffer, edge_count) = if feature_buf {
+                    (&m.feature_edge_endpoint_buffer, m.feature_edge_count)
+                } else {
+                    (&m.edge_endpoint_buffer, m.edge_count)
+                };
                 let draw_edges = matches!(
                     self.mode,
-                    RenderMode::Edges | RenderMode::Wireframe | RenderMode::Xray
-                ) && m.edge_count > 0;
+                    RenderMode::Edges
+                        | RenderMode::Wireframe
+                        | RenderMode::Xray
+                        | RenderMode::FeatureEdges
+                ) && edge_count > 0;
                 if draw_fill {
                     if translucent_fill {
                         pass.set_blend_constant(wgpu::Color {
@@ -713,12 +769,14 @@ impl Renderer {
                     // Screen-space line quads: 6 corners × `edge_count`
                     // instances. Slot 0 is the shared corner quad, slot
                     // 1 is the per-instance endpoint pair built by
-                    // `upload_mesh`.
+                    // `upload_mesh` — element edges for the standard
+                    // wireframe modes, dihedral-feature edges for
+                    // `FeatureEdges`.
                     pass.set_pipeline(&self.edge_pipeline);
                     pass.set_bind_group(0, &self.bind_group, &[]);
                     pass.set_vertex_buffer(0, self.edge_corner_buffer.slice(..));
-                    pass.set_vertex_buffer(1, m.edge_endpoint_buffer.slice(..));
-                    pass.draw(0..6, 0..m.edge_count);
+                    pass.set_vertex_buffer(1, edge_buffer.slice(..));
+                    pass.draw(0..6, 0..edge_count);
                 }
             }
         }
