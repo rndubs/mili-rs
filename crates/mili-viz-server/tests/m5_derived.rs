@@ -36,16 +36,31 @@ fn decode(blob: &[u8], layout: &str) -> Geom {
     let magic = &blob[0..4];
     let n_verts = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
-    let mut off = 24 + n_verts * 3 * 4 + n_idx * 4 + (n_idx / 3) * 4;
-    let scalar = if magic == b"MVG2" {
+    let (header, n_edges, flags_mask) = match magic {
+        b"MVG1" | b"MVG2" => (24, 0, u32::from(magic == b"MVG2")),
+        b"MVG3" => (
+            36,
+            u64::from_le_bytes(blob[24..32].try_into().unwrap()) as usize,
+            u32::from_le_bytes(blob[32..36].try_into().unwrap()),
+        ),
+        _ => panic!("bad magic {magic:?}"),
+    };
+    let n_tri = n_idx / 3;
+    let mut off = header + n_verts * 3 * 4 + n_idx * 4 + n_tri * 4;
+    if magic == b"MVG3" && flags_mask & 2 != 0 {
+        off += n_tri * 4;
+    }
+    if magic == b"MVG3" && flags_mask & 4 != 0 {
+        off += n_edges * 4;
+    }
+    let scalar = if flags_mask & 1 != 0 {
         let s: Vec<f32> = (0..n_verts)
             .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
             .collect();
         off += n_verts * 4;
-        assert_eq!(off, blob.len(), "MVG2 blob fully consumed");
+        assert_eq!(off, blob.len(), "blob fully consumed");
         s
     } else {
-        assert_eq!(magic, b"MVG1");
         Vec::new()
     };
     Geom {
@@ -124,8 +139,8 @@ async fn derived_stress_invariants() {
     // ── unknown derived name → graceful M3 bare-hull fallback ─────────
     let unknown = show(&mut client, &mut sub, &svc, "not_a_derived").await.0;
     assert!(
-        unknown.layout.starts_with("MVG1") && unknown.scalar.is_empty(),
-        "unsupported derived → bare hull, no error"
+        unknown.layout.starts_with("MVG3:") && unknown.scalar.is_empty(),
+        "unsupported derived → bare MVG3 hull (no scalar bit)"
     );
 
     // Step to a stressed state — state 1 is the undeformed initial
@@ -142,10 +157,7 @@ async fn derived_stress_invariants() {
     let (sy, _) = show(&mut client, &mut sub, &svc, "sy").await;
     let (sz, _) = show(&mut client, &mut sub, &svc, "sz").await;
     let (pressure, pres_res) = show(&mut client, &mut sub, &svc, "pressure").await;
-    assert_eq!(
-        pressure.layout,
-        "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32"
-    );
+    assert!(pressure.layout.starts_with("MVG3:"));
     assert_eq!(pressure.scalar.len(), pressure.verts);
 
     let mut compared = 0usize;
@@ -176,7 +188,7 @@ async fn derived_stress_invariants() {
     // ── nonlinear invariants: structural (kernel already parity-exact)
     for name in ["eff_stress", "triaxiality", "norm_press"] {
         let (g, res) = show(&mut client, &mut sub, &svc, name).await;
-        assert!(g.layout.starts_with("MVG2"), "{name} → MVG2");
+        assert!(g.layout.starts_with("MVG3:"), "{name} → MVG3");
         assert_eq!(g.scalar.len(), g.verts, "{name} scalar is per-vertex");
         let finite: Vec<f32> = g.scalar.iter().copied().filter(|v| v.is_finite()).collect();
         assert!(!finite.is_empty(), "{name}: finite samples on elements");
@@ -204,5 +216,5 @@ async fn derived_stress_invariants() {
 
     // ── primal path still byte-stable: empty result → bare hull ──────
     let bare = show(&mut client, &mut sub, &svc, "").await.0;
-    assert!(bare.layout.starts_with("MVG1") && bare.scalar.is_empty());
+    assert!(bare.layout.starts_with("MVG3:") && bare.scalar.is_empty());
 }

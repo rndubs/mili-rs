@@ -22,8 +22,17 @@ Conventions:
 
 ## VB-005 — `Edges`/`Wireframe` mode draws hex face diagonals as if they were element edges
 
-- **Status:** server-fixed (`MVG3` element-edge buffer landed;
-  client wiring is [`phase-5-m7.md`](phase-5-m7.md) Decision 82)
+- **Status:** **fixed** — the partial fix (M7 added the `MVG3`
+  element-edge buffer + client wiring, but the server's `encode()`
+  only routed there when **Include interior** was on, leaving the
+  default load on the diagonal-emitting path) is now closed by
+  promoting `MVG3` to the server's only production layout
+  (`crates/mili-viz-server/src/geometry.rs::MeshTopology::encode`
+  always calls `encode_mvg3`). The `MVG3` blob is a strict superset
+  of `MVG1`/`MVG2`, so the client's M3/M7 paths read it byte-for-
+  byte the same way for `Shaded`/`Edges`/`Wireframe`/`Translucent`/
+  `Xray`; the difference is that the per-element edge buffer the
+  wireframe pass actually wants now ships on every blob.
 - **Reported:** 2026-05-23 (maintainer feedback, `bar71.pltA` —
   Hex corpus — under the release binary's `Edges` mode looked
   "like tet elements")
@@ -58,11 +67,23 @@ Conventions:
   hex-emits-exactly-12-edges assertion) and the `phase-5-m7.md`
   gating test (`crates/mili-viz-client/tests/m7_render_modes.rs`,
   decoder + prefer-element-edges branch).
-- **Commit:** server side landed on `claude/friendly-edison-WZnrq`
+- **Commit:** server-side blob landed on `claude/friendly-edison-WZnrq`
   (phase-4-m7; in-module unit tests pin the per-superclass edge
   tables — Hex = 12 unique edges, no face diagonals). Client wiring
-  to prefer `Mesh::element_edges` over the extractor is
-  [`phase-5-m7.md`](phase-5-m7.md).
+  to prefer `Mesh::element_edges` over the extractor landed in
+  [`phase-5-m7.md`](phase-5-m7.md). **Closure** (the default-load
+  promotion to MVG3 — `encode()` always routes through `encode_mvg3`
+  regardless of the include-interior toggle) landed on
+  `claude/beautiful-brahmagupta-S3z1d` (post-M9, after maintainer
+  feedback that `bar71.pltA` was still showing diagonals on the
+  default load); the seven layout-pinning gating tests
+  (`m2_geometry`, `m3_primal`, `m4_visibility`, `m5_derived`,
+  `m5b_principal`, `m5c_derived`, `m5d_alt_strain`, `m6_transport`)
+  were updated to assert `MVG3:` and decode the strict-superset
+  layout. `m7_mvg3` swapped its "interior off → MVG1/MVG2 byte-
+  stable" enshrinement for "interior off → boundary-MVG3 byte-
+  stable" (the interior bit on the `flags_mask` is the right
+  invariant, not the magic string).
 
 ---
 

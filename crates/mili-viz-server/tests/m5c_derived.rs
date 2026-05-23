@@ -47,16 +47,31 @@ fn decode(blob: &[u8], layout: &str) -> Geom {
     let magic = &blob[0..4];
     let n_verts = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
-    let mut off = 24 + n_verts * 3 * 4 + n_idx * 4 + (n_idx / 3) * 4;
-    let scalar = if magic == b"MVG2" {
+    let (header, n_edges, flags_mask) = match magic {
+        b"MVG1" | b"MVG2" => (24, 0, u32::from(magic == b"MVG2")),
+        b"MVG3" => (
+            36,
+            u64::from_le_bytes(blob[24..32].try_into().unwrap()) as usize,
+            u32::from_le_bytes(blob[32..36].try_into().unwrap()),
+        ),
+        _ => panic!("bad magic {magic:?}"),
+    };
+    let n_tri = n_idx / 3;
+    let mut off = header + n_verts * 3 * 4 + n_idx * 4 + n_tri * 4;
+    if magic == b"MVG3" && flags_mask & 2 != 0 {
+        off += n_tri * 4;
+    }
+    if magic == b"MVG3" && flags_mask & 4 != 0 {
+        off += n_edges * 4;
+    }
+    let scalar = if flags_mask & 1 != 0 {
         let s: Vec<f32> = (0..n_verts)
             .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
             .collect();
         off += n_verts * 4;
-        assert_eq!(off, blob.len(), "MVG2 blob fully consumed");
+        assert_eq!(off, blob.len(), "blob fully consumed");
         s
     } else {
-        assert_eq!(magic, b"MVG1");
         Vec::new()
     };
     Geom {
@@ -109,7 +124,7 @@ async fn set_state(
 /// `MVG2`, per-vertex length, finite samples present, and the
 /// `ResultState` range brackets the finite scalar data.
 fn structural(g: &Geom, res: &pb::ResultState, name: &str) {
-    assert!(g.layout.starts_with("MVG2"), "{name} → MVG2");
+    assert!(g.layout.starts_with("MVG3:"), "{name} → MVG3");
     assert_eq!(g.scalar.len(), g.verts, "{name} scalar is per-vertex");
     let finite: Vec<f32> = g.scalar.iter().copied().filter(|v| v.is_finite()).collect();
     assert!(!finite.is_empty(), "{name}: finite samples present");
@@ -190,7 +205,7 @@ async fn derived_surfstrain_and_nodal_time() {
     for name in ["not_a_derived", ""] {
         let g = show(&mut client, &mut sub, &svc, name).await.0;
         assert!(
-            g.layout.starts_with("MVG1") && g.scalar.is_empty(),
+            g.layout.starts_with("MVG3:") && g.scalar.is_empty(),
             "{name:?} → bare hull, no error"
         );
     }
@@ -205,7 +220,7 @@ async fn derived_surfstrain_and_nodal_time() {
     let (dz, _) = show(&mut client, &mut sub, &svc, "disp_z").await;
     let (dm, dmr) = show(&mut client, &mut sub, &svc, "disp_mag").await;
     let (drm, _) = show(&mut client, &mut sub, &svc, "disp_rad_mag_xy").await;
-    assert_eq!(dx.layout, "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32");
+    assert!(dx.layout.starts_with("MVG3:"));
     structural(&dx, &dxr, "disp_x");
     structural(&dm, &dmr, "disp_mag");
     let (c, m) = assert_norm(
@@ -250,7 +265,7 @@ async fn derived_surfstrain_and_nodal_time() {
     // ── `vel_x` at state 1 is identically zero (a kernel-defined
     //    same-gather fact, derived.py:1062) ───────────────────────────
     let v1 = show(&mut client, &mut sub, &svc, "vel_x").await.0;
-    assert!(v1.layout.starts_with("MVG2"), "vel_x at state 1 → MVG2");
+    assert!(v1.layout.starts_with("MVG3:"), "vel_x at state 1 → MVG3");
     assert!(
         v1.scalar.iter().all(|v| !v.is_finite() || v.abs() < 1e-6),
         "vel_x at state 1 is identically zero"
@@ -258,5 +273,5 @@ async fn derived_surfstrain_and_nodal_time() {
 
     // ── primal path still byte-stable: empty result → bare hull ─────
     let bare = show(&mut client, &mut sub, &svc, "").await.0;
-    assert!(bare.layout.starts_with("MVG1") && bare.scalar.is_empty());
+    assert!(bare.layout.starts_with("MVG3:") && bare.scalar.is_empty());
 }

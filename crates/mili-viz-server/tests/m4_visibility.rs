@@ -40,19 +40,33 @@ fn decode(blob: Vec<u8>, layout: &str) -> Geom {
     let n_verts = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
     let n_tri = n_idx / 3;
-    let mut off = 24 + n_verts * 3 * 4 + n_idx * 4;
+    let (header, n_edges, flags_mask) = match magic.as_slice() {
+        b"MVG1" | b"MVG2" => (24usize, 0usize, u32::from(magic == b"MVG2")),
+        b"MVG3" => (
+            36,
+            u64::from_le_bytes(blob[24..32].try_into().unwrap()) as usize,
+            u32::from_le_bytes(blob[32..36].try_into().unwrap()),
+        ),
+        _ => panic!("bad magic {magic:?}"),
+    };
+    let mut off = header + n_verts * 3 * 4 + n_idx * 4;
     let tri_material: Vec<u32> = (0..n_tri)
         .map(|i| u32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
         .collect();
     off += n_tri * 4;
-    let scalar = if magic == b"MVG2" {
+    if magic == b"MVG3" && flags_mask & 2 != 0 {
+        off += n_tri * 4; // tri_flags
+    }
+    if magic == b"MVG3" && flags_mask & 4 != 0 {
+        off += n_edges * 4; // edges
+    }
+    let scalar = if flags_mask & 1 != 0 {
         let s: Vec<f32> = (0..n_verts)
             .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
             .collect();
         off += n_verts * 4;
         s
     } else {
-        assert_eq!(magic, b"MVG1");
         Vec::new()
     };
     assert_eq!(off, blob.len(), "blob fully consumed");
@@ -159,7 +173,11 @@ async fn material_visibility_and_selection() {
 
     // ── all-visible baseline hull ────────────────────────────────────
     let (base, _) = show(&mut client, &mut sub, &svc, "").await;
-    assert_eq!(base.layout, "MVG1:verts_f32x3+idx_u32+trimat_u32");
+    assert!(
+        base.layout.starts_with("MVG3:"),
+        "default emit is MVG3 since the VB-005 promotion: {}",
+        base.layout
+    );
     assert!(base.n_idx > 0 && base.n_idx % 3 == 0);
     // Pick the most-frequent material to maximize the filtered delta.
     let mut freq: HashMap<u32, usize> = HashMap::new();
@@ -195,14 +213,14 @@ async fn material_visibility_and_selection() {
         "re-enable at the same state restores a byte-identical blob"
     );
 
-    // ── filter composes with MVG2 (scalar untouched) ─────────────────
-    let (mvg2_all, res_all) = show(&mut client, &mut sub, &svc, "sand").await;
-    if mvg2_all.layout.starts_with("MVG2") {
+    // ── filter composes with the scalar column (untouched) ───────────
+    let (mvg_all, res_all) = show(&mut client, &mut sub, &svc, "sand").await;
+    if !mvg_all.scalar.is_empty() {
         material(&mut client, &mut sub, false, victim).await;
         let (mvg2_off, res_off) = show(&mut client, &mut sub, &svc, "sand").await;
-        assert_eq!(
-            mvg2_off.layout,
-            "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32"
+        assert!(
+            mvg2_off.layout.starts_with("MVG3:") || mvg2_off.layout.starts_with("MVG2:"),
+            "scalar-carrying blob is MVG3 (default) or MVG2 (legacy)"
         );
         assert_eq!(
             mvg2_off.scalar.len(),
@@ -210,7 +228,7 @@ async fn material_visibility_and_selection() {
             "per-vertex scalar array length is unchanged by the filter"
         );
         assert_eq!(
-            mvg2_off.scalar, mvg2_all.scalar,
+            mvg2_off.scalar, mvg_all.scalar,
             "the scalar field is byte-stable under material filtering"
         );
         assert!(
@@ -218,7 +236,7 @@ async fn material_visibility_and_selection() {
                 && res_off.max.to_bits() == res_all.max.to_bits(),
             "ResultState range is the M3 data range (unchanged by filter)"
         );
-        assert!(mvg2_off.n_idx < mvg2_all.n_idx, "MVG2 triangle list shrank");
+        assert!(mvg2_off.n_idx < mvg_all.n_idx, "triangle list shrank");
         material(&mut client, &mut sub, true, victim).await;
     }
 

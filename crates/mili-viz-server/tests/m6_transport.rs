@@ -163,11 +163,13 @@ async fn remote_transport_grpc_and_flight_over_tcp() {
         101
     );
 
-    // ── show "" → bare MVG1 hull; Flight DoGet == fetch_geometry ─────
+    // ── show "" → bare hull (MVG3 since VB-005); Flight DoGet ==
+    //    in-process fetch_geometry ────────────────────────────────────
     let (bare, _, _) = show_geometry(&mut viz, &mut sub, "").await;
-    assert_eq!(
-        bare.layout, "MVG1:verts_f32x3+idx_u32+trimat_u32",
-        "the frozen M2 layout string is unchanged over the wire"
+    assert!(
+        bare.layout.starts_with("MVG3:"),
+        "default emit is MVG3 over the wire since the VB-005 promotion: {}",
+        bare.layout
     );
     assert!(
         bare.flight_ticket.starts_with(b"geom:"),
@@ -182,15 +184,15 @@ async fn remote_transport_grpc_and_flight_over_tcp() {
         "Flight DoGet streams the byte-identical blob (transport swap, \
          not a format change)"
     );
-    // The blob decodes per phase-4-m2.md Decision 11.
-    assert_eq!(&via_flight[0..4], b"MVG1");
+    // The blob decodes per phase-4-m7.md Decision 72.
+    assert_eq!(&via_flight[0..4], b"MVG3");
     let n_verts = u64::from_le_bytes(via_flight[8..16].try_into().unwrap());
     let n_idx = u64::from_le_bytes(via_flight[16..24].try_into().unwrap());
     assert_eq!(n_verts, bare.num_vertices);
     assert_eq!(n_idx, bare.num_indices);
     assert!(n_idx % 3 == 0 && n_verts > 0);
     {
-        let mut off = 24 + (n_verts as usize) * 3 * 4;
+        let mut off = 36 + (n_verts as usize) * 3 * 4;
         for _ in 0..n_idx {
             let idx = u32::from_le_bytes(via_flight[off..off + 4].try_into().unwrap());
             assert!((u64::from(idx)) < n_verts, "triangle index in range");
@@ -198,26 +200,37 @@ async fn remote_transport_grpc_and_flight_over_tcp() {
         }
     }
 
-    // ── show "sand" → MVG2 scalar over the wire, range brackets it ───
+    // ── show "sand" → MVG3 with scalar over the wire, range brackets ─
     let (mvg2, min, max) = show_geometry(&mut viz, &mut sub, "sand").await;
-    assert_eq!(
-        mvg2.layout, "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32",
-        "the frozen M3 layout string is unchanged over the wire"
+    assert!(
+        mvg2.layout.starts_with("MVG3:"),
+        "scalar-carrying blob is MVG3 over the wire: {}",
+        mvg2.layout
     );
     let blob = flight_get(&mut flight, &mvg2.flight_ticket).await;
     assert_eq!(
         blob,
         svc.fetch_geometry(&mvg2.flight_ticket).unwrap(),
-        "MVG2 blob byte-identical across the Flight wire"
+        "MVG3 blob byte-identical across the Flight wire"
     );
-    assert_eq!(&blob[0..4], b"MVG2");
+    assert_eq!(&blob[0..4], b"MVG3");
     let nv = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let ni = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
-    let soff = 24 + nv * 3 * 4 + ni * 4 + (ni / 3) * 4;
+    let n_edges = u64::from_le_bytes(blob[24..32].try_into().unwrap()) as usize;
+    let flags_mask = u32::from_le_bytes(blob[32..36].try_into().unwrap());
+    let n_tri = ni / 3;
+    let mut soff = 36 + nv * 3 * 4 + ni * 4 + n_tri * 4;
+    if flags_mask & 2 != 0 {
+        soff += n_tri * 4;
+    }
+    if flags_mask & 4 != 0 {
+        soff += n_edges * 4;
+    }
+    assert_ne!(flags_mask & 1, 0, "scalar bit set when a result is mapped");
     let scalar: Vec<f32> = (0..nv)
         .map(|k| f32::from_le_bytes(blob[soff + k * 4..soff + k * 4 + 4].try_into().unwrap()))
         .collect();
-    assert_eq!(soff + nv * 4, blob.len(), "MVG2 blob fully consumed");
+    assert_eq!(soff + nv * 4, blob.len(), "MVG3 blob fully consumed");
     let finite: Vec<f32> = scalar.iter().copied().filter(|v| v.is_finite()).collect();
     assert!(!finite.is_empty(), "sand colors resulted elements");
     let lo = finite.iter().copied().fold(f32::INFINITY, f32::min);
