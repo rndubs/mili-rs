@@ -223,11 +223,6 @@ async fn composite_render() {
         ..ShellState::default()
     };
 
-    let at = |px: &[u8], x: u32, y: u32| {
-        let i = ((y * w + x) * 4) as usize;
-        [px[i], px[i + 1], px[i + 2]]
-    };
-
     // (a) Untouched default — the byte-stable M3 seam.
     let mut def = base.clone();
     let Some(dpx) = render_shell_to_image(w, h, &camera, &mesh, None, &mut def) else {

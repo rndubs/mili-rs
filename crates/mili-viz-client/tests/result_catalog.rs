@@ -163,11 +163,6 @@ async fn composite_render() {
         ..ShellState::default()
     };
 
-    let at = |px: &[u8], x: u32, y: u32| {
-        let i = ((y * w + x) * 4) as usize;
-        [px[i], px[i + 1], px[i + 2]]
-    };
-
     // (a) Default (catalog None) — the byte-stable placeholder seam.
     let mut bare = base.clone();
     let Some(bpx) = render_shell_to_image(w, h, &camera, &mesh, None, &mut bare) else {

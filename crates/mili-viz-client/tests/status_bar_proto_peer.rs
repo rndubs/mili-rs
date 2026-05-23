@@ -157,5 +157,9 @@ async fn composite_render() {
         );
         return;
     };
-    common::assert_mesh_visible(&px, 20, "default not-attached composite still shows the mesh");
+    common::assert_mesh_visible(
+        &px,
+        20,
+        "default not-attached composite still shows the mesh",
+    );
 }

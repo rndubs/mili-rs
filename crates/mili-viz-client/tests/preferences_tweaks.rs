@@ -161,11 +161,6 @@ async fn composite_render() {
         ..ShellState::default()
     };
 
-    let at = |px: &[u8], x: u32, y: u32| {
-        let i = ((y * w + x) * 4) as usize;
-        [px[i], px[i + 1], px[i + 2]]
-    };
-
     // (a) Default (Dark, expanded) — the byte-stable M3 seam: the
     // viewport centre is still the mesh, dock chrome composites over it.
     let mut dark = base.clone();
