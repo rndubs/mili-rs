@@ -23,6 +23,24 @@ pub struct CliArgs {
     pub batch_script: Option<String>,
     /// `-w <w> <h>` — requested initial window size (no-op for now).
     pub window_size: Option<(u32, u32)>,
+    /// `-r`/`--remote <host:port>` or `--attach [<id>]` — the
+    /// transport choice (`phase-5-m5.md` Decision 91). `None` keeps
+    /// the M4 in-process default.
+    pub transport: Option<TransportChoice>,
+}
+
+/// How the windowed shell should reach a `mili-viz-server`
+/// (`phase-5-m5.md` Decision 91).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportChoice {
+    /// `-r <host:port>` (also `--remote`) — direct TCP endpoint.
+    /// Stored as the bare `host:port`; the constructor prepends
+    /// `http://` for tonic's `Endpoint`.
+    Remote(String),
+    /// `--attach [<id>]` — resolve through `~/.griz/sessions/<id>.json`
+    /// (bare `--attach` ⇒ newest-live), the same JSON file the server
+    /// binary's `main` writes (phase-6-m2.md Decision 56).
+    Attach(Option<String>),
 }
 
 /// The result of parsing argv.
@@ -44,7 +62,15 @@ pub enum CliOutcome {
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliOutcome, String> {
     let mut out = CliArgs::default();
     let mut it = args.into_iter();
-    while let Some(arg) = it.next() {
+    let mut pending: Option<String> = None;
+    loop {
+        let arg = if let Some(p) = pending.take() {
+            p
+        } else if let Some(a) = it.next() {
+            a
+        } else {
+            break;
+        };
         match arg.as_str() {
             "-V" | "-version" | "--version" => return Ok(CliOutcome::Version),
             "-i" => {
@@ -58,6 +84,29 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliOutcome,
                     .next()
                     .ok_or_else(|| format!("flag `{arg}` requires a <file> argument"))?;
                 out.batch_script = Some(path);
+            }
+            "-r" | "--remote" => {
+                let ep = it
+                    .next()
+                    .ok_or_else(|| "flag `-r`/`--remote` requires <host:port>".to_string())?;
+                set_transport(&mut out, TransportChoice::Remote(ep))?;
+            }
+            "--attach" => {
+                // The next token is an optional id; treat any
+                // dash-prefixed next token as a fresh flag (bare
+                // `--attach` ⇒ newest-live).
+                let id = it.next();
+                let id = match id {
+                    Some(t) if t.starts_with('-') => {
+                        // Push back: re-handle the flag in the next
+                        // iteration. The simplest cheat is a small
+                        // pending buffer.
+                        pending = Some(t);
+                        None
+                    }
+                    other => other,
+                };
+                set_transport(&mut out, TransportChoice::Attach(id))?;
             }
             "-w" => {
                 let w = it
@@ -77,7 +126,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliOutcome,
             other if other.starts_with('-') => {
                 return Err(format!(
                     "unknown flag `{other}` (portable subset: -i <base>, \
-                     -b/-batch <file>, -w <w> <h>, -V)"
+                     -b/-batch <file>, -w <w> <h>, -V, \
+                     -r/--remote <host:port>, --attach [<id>])"
                 ));
             }
             _ => set_root(&mut out, arg)?,
@@ -93,6 +143,18 @@ fn set_root(out: &mut CliArgs, path: String) -> Result<(), String> {
             .to_string());
     }
     out.load_root = Some(path);
+    Ok(())
+}
+
+fn set_transport(out: &mut CliArgs, t: TransportChoice) -> Result<(), String> {
+    if out.transport.is_some() {
+        return Err(
+            "at most one of -r/--remote <host:port> or --attach [<id>] may be given \
+             (they are mutually exclusive transport choices)"
+                .to_string(),
+        );
+    }
+    out.transport = Some(t);
     Ok(())
 }
 
@@ -140,6 +202,7 @@ mod tests {
                 load_root: Some("x.pltA".into()),
                 batch_script: Some("init.grizinit".into()),
                 window_size: Some((1920, 1080)),
+                transport: None,
             })
         );
     }
@@ -173,5 +236,91 @@ mod tests {
         assert!(parse(&["a.pltA", "-i", "b.pltA"])
             .unwrap_err()
             .contains("more than one load root"));
+    }
+
+    // ── Phase 5 M5 — `-r`/`--remote` and `--attach` ─────────────────
+
+    #[test]
+    fn dash_r_picks_remote_transport() {
+        let CliOutcome::Run(a) = parse(&["-r", "host.example:50051"]).unwrap() else {
+            panic!("Run expected");
+        };
+        assert_eq!(
+            a.transport,
+            Some(TransportChoice::Remote("host.example:50051".into()))
+        );
+    }
+
+    #[test]
+    fn long_remote_picks_remote_transport() {
+        let CliOutcome::Run(a) = parse(&["--remote", "1.2.3.4:7000", "-i", "x.pltA"]).unwrap()
+        else {
+            panic!("Run expected");
+        };
+        assert_eq!(
+            a.transport,
+            Some(TransportChoice::Remote("1.2.3.4:7000".into()))
+        );
+        assert_eq!(a.load_root.as_deref(), Some("x.pltA"));
+    }
+
+    #[test]
+    fn bare_attach_picks_newest_live() {
+        let CliOutcome::Run(a) = parse(&["--attach"]).unwrap() else {
+            panic!("Run expected");
+        };
+        assert_eq!(a.transport, Some(TransportChoice::Attach(None)));
+    }
+
+    #[test]
+    fn attach_with_id_carries_the_id() {
+        let CliOutcome::Run(a) = parse(&["--attach", "abc123"]).unwrap() else {
+            panic!("Run expected");
+        };
+        assert_eq!(
+            a.transport,
+            Some(TransportChoice::Attach(Some("abc123".into())))
+        );
+    }
+
+    #[test]
+    fn attach_then_flag_does_not_swallow_the_flag() {
+        // `--attach -i x.pltA` ⇒ bare `--attach` + `-i x.pltA`.
+        let CliOutcome::Run(a) = parse(&["--attach", "-i", "x.pltA"]).unwrap() else {
+            panic!("Run expected");
+        };
+        assert_eq!(a.transport, Some(TransportChoice::Attach(None)));
+        assert_eq!(a.load_root.as_deref(), Some("x.pltA"));
+    }
+
+    #[test]
+    fn remote_and_attach_are_mutually_exclusive() {
+        let e = parse(&["-r", "h:1", "--attach"]).unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+        let e = parse(&["--attach", "id1", "-r", "h:1"]).unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+    }
+
+    #[test]
+    fn two_remotes_are_mutually_exclusive() {
+        let e = parse(&["-r", "a:1", "--remote", "b:2"]).unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+    }
+
+    #[test]
+    fn remote_missing_value_errors() {
+        let e = parse(&["-r"]).unwrap_err();
+        assert!(e.contains("`-r`/`--remote` requires"), "{e}");
+    }
+
+    #[test]
+    fn default_transport_is_in_process() {
+        let CliOutcome::Run(a) = parse(&["-i", "x.pltA"]).unwrap() else {
+            panic!("Run expected");
+        };
+        assert_eq!(
+            a.transport, None,
+            "M4 default unchanged when no -r/--attach"
+        );
     }
 }

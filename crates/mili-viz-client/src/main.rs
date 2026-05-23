@@ -32,5 +32,5 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
 
-    mili_viz_client::run(args.load_root)
+    mili_viz_client::run(args.load_root, args.transport)
 }

@@ -168,7 +168,10 @@ impl App {
             self.shell.catalog = if l.db.is_empty() {
                 None
             } else {
-                self.session.fetch_catalog()
+                // Decision 90: `fetch_catalog` is async (remote arm
+                // streams a Flight `DoGet`); same `rt.block_on`
+                // pattern as `resolve_geometry`/`execute`.
+                self.rt.block_on(self.session.fetch_catalog())
             };
         }
     }
@@ -211,7 +214,11 @@ impl App {
         // result range (`phase-5-m3.5.md` Decision 50).
         self.shell.record_time_sample();
         if let Some(g) = &r.geometry {
-            if let Ok(mesh) = self.session.resolve_geometry(g) {
+            // Phase 5 M5 Decision 90: `resolve_geometry` is async (the
+            // remote arm streams a Flight `DoGet`). The winit redraw
+            // loop is sync — `rt.block_on` here mirrors how `execute`
+            // is already driven from the same loop.
+            if let Ok(mesh) = self.rt.block_on(self.session.resolve_geometry(g)) {
                 let b = mesh.bounds();
                 // Frame once per run (Decision 64): the first geometry
                 // after a `load` proposes the auto-frame to the
@@ -901,17 +908,31 @@ impl App {
     }
 }
 
-/// Open the windowed shell over a live in-process [`Session`]. With
-/// `root`, the session `load`s it and is *attached idle*; without, it
-/// is *not attached* (the viewport shows the attach card). The
-/// Phase 5 entrypoint.
+/// Open the windowed shell over a live [`Session`]. `transport`
+/// selects the seam (`phase-5-m5.md` Decision 91); `None` keeps the
+/// M4 in-process default verbatim. With `root`, the session `load`s
+/// it and is *attached idle*; without, it is *not attached* (the
+/// viewport shows the attach card). The Phase 5 entrypoint.
 ///
 /// # Errors
-/// Returns a boxed error if the in-process session fails to connect or
-/// the `winit` event loop fails to start.
-pub fn run(root: Option<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Returns a boxed error if the chosen session fails to connect
+/// (in-process spawn / TCP connect / attach-file resolve) or the
+/// `winit` event loop fails to start.
+pub fn run(
+    root: Option<String>,
+    transport: Option<crate::cli::TransportChoice>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use crate::cli::TransportChoice;
     let rt = tokio::runtime::Runtime::new()?;
-    let session = rt.block_on(Session::connect_in_process(root.as_deref()))?;
+    let session = match transport {
+        None => rt.block_on(Session::connect_in_process(root.as_deref()))?,
+        Some(TransportChoice::Remote(endpoint)) => {
+            rt.block_on(Session::connect_tcp(&endpoint, root.as_deref()))?
+        }
+        Some(TransportChoice::Attach(id)) => {
+            rt.block_on(Session::attach(id.as_deref(), root.as_deref()))?
+        }
+    };
     let (script_tx, script_rx) = std::sync::mpsc::channel();
 
     let mut shell = ShellState::default();

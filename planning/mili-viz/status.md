@@ -12,9 +12,9 @@
 >   batch (`MVG3` blob → cut-plane → slice; see
 >   [`phase-4-m7.md`](phase-4-m7.md) / [`phase-4-m8.md`](phase-4-m8.md)
 >   / [`phase-4-m9.md`](phase-4-m9.md)).
-> - **Phase 5 (`mili-viz` client): 🟢 M1–M4 + MVP polish landed,
+> - **Phase 5 (`mili-viz` client): 🟢 M1–M5 + MVP polish landed,
 >   M7 + M8 + M9 ✅ landed → the volumetric batch is now complete on
->   the client side; M5/M6 remain not started.**
+>   the client side; M6 remains not started.**
 > - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 landed;
 >   M4/M5/M6 not started.**
 >
@@ -34,8 +34,8 @@
   [`phase-4-m1.md`](phase-4-m1.md) through [`phase-4-m6.md`](phase-4-m6.md);
   the frozen `mili_viz.proto` was untouched after M1.
 - **Phase 5 (`mili-viz` client): 🟢 IN PROGRESS — M1 ✅, M2 ✅, M3 ✅,
-  M3.5 ✅, M4 ✅ landed (+ the MVP-polish rollup; see "Immediate next
-  steps" item 23). M5/M6 ⏳ not started.**
+  M3.5 ✅, M4 ✅, M5 ✅ landed (+ the MVP-polish rollup; see "Immediate
+  next steps" item 23). M6 ⏳ not started.**
   - **M1 — `wgpu` renderer skeleton.** New standalone
     `crates/mili-viz-client` (`wgpu` 29 / `winit` 0.30 / `glam`, no
     mili dep); orbit `Camera` field-aligned to the frozen
@@ -63,6 +63,31 @@
     HiDPI `Surface::configure` abort + the never-coded griz-subset
     CLI ([`phase-4-m1.md`](phase-4-m1.md) Decision 4). No proto
     change. [`phase-5-m4.md`](phase-5-m4.md) (62–66).
+  - **M5 — remote mode (gRPC + Arrow Flight over TCP).**
+    `Session::connect_tcp(endpoint, root)` and `Session::attach(id,
+    root)` ride the same Phase 4 M6 wire `pygriz` already speaks: one
+    tuned `tonic::Channel` cloned for `MiliVizClient` +
+    `FlightServiceClient`, ticket resolution streams Flight `DoGet`
+    chunks into the byte-identical M2/M3 blob, `fetch_catalog` fronts
+    the same `CATALOG_TICKET` over the same Flight client. CLI gains
+    `-r`/`--remote <host:port>` and `--attach [<id>]` (mutually
+    exclusive, in-process stays the default). `--attach` reuses the
+    same `~/.griz/sessions/<id>.json` resolver the server binary's
+    `main` writes (newest-live pid liveness via `kill(pid, 0)` —
+    Phase 6 M2 Decision 56/57). HPC-latency tuning: `tcp_nodelay`,
+    TCP + HTTP/2 keep-alives, explicit 10 s `connect_timeout`. The
+    in-process arm is byte-stable: `M1` `m1_renderer.rs` / `M2`
+    `m2_render_server_output.rs` / `M3` `m3_egui_shell.rs` / `M3.5`
+    `m3_5_bottom_tabs.rs` / `M4` `m4_view_manipulation.rs` and the
+    MVP-polish suite unchanged and green. No `.proto` change; no
+    Phase 4 crate touched. Scope/decisions:
+    [`phase-5-m5.md`](phase-5-m5.md) (90–93). Gating test
+    `crates/mili-viz-client/tests/m5_remote_mode.rs` (5 always-on:
+    CLI dispatch / mutual exclusion / `attach`-missing-id /
+    `attach`-empty-dir / `attach`-with-dead-pid; 3 skip-on-absent
+    real-TCP end-to-end against `serial/basic1`: byte-identical
+    `resolve_geometry`, Flight `fetch_catalog`, `attach()`
+    round-trip).
 - **Phase 6 (`pygriz` scripting client): 🟢 IN PROGRESS — M1 ✅, M2 ✅,
   M3 ✅ landed. M4/M5/M6 ⏳ not started.**
   - **M1 — scaffold + stubs + connect/handshake.**
@@ -109,6 +134,7 @@
 | [`phase-6-m2.md`](phase-6-m2.md) | Phase 6 M2 connection model: `attach()`/`launch()`/`list_sessions()`; the session file is written by the **binary's `main`** so the frozen library/proto/Hello echo are untouched. Discharges `phase-5-m3.5.md` Decision 49. Decisions 56–58 | ✅ pinned + landed (2026-05-18) |
 | [`phase-6-m3.md`](phase-6-m3.md) | Phase 6 M3 Layer-1 object API; every call lowers to a typed `Command` oneof (never `raw`); Layer-0 ≡ Layer-1 pinned two ways (fake-stub + identical-`DELTA_SNAPSHOT`). `crates/` byte-for-byte untouched. Decisions 59–61 | ✅ pinned + landed (2026-05-18) |
 | [`phase-5-m4.md`](phase-5-m4.md) | Phase 5 M4 local view manipulation + pre-M4 hardening: predict-and-reconcile mouse orbit, radians end-to-end, client-side colormap/legend, HiDPI fix, griz-subset CLI. Decisions 62–66 | ✅ pinned + landed (2026-05-18) |
+| [`phase-5-m5.md`](phase-5-m5.md) | Phase 5 M5 remote mode: `Session::connect_tcp`/`Session::attach` ride the Phase 4 M6 wire (one tuned `tonic::Channel` cloned for `MiliVizClient`+`FlightServiceClient`; Flight `DoGet` blob is byte-identical to in-process `fetch_geometry`); CLI `-r`/`--remote <host:port>` + `--attach [<id>]`; HPC-latency tuning (`tcp_nodelay`, TCP+HTTP/2 keep-alives, 10 s `connect_timeout`). No proto change. Decisions 90–93 | ✅ pinned + landed (2026-05-23) |
 | [`phase-4-m7.md`](phase-4-m7.md) | Phase 4 M7 volumetric geometry contract (`MVG3`): superset of `MVG2`, length-prefixed, free-form-tag carrier (zero `.proto` change), per-superclass element-edge buffer (fixes the hex-face-diagonal wireframe artifact / VB-005), opt-in interior-triangle emit via `MaterialVisibility` sentinel. **Supersedes `phase-4-m2.md` Decision 11 additively.** Decisions 72–74 | 🟡 planned (drafted 2026-05-23) |
 | [`phase-4-m8.md`](phase-4-m8.md) | Phase 4 M8 cut-plane operator: wires the long-frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528` stub), closed clipped hull (kept-side ∪ cap), per-superclass marching tables, rayon parallel-per-element, session-state that composes with `show`/state-step/material toggles. Decisions 75–77 | 🟡 planned (drafted 2026-05-23) |
 | [`phase-4-m9.md`](phase-4-m9.md) | Phase 4 M9 slice operator: additive `slice_only: bool` on `CutPlane` (**second** post-M1 proto change), cap-only emit, scalar interpolation linear along straddled edges, composes with cut. Decisions 78–80 | 🟡 planned (drafted 2026-05-23) |
@@ -440,8 +466,25 @@ expanded by `scripting.md` / `client.md`. None started.
       §"Phasing".)_
 - [ ] **M4 — local view manipulation** (rotate/zoom without server
       round-trip; reconcile against server-authoritative camera).
-- [ ] **M5 — remote mode** (connect to a remote server; tune buffers
-      for HPC latency).
+- [x] **M5 — remote mode.** ✅ **Landed.** `Session::connect_tcp`
+      and `Session::attach` over the Phase 4 M6 wire — one tuned
+      `tonic::Channel` cloned for `MiliVizClient` +
+      `FlightServiceClient`, Flight `DoGet` streams the byte-identical
+      M2/M3 blob into the in-process `decode_mvg` (the same `Mesh`
+      either way; M6 guarantee). CLI gains `-r <host:port>`
+      (`--remote`) and `--attach [<id>]` (mutually exclusive,
+      in-process default unchanged). `--attach` reuses the same
+      `~/.griz/sessions/<id>.json` resolver `pygriz` and the server
+      `main` already share (Phase 6 M2 Decisions 56/57). HPC-latency
+      tuning: `tcp_nodelay`, TCP + HTTP/2 keep-alives, explicit 10 s
+      `connect_timeout`. `Session::resolve_geometry`/`fetch_catalog`
+      become `async` (`rt.block_on` at the windowed call sites
+      mirrors the existing `execute` pattern); in-process arm
+      byte-stable. No proto change; no Phase 4 crate touched.
+      Scope/decisions: [`phase-5-m5.md`](phase-5-m5.md) (90–93).
+      Gating test
+      `crates/mili-viz-client/tests/m5_remote_mode.rs::{cli_dispatches_remote_attach_and_default_distinctly, cli_rejects_mixed_or_double_transports, attach_explicit_id_missing_is_a_clear_error, attach_empty_dir_is_a_clear_error, attach_with_dead_pid_id_still_attempts_connect_and_fails_cleanly, remote_session_resolves_geometry_byte_identical_to_in_process, remote_session_fetches_catalog_via_flight, attach_round_trip_resolves_a_real_running_server}`
+      (5 always-on + 3 skip-on-absent against `serial/basic1`).
 - [ ] **M6 — agent integration polish** (`client.md`).
 - [x] **M7 — render modes consuming `MVG3`.** ✅ **Landed.**
       Sibling to Phase 4 M7 on the client side.
@@ -804,11 +847,27 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     `cli::parse_args` unit tests; `cargo test --workspace --exclude
     mili-py` green (51 suites); M1/M2/M3/M3.5 + the frozen Phase 4
     suite + Phase 6 M1/M2/M3 unchanged and green.
-22. ⏭️ **AFTER Phase 5 M4:** **Phase 5 M5** (remote mode — wire
-    `connect`/`attach` over the landed gRPC+Flight TCP transport;
-    HPC-latency buffer tuning) then the independent **Phase 6 M4**
-    (`pygriz` live sync — `Subscribe` stream → `@s.on` callbacks).
-    No `mili-rs`/`mili-py` derived work remains.
+22. ✅ **DONE (coding Phase 5 M5 — remote mode):** `Session::
+    connect_tcp(endpoint, root)` + `Session::attach(id, root)` ride
+    the Phase 4 M6 wire — one tuned `tonic::Channel` cloned for
+    `MiliVizClient` + `FlightServiceClient`, Flight `DoGet` streams
+    the byte-identical M2/M3 blob into the in-process `decode_mvg`
+    (the same `Mesh` either way; M6 guarantee). CLI: `-r`/`--remote
+    <host:port>` and `--attach [<id>]` (mutually exclusive, in-process
+    default unchanged). `--attach` reuses the same
+    `~/.griz/sessions/<id>.json` resolver pygriz uses (newest-live
+    pid liveness via `kill(pid, 0)`; Phase 6 M2 Decisions 56/57).
+    HPC-latency tuning: `tcp_nodelay`, TCP + HTTP/2 keep-alives,
+    explicit 10 s `connect_timeout`. `Session::resolve_geometry`/
+    `fetch_catalog` become `async` (`rt.block_on` at the windowed
+    call sites mirrors the existing `execute` pattern); in-process
+    arm byte-stable. No proto change; no Phase 4 crate touched.
+    Scope/decisions: [`phase-5-m5.md`](phase-5-m5.md) (90–93).
+    Gating test `m5_remote_mode.rs` (5 always-on CLI/resolver +
+    3 skip-on-absent real-TCP end-to-end). The independent
+    **Phase 6 M4** (`pygriz` live sync — `Subscribe` stream →
+    `@s.on` callbacks) and Phase 5 M6 (agent integration polish)
+    remain. No `mili-rs`/`mili-py` derived work remains.
 23. ✅ **DONE (Phase 5 M4 follow-up — MVP polish, contract-preserving).**
     A rollup milestone of GUI-feedback fixes landed on top of M4 from
     exercising the windowed shell on real corpora. Categories that

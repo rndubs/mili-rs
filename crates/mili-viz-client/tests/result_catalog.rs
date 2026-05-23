@@ -126,11 +126,12 @@ async fn composite_render() {
 
     // The windowed app's `Session::fetch_catalog` path, end to end
     // over the in-process side-channel.
-    let session = Session::connect_in_process(Some(&path.to_string_lossy()))
+    let mut session = Session::connect_in_process(Some(&path.to_string_lossy()))
         .await
         .expect("in-process session loads serial/basic1");
     let catalog = session
         .fetch_catalog()
+        .await
         .expect("a loaded run yields a decoded catalog");
     assert!(
         !catalog.primal.is_empty(),
