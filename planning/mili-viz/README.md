@@ -1,11 +1,12 @@
 # `mili-viz` — client / server visualization stack
 
-> **Status: ⏳ NOT STARTED — design phase, needs more planning
-> iterations before implementation.** This README is the architecture;
-> the live tracker, the open design questions, and the concrete next
-> steps are in **[`status.md`](status.md) — start there.** Phases 1–3
-> (`mili-rs` + `milox`) are complete; `mili-viz` is the remaining work
-> and no `mili-viz-*` crate exists yet.
+> **Status: Phase 4 (server) ✅ COMPLETE; Phase 5 (client) 🟢 IN
+> PROGRESS; Phase 6 (`pygriz` scripting client) 🟢 IN PROGRESS.**
+> This README is the original architecture/rationale; the live
+> tracker, the open design questions, and the concrete next steps
+> are in **[`status.md`](status.md) — start there.** Crates landed:
+> `crates/mili-viz-proto`, `crates/mili-viz-server`,
+> `crates/mili-viz-client`, and `python/pygriz/`.
 
 A from-scratch replacement for griz, split into a server that does the
 heavy I/O and a thin renderer client. The server links `mili-rs`
@@ -109,38 +110,50 @@ Alternatives considered and rejected: `slint` (less GL/wgpu
 integration story), `bevy` (overkill, ECS we do not need), Qt
 (Rust bindings still rough, and we wanted no C++ in the build).
 
-## Phase 4 (server) milestones
+## Phase 4 (server) milestones — ✅ all landed
 
-1. **M1 — proto crate + in-process transport.** Define commands;
-   stand up a `tonic` server stub that accepts them over an in-memory
-   channel. Also defines the multi-client surface (subscription RPC +
-   server→client `StateDelta` stream + version handshake) that the
-   scripting client and live GUI sync depend on — see `scripting.md`.
-2. **M2 — load + state navigation.** `load`, `state`, `next`, `prev`.
-   Server streams back vertex + index buffers for the loaded mesh
-   at each state.
-3. **M3 — primal result display.** `show <svar>`. Server colors
-   vertices from a `mili-rs` query and streams the color array.
-4. **M4 — selection and enable/disable.** Mesh filtering, material
-   visibility. The natural griz command set is the spec.
-5. **M5 — derived results.** Port the most-used derived computations
-   from griz (stress invariants first, then strain). `rayon` for the
-   per-element loops.
-6. **M6 — remote transport.** Same proto over gRPC + Arrow Flight on
-   a TCP socket. Validate over a real network mount.
+1. **M1** — proto crate (`crates/mili-viz-proto`, protoc-free
+   `protox` codegen) + in-process `tokio::io::duplex` transport.
+2. **M2** — real `mili-rs`-backed `load`/state-nav + per-state
+   triangulated hull via the frozen `GeometryRef`.
+3. **M3** — primal result display (`show <result> [component]`),
+   per-vertex scalar in the `MVG2` blob.
+4. **M4** — selection (metadata-only) + `enable`/`disable` material
+   visibility (filters emitted triangles).
+5. **M5** — derived results: scalar invariants (M5), eigenvalue
+   families (M5b), surfstrain + nodal-time (M5c), `*_alt` trig
+   principal strains (M5d).
+6. **M6** — gRPC + Arrow Flight over TCP (`serve_tcp`).
+
+See [`status.md`](status.md) and the per-milestone
+`phase-4-mN.md` files for landed-summary detail.
 
 ## Phase 5 (client) milestones
 
-1. **M1 — `wgpu` renderer skeleton.** Window, camera, a hard-coded
-   triangle. No mili involvement.
-2. **M2 — render server output.** Connect to the in-process server
-   from Phase 4 M2; draw whatever mesh comes back.
-3. **M3 — `egui` controls.** State scrubber, result picker, view
-   controls, command-line entry.
-4. **M4 — local view manipulation.** Rotate/zoom without
-   round-tripping the server.
-5. **M5 — remote mode.** Connect to a remote server; tune buffer
-   sizes for typical HPC network latency.
+1. **M1** ✅ — `wgpu` renderer skeleton (`crates/mili-viz-client`).
+2. **M2** ✅ — render server output (in-process transport,
+   `MVG1`/`MVG2` decode, depth-tested indexed pipeline).
+3. **M3** ✅ — `egui` shell (toolbar / left dock / five overlays /
+   status bar; additive non-clearing second pass).
+4. **M3.5** ✅ — bottom tabs (Layer-0 command line + scripting
+   placeholder + `egui_plot` time-history).
+5. **M4** ✅ — local view manipulation (predict + reconcile against
+   server-authoritative camera) + extensive MVP polish.
+6. **M5** ⏳ — remote mode (wire `connect`/`attach` over the
+   landed gRPC + Flight TCP transport; HPC-latency buffer tuning).
+7. **M6** ⏳ — agent integration polish (`client.md`).
+
+## Phase 6 (`pygriz` scripting client) milestones
+
+1. **M1** ✅ — scaffold + `connect`/`Hello` handshake +
+   Layer-0 `command()`/`run_script()`.
+2. **M2** ✅ — `attach()`/`launch()`/`list_sessions()` +
+   server-side session file.
+3. **M3** ✅ — Layer-1 object API + Layer-0 ≡ Layer-1 test.
+4. **M4** ⏳ — live sync (`Subscribe` → `@s.on(...)`).
+5. **M5** ⏳ — `query`/`to_dataframe` (Arrow Flight for large
+   results).
+6. **M6** ⏳ — `render`/`save_animation`/`snapshot`.
 
 ## Open questions
 

@@ -200,51 +200,43 @@ results, post-processing utilities). `pyproject.toml` sets
 >   profiling-driven. Only wins when aligned + native-endian +
 >   single contiguous slab (rare in practice).
 
-Original (now M5-only) sketch, for each result buffer:
+Original `MiliBuffer<T>` + `PyCapsule` + `Arc<Storage>` sketch
+deferred to the M5 path above; see
+[`../mili-rs/plan.md`](../mili-rs/plan.md) § "FFI integration plan"
+for the full design.
 
-1. `mili-rs` returns a `MiliBuffer<T>`.
-2. `arrays.rs` decides: aligned + native-endian → wrap in numpy via
-   `PyArray::borrow_from_array` with a capsule destructor that drops
-   the `Arc<Storage>`. Else → `to_owned()` and transfer.
-3. The `QueryResult` shape `(states, entities, components)` is built
-   in Rust as a single `Array3<T>`; numpy sees it directly via
-   `IntoPyArray`.
+## Phase 2 milestones (all landed)
 
-The `Arc<Storage>` keeps the mmap alive as long as numpy holds a
-reference, which matches what scientific users actually do (open
-database, pull many arrays, close at exit).
+1. ✅ **M1 — `open_database` + metadata accessors** ([`m1.md`](m1.md)).
+   PyO3 module + maturin scaffold, `PyMiliDatabase` over
+   `Database`/`DatabaseSet`, read-only metadata, error hierarchy,
+   dedicated `test-milox` CI job.
+2. ✅ **M2 — `nodes()` + `connectivity()`** ([`m2.md`](m2.md)). First
+   bulk arrays across the FFI boundary via the owned-`Vec` →
+   `into_pyarray_bound` zero-copy path under `allow_threads`.
+3. ✅ **M3 — basic `query()`** ([`m3.md`](m3.md)). The pinned upstream
+   `QueryDict` dict shape, single- and multi-state / multi-svar,
+   bit-exact over the parity corpus + xmilics families.
+4. ✅ **M4 — full `query()` + upstream test redirect**
+   ([`m4.md`](m4.md), decisions 16–19 and the full record). All filter
+   combinations; the upstream `reference/mili-python/tests/` suite
+   runs against `milox` with only an import redirect — closed at
+   542 pass / 287 xfail before Phase I.
+5. ✅ **Phase I — parallel per-proc-unmerged surface**
+   ([`phase-i.md`](phase-i.md), decisions 20–21). Brought milox to
+   827 pass / 6 xfail.
+6. ✅ **Phase 3 — write path** ([`phase-3.md`](phase-3.md), decisions
+   22–26). The on-disk A/T/S writer in `mili_rs::write`,
+   `append_state` / `copy_non_state_data` / `query(write_data=)` /
+   `AppendStatesTool`. Closed at 938 pass / 0 xfail, strict 0-xfail
+   harness, 16/16 upstream test-file coverage.
 
-## Phase 2 milestones
+Original M5 (performance microbench) and M6 (multi-platform wheel
+packaging) plan items were not gated by the read+write parity work
+and are not blocking; revisit if/when downstream consumption needs
+them.
 
-1. **M1 — `open_database`, metadata accessors.** `class_names()`,
-   `labels()`, `times()`, `state_maps()`. Stand up the PyO3 module
-   and the test harness.
-2. **M2 — `nodes()`, `connectivity()`.** First zero-copy arrays
-   across the FFI boundary.
-3. **M3 — basic `query()`.** Single svar, single state. Matches
-   mili-python's output exactly on the test corpus.
-4. **M4 — full `query()`.** All filter combinations. Run
-   `reference/mili-python/tests/` unmodified against the new module.
-5. **M5 — performance.** Microbench the assembly path; confirm we
-   are not regressing simple cases and we are winning on the
-   multi-subrecord case.
-6. **M6 — packaging.** `maturin` build, wheels for the platforms
-   the Python users actually use (linux x86_64 + aarch64, macOS arm64,
-   probably skipping Windows for v1 unless asked).
+## Open work
 
-## Open questions
-
-- **Writeability.** Python users mutate query results in place
-  occasionally. `np.frombuffer` arrays in current mili-python are
-  read-only; we keep that behavior. If a user passes
-  `copy=True`-equivalent, they get a writable copy. Need to confirm
-  no test relies on writability of returned arrays.
-- **Derived results.** Some derived results need access to several
-  primal arrays; the current Python implementations live in
-  `reference/mili-python/src/mili/derived.py`. They should still work
-  unchanged on top of our primal arrays, but we need to verify the
-  dtype / shape assumptions match.
-- **`MiliDatabaseSet` / parallel-wrapper helpers.** The upstream
-  package has a `Mili` factory that returns either a single database
-  or a fanned-out wrapper across multiple plot files. We provide the
-  same factory; the per-database object is Rust-backed.
+None — Phase 4/5 is the next work (see
+[`../mili-viz/status.md`](../mili-viz/status.md)).

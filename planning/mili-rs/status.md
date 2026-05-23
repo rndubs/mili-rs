@@ -233,62 +233,32 @@ All seven from `test_bugfixes.py` are accounted for:
 | 6 | `dir_version_2` fixture                       | ✅ Step 2 |
 | 7 | State end marker `~` round-trip               | ✅ read; write deferred to Phase 3 |
 
-## Known gaps Phase 2 inherits
+## Still-deferred surface (no corpus pressure)
 
-The Rust core is honest about what it does and doesn't cover. Phase 2
-will run into these — none of them block Phase 2 from starting, but
-the bindings layer should surface the typed errors cleanly. Phase 1.5
-closes the multi-A-file gap before Phase 2; the others remain.
+Everything Phase 2 was warned about either closed naturally or
+remained a typed `MiliError::Unsupported` with no real-world caller
+needing it:
 
-- **Aggregate VEC_ARRAY queries** (e.g. `db.query("es_1a", "shell")`)
-  work in mili-rs end-to-end, but mili-python raises `IndexError` on
-  the same query, so we can't cross-validate the *aggregate* form.
-  Pinned in `query.rs::find_vector_parent` (VEC_ARRAY parents
-  intentionally skipped). **M4 update:** the *component* path
-  (`sx`/`sy`/`eps` on the class) **is** answerable by upstream — the
-  oracle is `test_bugfixes.py` (exact values), so the component-level
-  resolution is tractable and is now **CLOSED** by the mili-py
-  M4-followup Slice B (below); only the bare *aggregate* form stays
-  oracle-blocked (the existing coherent-data behaviour is kept, not
-  chased).
-- **Bare-component lookup with cross-material element-sets — CLOSED
-  (mili-py M4-followup Slice B).** `db.query("sx","brick")` on
-  serial/basic1 and `eps`/`sy` component-of-VEC_ARRAY on d3samp4 now
-  resolve via the new core svar→element-set→IP-label linkage
-  (`query::IntPoints`, `Database::build_int_points` mirroring upstream
-  `__int_points`), VEC_ARRAY-parent substitution in
-  `plan_state_svar_ip` / `try_vec_array_substitution` (per-subrec
-  component-outer/IP-inner pickers), `ips=` *label*→positional-index
-  mapping, the `f"{comp} ipt. {label}"` component naming, and the
-  cross-material per-subrec IP-count reconciliation firing the Step-16
-  `InconsistentIpCounts`. Bit-exact vs upstream
-  (`test_query_parity.py::test_bugfixes_slice_b_oracle` (4),
-  `_component_names`, `_cross_material_inconsistent_ips_contract`).
-  Historical note: this needed four coupled core subsystems
-  (VEC_ARRAY-parent resolution + a new svar→element-set→IP-label
-  linkage with no current `mili-rs` analogue + ip-label→index mapping
-  + cross-material per-subrec IP-count reconciliation), not the
-  single `find_vector_parent` extension first assumed.
+- **Aggregate VEC_ARRAY queries** (`db.query("es_1a","shell")` —
+  the bare aggregate form, not the component path) stay
+  oracle-blocked because mili-python itself raises `IndexError`.
+  Coherent-data behaviour kept; not chased. Pinned in
+  `query.rs::find_vector_parent`.
 - **Partial-dim array subscript** (e.g. `g[1]` on a `dims=[3,4]`
-  svar). Surfaces as `MiliError::Unsupported`. No corpus fixture has
-  multi-D array svars. Implement when a real call hits it.
-- **Cross-srec-format multi-state query.** Surfaces as
-  `MiliError::Unsupported`. Every corpus fixture has `srec_fmt_qty=1`.
+  svar) — `MiliError::Unsupported`; no corpus fixture exists.
+- **Cross-srec-format multi-state query** —
+  `MiliError::Unsupported`; every corpus fixture has
+  `srec_fmt_qty=1`.
+- **Directory v1** (`MiliError::UnsupportedDir(1)`).
+- **`SURFACE_CONNS` payload decode**, **`block_obj_fmt`
+  connectivity** (`list_obj_fmt` is universal in our corpus).
+- **mmap-on-NFS / Lustre `pread` fallback** — no benchmark
+  motivates it.
 
-## Deferred to Phase 3 (write path)
-
-Typed errors today; not in Phase 2 scope.
-
-- Write path: **Phase 3.1 landed** — `mili_rs::write` (the
-  renormalising A-file serializer + `copy_non_state_data` +
-  `append_state`), bit-exact-gated by `parity_write_append.rs`
-  (decision 22; `planning/mili-py/phase-3.md`). The general
-  `query(write_data=)` state-data scatter (3.2) + `AppendStatesTool`
-  (3.3) remain scoped-not-implemented.
-- Directory v1 (`MiliError::UnsupportedDir(1)`).
-- `SURFACE_CONNS` payload decode.
-- `block_obj_fmt` connectivity (`list_obj_fmt` is universal in our corpus).
-- mmap-on-NFS / Lustre `pread` fallback (no benchmark motivates it).
+The component / cross-material element-set work originally listed
+here as a "known gap" closed in mili-py M4-followup Slice B and is
+documented in `../mili-py/m4.md`. The full write path (3.1/3.2/3.3)
+landed and is gated by the `parity_write_*` tests.
 
 ## Surprises worth remembering
 
