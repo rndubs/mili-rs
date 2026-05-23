@@ -105,7 +105,10 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | Filled `TriangleList` pass | ✅ done | `renderer.rs:149` | status 15 |
-| Wireframe / element-edge / hidden-line mode | ✅ done | `LineList` edge pass via `Mesh::edge_indices`; `Renderer::set_mode` → `Shaded` (default, byte-stable) / `Edges` (hidden-line overlay) / `Wireframe` | VB-003 / status 23 |
+| Wireframe / element-edge / hidden-line mode | 🟡 partial | `LineList` edge pass via `Mesh::edge_indices`; `Renderer::set_mode` → `Shaded` (default, byte-stable) / `Edges` (hidden-line overlay) / `Wireframe` lands. Remaining gap: `Mesh::edge_indices` derives from the triangle list, so hex/quad/pyramid/wedge per-face triangulation diagonals leak into the wireframe (`bar71.pltA` reads as a triangulated soup). Fixed once `MVG3` element-edge buffer ships: prefer server-supplied `Mesh::element_edges`, fall back to the extractor (byte-stable for older servers) | VB-003 / VB-005 / status 23 / phase-4-m7 Dec 73 / phase-5-m7 Dec 82 |
+| Translucent whole-mesh / X-ray (see internal element structure) | ⬜ missing | needs server-side interior triangles (`MVG3` interior flag) + client `Translucent`/`Xray` render modes; opt-in via the reserved `MaterialVisibility{ material: u32::MAX }` sentinel (no proto change) | phase-4-m7 Dec 74 / phase-5-m7 Dec 81 / 83 |
+| `Rendering → Cut` (cut-plane operator) | ⬜ missing | `Cmd::Cutplane` typed-frozen since `phase-4-m1.md` Δ1; server arm has been a no-op stub at `crates/mili-viz-server/src/lib.rs:528`; closed-hull clip (kept-side ∪ cap), session-state, composes with `show`/state-step | phase-4-m8 Dec 75 / 76 / 77 / phase-5-m8 |
+| `Rendering → Slice` (2-D cross-section operator) | ⬜ missing | griz/VisIt verb sister to cut; reuses M8 cap machinery, emits cap-only; additive `slice_only: bool` on `CutPlane` (the **second** post-M1 proto change after the catalog side-channel) | phase-4-m9 Dec 78 / 79 / 80 / phase-5-m9 |
 
 ## Cross-cutting gaps
 

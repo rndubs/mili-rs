@@ -20,6 +20,49 @@ Conventions:
 
 ---
 
+## VB-005 — `Edges`/`Wireframe` mode draws hex face diagonals as if they were element edges
+
+- **Status:** known-gap (fix planned in
+  [`phase-4-m7.md`](phase-4-m7.md) Decision 73 +
+  [`phase-5-m7.md`](phase-5-m7.md) Decision 82)
+- **Reported:** 2026-05-23 (maintainer feedback, `bar71.pltA` —
+  Hex corpus — under the release binary's `Edges` mode looked
+  "like tet elements")
+- **Symptom:** A hex element in `Edges` or `Wireframe` mode draws
+  12 cube edges **plus 6 face diagonals**. The diagonals slice each
+  face into two triangles and the wireframe reads as a triangulated
+  soup rather than a cube grid — visually indistinguishable from a
+  tet-mesh wireframe.
+- **Root cause:** The geometry blob frozen at
+  [`phase-4-m2.md`](phase-4-m2.md) Decision 11 (`MVG1`/`MVG2`) is a
+  boundary-surface representation: per-superclass faces are
+  tessellated into triangles (Hex → 12 tris, 2 per quad face) and
+  the per-face triangulation diagonal becomes a real index-buffer
+  edge. `Mesh::edge_indices`
+  (`crates/mili-viz-client/src/mesh.rs:195-208`) derives the
+  wireframe by walking the triangle list and deduplicating edges
+  — the diagonals are dedupe-stable (each appears in exactly two
+  triangles' shared edge) and survive as wireframe lines. There is
+  no per-face-vs-diagonal signal in the `MVG1`/`MVG2` blob.
+- **Fix (planned):** Server-side, ship the per-superclass element
+  edges as an explicit buffer in the `MVG3` blob revision
+  ([`phase-4-m7.md`](phase-4-m7.md) Decision 73 — Hex = 12, Tet =
+  6, Quad = 4, etc., enumerated from a fixed table that mirrors
+  `triangulation()`). Client-side, prefer `Mesh::element_edges`
+  when present and fall back to the on-the-fly extractor when not
+  ([`phase-5-m7.md`](phase-5-m7.md) Decision 82). The fallback
+  preserves the (broken-but-known) behavior for older servers, so
+  the M2/M3/M4 + MVP-polish composite gates stay byte-stable
+  (VB-001).
+- **Regression test:** part of the `phase-4-m7.md` gating test
+  (`crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`,
+  hex-emits-exactly-12-edges assertion) and the `phase-5-m7.md`
+  gating test (`crates/mili-viz-client/tests/m7_render_modes.rs`,
+  decoder + prefer-element-edges branch).
+- **Commit:** `—` (in flight against the planned milestones)
+
+---
+
 ## VB-004 — edge pipeline aborts startup (depth bias on `LineList`)
 
 - **Status:** fixed

@@ -7,10 +7,17 @@
 > work in this repo is `mili-viz`.
 >
 > **Quick phase status:**
-> - **Phase 4 (`mili-viz` server): ✅ COMPLETE** (M1–M6, no deferred
->   derived families).
+> - **Phase 4 (`mili-viz` server): ✅ M1–M6 LANDED** (no deferred
+>   derived families); **🟡 M7–M9 PLANNED** — post-MVP volumetric
+>   batch (`MVG3` blob → cut-plane → slice; see
+>   [`phase-4-m7.md`](phase-4-m7.md) / [`phase-4-m8.md`](phase-4-m8.md)
+>   / [`phase-4-m9.md`](phase-4-m9.md)).
 > - **Phase 5 (`mili-viz` client): 🟢 M1–M4 + MVP polish landed;
->   M5/M6 not started.**
+>   M5/M6 not started; 🟡 M7–M9 PLANNED** — sibling client UI for
+>   the volumetric batch (render modes + cut gizmo + slice gizmo;
+>   see [`phase-5-m7.md`](phase-5-m7.md) /
+>   [`phase-5-m8.md`](phase-5-m8.md) /
+>   [`phase-5-m9.md`](phase-5-m9.md)).
 > - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 landed;
 >   M4/M5/M6 not started.**
 >
@@ -105,6 +112,12 @@
 | [`phase-6-m2.md`](phase-6-m2.md) | Phase 6 M2 connection model: `attach()`/`launch()`/`list_sessions()`; the session file is written by the **binary's `main`** so the frozen library/proto/Hello echo are untouched. Discharges `phase-5-m3.5.md` Decision 49. Decisions 56–58 | ✅ pinned + landed (2026-05-18) |
 | [`phase-6-m3.md`](phase-6-m3.md) | Phase 6 M3 Layer-1 object API; every call lowers to a typed `Command` oneof (never `raw`); Layer-0 ≡ Layer-1 pinned two ways (fake-stub + identical-`DELTA_SNAPSHOT`). `crates/` byte-for-byte untouched. Decisions 59–61 | ✅ pinned + landed (2026-05-18) |
 | [`phase-5-m4.md`](phase-5-m4.md) | Phase 5 M4 local view manipulation + pre-M4 hardening: predict-and-reconcile mouse orbit, radians end-to-end, client-side colormap/legend, HiDPI fix, griz-subset CLI. Decisions 62–66 | ✅ pinned + landed (2026-05-18) |
+| [`phase-4-m7.md`](phase-4-m7.md) | Phase 4 M7 volumetric geometry contract (`MVG3`): superset of `MVG2`, length-prefixed, free-form-tag carrier (zero `.proto` change), per-superclass element-edge buffer (fixes the hex-face-diagonal wireframe artifact / VB-005), opt-in interior-triangle emit via `MaterialVisibility` sentinel. **Supersedes `phase-4-m2.md` Decision 11 additively.** Decisions 72–74 | 🟡 planned (drafted 2026-05-23) |
+| [`phase-4-m8.md`](phase-4-m8.md) | Phase 4 M8 cut-plane operator: wires the long-frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528` stub), closed clipped hull (kept-side ∪ cap), per-superclass marching tables, rayon parallel-per-element, session-state that composes with `show`/state-step/material toggles. Decisions 75–77 | 🟡 planned (drafted 2026-05-23) |
+| [`phase-4-m9.md`](phase-4-m9.md) | Phase 4 M9 slice operator: additive `slice_only: bool` on `CutPlane` (**second** post-M1 proto change), cap-only emit, scalar interpolation linear along straddled edges, composes with cut. Decisions 78–80 | 🟡 planned (drafted 2026-05-23) |
+| [`phase-5-m7.md`](phase-5-m7.md) | Phase 5 M7 render modes consuming `MVG3`: `Translucent`/`Xray`/`Interior` arms; `Edges`/`Wireframe` prefer `Mesh::element_edges` (VB-005 client side), fall back to extractor (byte-stable for older servers); interior is a server round-trip via the M7 sentinel. Decisions 81–83 | 🟡 planned (drafted 2026-05-23) |
+| [`phase-5-m8.md`](phase-5-m8.md) | Phase 5 M8 cut-plane gizmo + Rendering→Cut UI: egui-overlay handle (no new `wgpu` pipeline), 30 Hz gesture-throttled preview with drag-end commit, `Preferences → Interactive clip` suppress for low-bandwidth links. Decisions 84–86 | 🟡 planned (drafted 2026-05-23) |
+| [`phase-5-m9.md`](phase-5-m9.md) | Phase 5 M9 slice gizmo + Rendering→Slice UI: thin sibling to M8 (shared gizmo machinery), distinct status-bar readout, slice-cap colormap-painted when a result is mapped; slice always opaque by default. Decisions 87–89 | 🟡 planned (drafted 2026-05-23) |
 | [`README.md`](README.md) | Server/client split, crate layout, transport + renderer stack, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` authoritative) |
 | [`scripting.md`](scripting.md) | Scripting = second pure-Python client of `mili-viz-proto`; camera server-authoritative; `attach()` to a running GUI; `grizinit` via `run_script()`. Implementation home: Phase 6 | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design; server-hosted agent peer with barge-in + provenance journal. Adds `AgentChat`/`DELTA_AGENT`/`Snapshot`/`Interrupt` to M1; introduces Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
@@ -281,6 +294,42 @@ expanded by `scripting.md` / `client.md`. None started.
       `crates/mili-viz-server/tests/m6_transport.rs`
       `remote_transport_grpc_and_flight_over_tcp`; M1's six + M2 +
       M3 + M4 + M5 + M5b tests unchanged and green.
+- [ ] **M7 — volumetric geometry contract (`MVG3`).** 🟡 **Planned.**
+      `MVG3` is a strict superset of `MVG2` ridden through the
+      free-form `GeometryRef.layout` tag (zero `.proto` change),
+      adds a per-superclass element-edge buffer (fixes the
+      hex-face-diagonal wireframe artifact, VB-005), a `tri_flags`
+      column (bit 0 = interior), and an opt-in interior-triangle
+      emit toggled via a reserved `MaterialVisibility{ material:
+      u32::MAX }` sentinel. **Supersedes
+      [`phase-4-m2.md`](phase-4-m2.md) Decision 11 additively** —
+      `MVG1`/`MVG2` decoders stay live, the M2/M3/M4 + Phase 5
+      composite gates stay byte-stable. Scope/decisions:
+      [`phase-4-m7.md`](phase-4-m7.md) (72–74). Gating test
+      `crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`.
+- [ ] **M8 — cut-plane operator.** 🟡 **Planned.** Wires the
+      frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528`
+      stub since [`phase-4-m1.md`](phase-4-m1.md) Δ1). Closed
+      clipped hull (kept-side outward boundary ∪ tessellated cap),
+      per-superclass marching tables (Hex/Tet/Wedge/Pyramid),
+      `rayon` parallel-per-element, session-state that composes
+      with `show`/state-step/material toggles, cap triangles
+      tagged with a reserved sentinel (`tri_material == u32::MAX -
+      1`). No `.proto` change. Scope/decisions:
+      [`phase-4-m8.md`](phase-4-m8.md) (75–77). Gating test
+      `crates/mili-viz-server/tests/m8_cutplane.rs::cutplane_operator`
+      (skip-on-absent against `bar71.pltA`).
+- [ ] **M9 — slice operator.** 🟡 **Planned.** Cap-only sister to
+      M8. Adds the **second** post-M1 proto change: an additive
+      `optional bool slice_only = 8;` on `CutPlane` (proto3
+      default `false` → byte-compatible with M8-only deploys; the
+      `Hello`-handshake major bump covers the version step).
+      Server reuses the M8 marching-tables; scalar interpolation
+      is linear along straddled element-edges; cap triangles
+      tagged `tri_material == u32::MAX - 2`. Composes with cut
+      (independent session-state fields). Scope/decisions:
+      [`phase-4-m9.md`](phase-4-m9.md) (78–80). Gating test
+      `crates/mili-viz-server/tests/m9_slice.rs::slice_operator`.
 
 ## Phase 5 — `mili-viz` client (IN PROGRESS — M1–M4 + MVP polish ✅ landed)
 
@@ -374,6 +423,35 @@ expanded by `scripting.md` / `client.md`. None started.
 - [ ] **M5 — remote mode** (connect to a remote server; tune buffers
       for HPC latency).
 - [ ] **M6 — agent integration polish** (`client.md`).
+- [ ] **M7 — render modes consuming `MVG3`.** 🟡 **Planned.** Sibling
+      to Phase 4 M7 on the client side. `Translucent` / `Xray` /
+      `Interior` `RenderMode` arms; `Edges`/`Wireframe` prefer
+      server-supplied `Mesh::element_edges`, fall back to the
+      existing extractor (byte-stable for older servers — the
+      VB-005 fix activates only when the server speaks `MVG3`);
+      `Interior` toggle is a server round-trip via the M7
+      sentinel (no proto change). Scope/decisions:
+      [`phase-5-m7.md`](phase-5-m7.md) (81–83). Gating test
+      `crates/mili-viz-client/tests/m7_render_modes.rs`.
+- [ ] **M8 — cut-plane gizmo + Rendering→Cut UI.** 🟡 **Planned.**
+      Client UI for Phase 4 M8's server operator. `egui`-overlay
+      gizmo (no new `wgpu` pipeline; reuses the M3 additive-paint
+      seam), 30 Hz gesture-throttled preview with drag-end
+      commit, `Preferences → Interactive clip` suppress for
+      low-bandwidth links (cross-session-persisted via the
+      existing `PersistedTweaks`). Lowers to the typed
+      `Cmd::Cutplane`. Scope/decisions:
+      [`phase-5-m8.md`](phase-5-m8.md) (84–86). Gating test
+      `crates/mili-viz-client/tests/m8_cut_gizmo.rs`.
+- [ ] **M9 — slice gizmo + Rendering→Slice UI.** 🟡 **Planned.**
+      Thin sibling of M8: shared gizmo machinery, distinct
+      status-bar readout, slice-cap colormap-painted when a
+      result is mapped (slice always opaque by default; users
+      wanting translucency pick `RenderMode::Translucent`).
+      Lowers to `Cmd::Cutplane{ slice_only: true }`.
+      Scope/decisions: [`phase-5-m9.md`](phase-5-m9.md) (87–89).
+      Gating test
+      `crates/mili-viz-client/tests/m9_slice_gizmo.rs`.
 
 ## Phase 6 — `pygriz` scripting client (IN PROGRESS — M1–M3 ✅ landed)
 
@@ -712,11 +790,74 @@ open Q3–Q8 resolved/deferred). Remaining work is coding:
     `status_bar_proto_peer.rs`, `vb004_edge_pipeline_validation.rs`).
     Region-by-region wireframe coverage: see
     [`wireframe-parity.md`](wireframe-parity.md). Defect log
-    (VB-001..VB-004): see [`bug-tracker.md`](bug-tracker.md). Per-PR
+    (VB-001..VB-004, plus VB-005 newly logged as a known-gap
+    against the Phase 4/5 M7 fix): see
+    [`bug-tracker.md`](bug-tracker.md). Per-PR
     detail: `git log`. Only proto-adjacent surface touched in the
     rollup is the maintainer-approved Decision-67/70 catalog
     side-channel (no `.proto`/blob/ticket/RPC change; one
     `fetch_catalog` seam + one Flight `DoGet` ticket branch).
+24. 🟡 **PLANNED (post-MVP volumetric batch — clip / slice /
+    translucent / faithful internal edges).** Six new milestone
+    docs drafted 2026-05-23 in response to maintainer direction
+    "keep all of the rendering server side so that we can scale
+    with compute". The batch fits on top of the frozen Phase 4 M1
+    proto with **one** additive field (the `CutPlane.slice_only`
+    bool at M9 — the second post-M1 proto change after the
+    catalog side-channel); the geometry blob extension (`MVG3`)
+    uses the free-form `GeometryRef.layout` tag and is zero
+    `.proto` change. Order: server-first, client follows
+    one-to-one.
+    - **Phase 4 M7 — `MVG3` volumetric geometry contract**
+      ([`phase-4-m7.md`](phase-4-m7.md), Decisions 72–74). Strict
+      superset of `MVG2`: per-superclass element-edge buffer
+      (fixes [`bug-tracker.md`](bug-tracker.md) **VB-005** hex
+      face-diagonals in `Edges`/`Wireframe`), `tri_flags` column,
+      opt-in interior triangles via reserved `MaterialVisibility`
+      sentinel. Supersedes [`phase-4-m2.md`](phase-4-m2.md)
+      Decision 11 additively; `MVG1`/`MVG2` decoders stay live.
+      Gating test
+      `crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`.
+    - **Phase 4 M8 — cut-plane operator**
+      ([`phase-4-m8.md`](phase-4-m8.md), Decisions 75–77). Wires
+      the frozen `Cmd::Cutplane` stub at
+      `crates/mili-viz-server/src/lib.rs:528`. Closed clipped
+      hull (kept-side ∪ cap), per-superclass marching tables,
+      `rayon` parallel-per-element, session-state composing with
+      `show`/state-step. Gating test
+      `crates/mili-viz-server/tests/m8_cutplane.rs::cutplane_operator`.
+    - **Phase 4 M9 — slice operator**
+      ([`phase-4-m9.md`](phase-4-m9.md), Decisions 78–80). The
+      one additive `.proto` field (`slice_only: bool`). Reuses
+      M8 marching-tables; cap-only emit; scalar interpolation
+      linear along straddled edges; composes with cut. Gating
+      test `crates/mili-viz-server/tests/m9_slice.rs::slice_operator`.
+    - **Phase 5 M7 — render modes consuming `MVG3`**
+      ([`phase-5-m7.md`](phase-5-m7.md), Decisions 81–83).
+      `Translucent`/`Xray`/`Interior` `RenderMode` arms; the
+      `Edges`/`Wireframe` fallback path stays byte-stable for
+      older servers (VB-005 fix activates only when `MVG3` is
+      present). Gating test
+      `crates/mili-viz-client/tests/m7_render_modes.rs`.
+    - **Phase 5 M8 — cut-plane gizmo + Rendering→Cut UI**
+      ([`phase-5-m8.md`](phase-5-m8.md), Decisions 84–86).
+      `egui`-overlay gizmo (no new `wgpu` pipeline), 30 Hz
+      gesture-throttled preview + drag-end commit,
+      `Preferences → Interactive clip` suppress for low-bandwidth
+      links. Gating test
+      `crates/mili-viz-client/tests/m8_cut_gizmo.rs`.
+    - **Phase 5 M9 — slice gizmo + Rendering→Slice UI**
+      ([`phase-5-m9.md`](phase-5-m9.md), Decisions 87–89). Thin
+      sibling of M8: shared gizmo machinery, slice-cap
+      colormap-painted when a result is mapped. Gating test
+      `crates/mili-viz-client/tests/m9_slice_gizmo.rs`.
+
+    Ordering rationale: each Phase 5 Mn consumes Phase 4 Mn's
+    server contract, so the natural land order is M7 → M7,
+    M8 → M8, M9 → M9 (server first per pair; client follows
+    once the gating test ships). Independent of the still-open
+    Phase 5 M5 (remote mode) and Phase 6 M4–M6 — the batch can
+    interleave with either track.
 
 ## Update protocol
 
