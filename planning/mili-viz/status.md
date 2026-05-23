@@ -856,33 +856,81 @@ Each row flips to ✅ when its gating test lands.
       (28) + W3's `test_verifier.py` (43) + W2×W3 contract (1)
       + W4a's `test_harness.py` (17) all unchanged and green
       (112 always-on total).
-- [ ] **W5 — Inference provider seam.** 🟡 **Partial — Mock +
-      Replay landed (PR-3 with W4a); FunctionGemma + Anthropic
-      deferred to PR-5.** `LlmProvider` Protocol +
-      `ProviderOutput` dataclass in
-      `python/mili-llm-bench/src/mili_llm_bench/providers/base.py`,
-      `MockLlmProvider` (scripted, deterministic, with optional
-      per-call sleep for the harness-timeout test) and
-      `ReplayLlmProvider` (reads a `rollouts.jsonl`, replays the
-      assistant turns of one stored record) shipped — both
-      pure-Python with no LLM / GPU / network requirement.
-      `FunctionGemmaProvider` (HF transformers, the model card's
-      documented chat-template path) and `AnthropicProvider`
-      (frontier baseline + future teacher) deferred to PR-5 with
-      their own optional-dependency extras. The
-      Candle/llama.cpp/vLLM runtime swap from
-      [`agent-local-llm.md`](agent-local-llm.md) Decision 2
-      happens behind this seam later. Discharges §W5 partially —
-      every consumer (W4a tests, W4b driver-to-be) can already
-      build against the Protocol without the heavy deps.
-- [ ] **W6 — Bootstrap run + report.**
-      `mili-llm-bench run --provider functiongemma --scenarios
-      bootstrap.jsonl` produces `config.yaml`+`rollouts.jsonl`+
-      `summary.json`+`report.md` under
-      `data/posttraining/runs/<timestamp>-<provider>-<hash>/`.
-      **The v0 baseline L3 pass-rate is published from this report.**
-      Run the same against `--provider anthropic` for the frontier
-      ceiling. Discharges §W6 and closes the v0 acceptance gate.
+- [x] **W5 — Inference provider seam.** ✅ **Landed.** `LlmProvider`
+      Protocol + `ProviderOutput` dataclass in `providers/base.py`;
+      `MockLlmProvider` + `ReplayLlmProvider` shipped in PR-3 with W4a
+      (pure-Python, no LLM / GPU / network); **PR-5 lands the two
+      heavy providers behind their own extras**:
+      `FunctionGemmaProvider` (HF transformers via the model card's
+      documented `processor.apply_chat_template(messages,
+      tools=tools, ...)` path, parses the
+      `<start_function_call>...<end_function_call>` block to canonical
+      `[{"name", "arguments": dict}, ...]`; lazy imports
+      `transformers` / `torch` so the always-on test path stays clean;
+      pinnable `--functiongemma-revision` so the v0 number is
+      reproducible) and `AnthropicProvider` (official SDK, our
+      messages/tools converted to Anthropic's `tool_use`/`tool_result`
+      blocks + the developer-role message promoted to top-level
+      `system`; reads `ANTHROPIC_API_KEY` at call time, not import
+      time; **CRITICAL** `cache_control: {"type": "ephemeral"}` on
+      both the system block and the final tool entry — without that
+      pin the recurring frontier-baseline run is ~10x more expensive
+      than it needs to be, so a unit test pins the markers on the
+      request body to guard against silent regression; `tokens_used`
+      includes `usage.input_tokens + output_tokens +
+      cache_read_input_tokens + cache_creation_input_tokens`).
+      Discharges §W5. Heavy-dep gating tests
+      `python/mili-llm-bench/tests/test_providers_functiongemma.py`
+      (5 always-on parse-helper tests + 1 skip-on-absent model smoke
+      gated on `MILI_LLM_BENCH_RUN_FUNCTIONGEMMA_SMOKE=1`) and
+      `tests/test_providers_anthropic.py` (4 always-on conversion-
+      helper / prompt-caching pin tests via a fake SDK client + 1
+      skip-on-absent live-API smoke gated on `ANTHROPIC_API_KEY`).
+- [x] **W6 — Bootstrap run + report.** ✅ **Landed.** Three CLI
+      subcommands ship in `python/mili-llm-bench/src/mili_llm_bench/cli.py`:
+      `derive-schemas [--check]` (the operator-facing surface for the
+      W1 honest-diff gate), `run --provider {mock|replay|functiongemma|
+      anthropic}` (writes `config.yaml`+`rollouts.jsonl`+`summary.json`+
+      `report.md` under `--out`), and `replay --rollouts ...` (re-grades
+      a stored rollout file under the current verifier; self-contained
+      — each record reconstructs its scenario, no separate bootstrap
+      file needed). The pygriz dispatcher factory (`dispatchers/pygriz.py`
+      `pygriz_dispatcher_factory`) opens one `griz.Session` per scenario
+      and the W4b driver tears it down in a `finally` block via the new
+      `PygrizDispatcher.close()` so a 50-scenario run doesn't leak
+      processes. `report.md` carries the six required sections (headline
+      with provider/model/sysprompt hash, by_max_tier, by_failure_mode,
+      timing, per-intent breakdown, raw-fallback rate, artifact
+      pointers); `config.yaml` carries every falsifiability pin
+      (system_prompt_sha256, tools_sha256, scenarios_sha256, model id,
+      seed, step_cap, per_turn_timeout_s, bench_version, run_timestamp)
+      per baseline.md §"Acceptance gate" #5. The test seam is option (c)
+      — public `build_factories` / `build_replay_factories` /
+      `write_config_yaml` that tests call directly with
+      `provider_factory_override` + `dispatcher_factory_override` (no
+      hidden `--dispatcher` flag, no env-var hook). Heavy deps
+      (`transformers` / `torch` / `anthropic` / `pygriz`) lazy-import
+      inside the provider branch; a `sys.modules` test pins this.
+      Discharges §W6 **and closes the v0 acceptance gate.** Gating
+      tests `python/mili-llm-bench/tests/test_cli.py` (11 always-on:
+      `derive-schemas --check` byte-equality, `--out` round-trip,
+      `run --provider mock` end-to-end smoke via the public factory
+      seam, replay round-trip identity on `max_tier` per scenario,
+      replay drift detection on a postcondition change, `config.yaml`
+      pinned-field completeness, `--help` lists all four providers,
+      lazy-import gate via fresh `sys.modules` reload, unknown
+      provider rejected, `replay` not allowed through
+      `build_factories`, `derive-schemas --check` fail-on-drift) and
+      `tests/test_report.py` (6 always-on: per-intent rate math,
+      raw-fallback counting, failure-mode count-desc/name-asc sort,
+      tier-row zero-bucket completeness, headline falsifiability
+      pins, write round-trip). Acceptance smoke
+      `mili-llm-bench run --provider mock --scenarios
+      data/posttraining/eval/bootstrap.jsonl --out /tmp/v0-mock/`
+      verified locally to write all four artifacts on a no-GPU,
+      no-pygriz laptop. **The v0 acceptance gate is closed; the L4
+      decision tree (baseline.md §"After v0") becomes the next
+      trackable surface.**
 
 ### Post-v0 branches (decided after the W6 number is in hand)
 

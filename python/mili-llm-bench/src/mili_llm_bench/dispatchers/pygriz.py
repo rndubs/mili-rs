@@ -32,7 +32,9 @@ doesn't match any closed-set pattern.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+
+from ..scenarios import Scenario
 
 # ``pygriz`` is intentionally imported lazily — at adapter-construction
 # time, not at module-import time — so importing this module from
@@ -234,9 +236,23 @@ class PygrizDispatcher:
     ``dispatch`` call does (lazy via ``_import_pygriz()``). This keeps
     test-only imports of ``mili_llm_bench.dispatchers.pygriz`` cheap on
     a machine that does not have ``pygriz`` installed.
+
+    Carries a ``close()`` method the W4b driver calls in a ``finally``
+    block after each scenario; see ``pygriz_dispatcher_factory``'s
+    teardown story.
     """
 
     session: Any  # griz.Session — typed as Any so the import stays lazy.
+
+    def close(self) -> None:
+        s = self.session
+        if s is None:
+            return
+        try:
+            s.close()
+        except Exception:
+            pass
+        self.session = None
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -369,3 +385,68 @@ class PygrizDispatcher:
             "error": f"unknown tool {name!r}",
             "error_kind": "unknown_tool",
         }
+
+
+# ---------------------------------------------------------------------------
+# Factory for the W6 CLI — one live ``griz.Session`` per scenario, opened
+# on the scenario's fixture, torn down after the harness loop completes.
+# ---------------------------------------------------------------------------
+
+
+def pygriz_dispatcher_factory(
+    session_factory: Callable[[], Any] | None = None,
+) -> Callable[[Scenario], "PygrizDispatcher"]:
+    """Return a ``dispatcher_factory(scenario) -> PygrizDispatcher`` the
+    W4b driver consumes.
+
+    The returned factory opens a fresh ``griz.Session`` per scenario
+    (so per-scenario fixture state never leaks across the eval run),
+    opens the scenario's fixture, and hands a ``PygrizDispatcher``
+    back. ``session_factory`` defaults to ``griz.launch()`` — pass an
+    override for tests or to drive a remote server.
+
+    Teardown story (load-bearing — a 50-scenario eval leaks one session
+    per scenario without explicit teardown and OOMs on a long run, per
+    baseline.md §"Acceptance gate" cost note):
+
+    * Each ``PygrizDispatcher`` returned by the factory carries a
+      ``close()`` method (added below) that closes the live session.
+    * The driver invokes it after ``run_one_scenario`` returns; the CLI
+      wires that via ``run_eval``'s post-scenario callback.
+    """
+    if session_factory is None:
+        def _default_factory() -> Any:
+            griz = _import_pygriz()
+            return griz.launch()
+        session_factory = _default_factory
+
+    def factory(scenario: Scenario) -> "PygrizDispatcher":
+        session = session_factory()  # type: ignore[misc]
+        try:
+            session.open(scenario.fixture)
+        except Exception:
+            try:
+                session.close()
+            except Exception:
+                pass
+            raise
+        return PygrizDispatcher(session=session)
+
+    return factory
+
+
+def _close_dispatcher(dispatcher: Any) -> None:
+    """Best-effort teardown of a ``PygrizDispatcher`` returned by
+    ``pygriz_dispatcher_factory``. Swallows exceptions so one failing
+    teardown does not abort the rest of an eval run.
+    """
+    session = getattr(dispatcher, "session", None)
+    if session is None:
+        return
+    try:
+        session.close()
+    except Exception:
+        pass
+
+
+__all__ = ["PygrizDispatcher", "pygriz_dispatcher_factory"]

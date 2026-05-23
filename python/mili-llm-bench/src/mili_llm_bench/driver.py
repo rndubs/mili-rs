@@ -153,54 +153,66 @@ def run_one_scenario(
     """
     dispatcher = dispatcher_factory(scenario)
 
-    messages: list[dict[str, Any]] = [
-        {"role": "developer", "content": config.system_prompt},
-        {"role": "user", "content": scenario.instruction},
-    ]
+    try:
+        messages: list[dict[str, Any]] = [
+            {"role": "developer", "content": config.system_prompt},
+            {"role": "user", "content": scenario.instruction},
+        ]
 
-    turns: list[TurnResult] = []
-    start = time.monotonic()
-    completed_with_final_text = False
+        turns: list[TurnResult] = []
+        start = time.monotonic()
+        completed_with_final_text = False
 
-    for step_index in range(config.step_cap):
-        turn = harness.run_turn(
-            provider,
-            dispatcher,
-            messages,
-            tools,
-            step_index=step_index,
-            max_new_tokens=config.max_new_tokens,
-            temperature=config.temperature,
-            seed=config.seed,
-            timeout_s=config.per_turn_timeout_s,
-            registry=registry,
+        for step_index in range(config.step_cap):
+            turn = harness.run_turn(
+                provider,
+                dispatcher,
+                messages,
+                tools,
+                step_index=step_index,
+                max_new_tokens=config.max_new_tokens,
+                temperature=config.temperature,
+                seed=config.seed,
+                timeout_s=config.per_turn_timeout_s,
+                registry=registry,
+            )
+            turns.append(turn)
+
+            if turn.kind == "final_text":
+                completed_with_final_text = True
+                break
+            if turn.kind == "error" and turn.error_kind == "timeout":
+                _append_stop(messages, "timeout")
+                break
+            # tool_calls turn — keep looping.
+
+        if not completed_with_final_text and not any(
+            t.kind == "error" and t.error_kind == "timeout" for t in turns
+        ):
+            # Loop exhausted ``step_cap`` without ``final_text``.
+            _append_stop(messages, "step_cap_hit")
+
+        wall_ms_total = int((time.monotonic() - start) * 1000)
+
+        vr = verifier.verify(messages, scenario.postcondition.to_json())
+        return ScenarioRunResult(
+            scenario=scenario,
+            messages=messages,
+            verifier_result=vr,
+            turns=turns,
+            wall_ms_total=wall_ms_total,
         )
-        turns.append(turn)
-
-        if turn.kind == "final_text":
-            completed_with_final_text = True
-            break
-        if turn.kind == "error" and turn.error_kind == "timeout":
-            _append_stop(messages, "timeout")
-            break
-        # tool_calls turn — keep looping.
-
-    if not completed_with_final_text and not any(
-        t.kind == "error" and t.error_kind == "timeout" for t in turns
-    ):
-        # Loop exhausted ``step_cap`` without ``final_text``.
-        _append_stop(messages, "step_cap_hit")
-
-    wall_ms_total = int((time.monotonic() - start) * 1000)
-
-    vr = verifier.verify(messages, scenario.postcondition.to_json())
-    return ScenarioRunResult(
-        scenario=scenario,
-        messages=messages,
-        verifier_result=vr,
-        turns=turns,
-        wall_ms_total=wall_ms_total,
-    )
+    finally:
+        # Best-effort dispatcher teardown — a live ``griz.Session``
+        # leaks a process per scenario without this. Tests use
+        # ``FakeDispatcher`` (no ``close`` method) so the getattr-guard
+        # is a no-op for the always-on path.
+        close = getattr(dispatcher, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
