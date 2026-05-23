@@ -470,6 +470,35 @@ pub enum UiAction {
     /// Phase 5 M9 — toggle the slice gizmo overlay (Rendering → Slice
     /// row). Pure-client; no proto.
     SetSliceGizmoVisible(bool),
+    /// Phase 5 M6 — toggle the AI panel between the 28 px collapsed
+    /// rail and the 340 px expanded panel (wireframes §"L1" / §"L2").
+    /// Already applied to [`ShellState::ai`]; the action is observability-
+    /// only (no proto command).
+    SetAiExpanded(bool),
+    /// Phase 5 M6 — toggle the 📷 attach-frame pending flag on the
+    /// composer (`client.md` §"Vision is deliberate but agent-initiated").
+    /// Already applied; pure-client.
+    ToggleAttachFrame,
+    /// Phase 5 M6 — send a user-turn to the server-hosted agent via
+    /// the frozen `AgentChat` RPC. The windowed app pre-encodes the
+    /// pinned framebuffer via `CaptureFrame` when `attach_frame == true`.
+    AgentChat {
+        text: String,
+        attach_frame: bool,
+    },
+    /// Phase 5 M6 — barge-in. Calls the frozen `Interrupt` RPC for
+    /// the in-flight turn (empty `turn_id` = "current turn", per the
+    /// frozen-proto convention).
+    AgentInterrupt {
+        turn_id: String,
+    },
+    /// Phase 5 M6 — `↶ revert to here`. Lowers a captured
+    /// [`TurnSnapshot`] to its typed `SetState` / `Show` /
+    /// `View(SetCamera)` sequence (Decision 97) and executes them in
+    /// order; no `raw`.
+    AgentRevert {
+        turn_id: String,
+    },
 }
 
 /// Static fallback derived-result names, shown only until a real
@@ -684,6 +713,13 @@ pub struct ShellState {
     /// Whether the Rendering → Slice gizmo overlay is drawn over the
     /// viewport. Default `false`. Pure-client; no proto.
     pub slice_gizmo_visible: bool,
+    /// Phase 5 M6 AI Assistant panel state (`phase-5-m6.md` Decisions
+    /// 94–99 / `client.md` §"AI Assistant panel"). The
+    /// `cap_agent`-false default keeps the right dock as the 28 px
+    /// placeholder rail — byte-stable against M3 (`bug-tracker.md`
+    /// VB-001 — every prior composite-render gate is run with
+    /// `cap_agent = false`).
+    pub ai: crate::ai_panel::AiPanelState,
 }
 
 impl Default for ShellState {
@@ -728,6 +764,7 @@ impl Default for ShellState {
             interactive_clip: true,
             slice_plane: None,
             slice_gizmo_visible: false,
+            ai: crate::ai_panel::AiPanelState::default(),
         }
     }
 }
@@ -1242,10 +1279,20 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
             });
     }
 
-    // Collapsed AI rail (28 px) — placeholder only; the panel + agent
-    // loop are M6 (`phase-5-m3.md` Goal). Hidden in L3 focus mode
-    // (wireframes §"L3").
-    if !state.focus_mode {
+    // Phase 5 M6 (`phase-5-m6.md` Decisions 94–99): the right dock is
+    // now the AI Assistant — the 28 px collapsed rail (default L1) or
+    // the 340 px expanded panel (L2). When the server did not
+    // advertise `CAP_AGENT` the panel is hidden entirely
+    // (`scripting.md` capability-negotiation pattern); the byte-stable
+    // default (`cap_agent = false`) keeps the M3/M3.5/M4/M5 composite
+    // gate from painting any new panel (VB-001).
+    if !state.focus_mode && state.ai.cap_agent {
+        ai_dock(ui, state, &mut actions);
+    } else if !state.focus_mode {
+        // Capability absent: keep the 28 px placeholder rail so the
+        // central viewport sub-rect is unchanged from the
+        // pre-M6 layout (zero scene_frac drift for the
+        // composite-render gates that build a default ShellState).
         egui::Panel::right("ai")
             .resizable(false)
             .exact_size(28.0)
@@ -1760,19 +1807,193 @@ fn status_bar(ui: &mut egui::Ui, state: &ShellState) {
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.monospace(format!("fps {:.0}", state.fps));
-            // Honest local peer count, attached state only. The
-            // multi-client peer banner / real `n peer(s)` fan-out is
-            // M6 (`wireframe-parity.md` "Multi-client peer banner");
-            // an in-process session is exactly one local peer, so the
-            // truthful minimal is `(1 peer)`. Not-attached renders no
-            // peer cell — exactly as today — so the default-`ShellState`
-            // composite gate (VB-001) is unperturbed.
+            // Phase 5 M6 Decision 99 — peer count is the live
+            // `DELTA_AGENT` `Status.detail = "peers=N"` value when
+            // `CAP_AGENT` is advertised; otherwise the honest
+            // single-peer default the M5 status bar shipped. The
+            // default-`ShellState` composite-render gate (cap_agent
+            // false) keeps the byte-stable `(1 peer)` text (VB-001).
             if attached {
                 ui.separator();
-                ui.monospace("(1 peer)");
+                let n = if state.ai.cap_agent {
+                    state.ai.peer_count()
+                } else {
+                    1
+                };
+                if n == 1 {
+                    ui.monospace("(1 peer)");
+                } else {
+                    ui.monospace(format!("({n} peers)"));
+                }
             }
         });
     });
+}
+
+/// Phase 5 M6 — the right-dock AI Assistant panel
+/// (`griz_wgpu_wireframes/README.md` §"AI Assistant panel"). Two
+/// chrome arms: a 28 px collapsed rail with the vertical
+/// `AI ASSISTANT` label + status word (wireframes §"Collapsed state"),
+/// or the 340 px expanded panel with header + transcript + composer.
+/// Capability-gated by the caller (`state.ai.cap_agent`).
+fn ai_dock(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    use crate::ai_panel::TranscriptRow;
+    if state.ai.expanded {
+        egui::Panel::right("ai")
+            .resizable(true)
+            .default_size(340.0)
+            .min_size(260.0)
+            .show_inside(ui, |ui| {
+                // Header: AI ASSISTANT · status pill · › collapse glyph.
+                ui.horizontal(|ui| {
+                    ui.strong("AI ASSISTANT");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("›").on_hover_text("collapse").clicked() {
+                            state.ai.set_expanded(false);
+                            actions.push(UiAction::SetAiExpanded(false));
+                        }
+                        ui.label(state.ai.status.label());
+                    });
+                });
+                ui.separator();
+                // Transcript: scrollable; tool-call lines render
+                // dense per `client.md` §"AI Assistant panel".
+                let transcript_h = (ui.available_height() - 96.0).max(80.0);
+                egui::ScrollArea::vertical()
+                    .max_height(transcript_h)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        for row in &state.ai.rows.clone() {
+                            match row {
+                                TranscriptRow::User { text, .. } => {
+                                    ui.colored_label(ui.visuals().weak_text_color(), "you");
+                                    ui.label(text);
+                                }
+                                TranscriptRow::Assistant { text, .. } => {
+                                    ui.colored_label(ui.visuals().weak_text_color(), "claude");
+                                    ui.label(text);
+                                }
+                                TranscriptRow::Tool {
+                                    summary,
+                                    result,
+                                    complete,
+                                    ok,
+                                    ..
+                                } => {
+                                    let arrow = if *complete {
+                                        if *ok {
+                                            "▸"
+                                        } else {
+                                            "✕"
+                                        }
+                                    } else {
+                                        "…"
+                                    };
+                                    let body = if result.is_empty() {
+                                        format!("{arrow} {summary}")
+                                    } else {
+                                        format!("{arrow} {summary}     → {result}")
+                                    };
+                                    ui.monospace(body);
+                                }
+                                TranscriptRow::TurnBoundary { turn_id, summary } => {
+                                    ui.horizontal(|ui| {
+                                        ui.weak(format!("· {summary} ·"));
+                                        if ui
+                                            .small_button("↶ revert to here")
+                                            .on_hover_text(
+                                                "revert session to this turn's pre-turn snapshot",
+                                            )
+                                            .clicked()
+                                        {
+                                            actions.push(UiAction::AgentRevert {
+                                                turn_id: turn_id.clone(),
+                                            });
+                                        }
+                                    });
+                                }
+                                TranscriptRow::Interrupted { .. } => {
+                                    ui.colored_label(
+                                        ui.visuals().error_fg_color,
+                                        "✕ interrupted by user — turn cancelled",
+                                    );
+                                }
+                            }
+                        }
+                    });
+                ui.separator();
+                // Composer: attached-frame chip (when pending) +
+                // multi-line input + Send/Stop primary.
+                if state.ai.attach_frame_pending {
+                    ui.horizontal(|ui| {
+                        ui.monospace("📷 frame · pending");
+                        if ui.small_button("×").clicked() {
+                            state.ai.toggle_attach_frame();
+                            actions.push(UiAction::ToggleAttachFrame);
+                        }
+                    });
+                }
+                let placeholder =
+                    if matches!(state.ai.status, crate::ai_panel::AgentStatus::Interrupted,) {
+                        "follow up… (turn was interrupted)"
+                    } else {
+                        "ask…"
+                    };
+                ui.add(
+                    egui::TextEdit::multiline(&mut state.ai.composer)
+                        .desired_rows(2)
+                        .hint_text(placeholder)
+                        .desired_width(f32::INFINITY),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("📷").on_hover_text("attach frame").clicked() {
+                        state.ai.toggle_attach_frame();
+                        actions.push(UiAction::ToggleAttachFrame);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if state.ai.status.in_flight() {
+                            if ui
+                                .button("⏹ Stop")
+                                .on_hover_text("interrupt the agent")
+                                .clicked()
+                            {
+                                actions.push(UiAction::AgentInterrupt {
+                                    turn_id: state.ai.active_turn_id.clone().unwrap_or_default(),
+                                });
+                            }
+                        } else if ui.button("Send ↵").clicked() {
+                            if let Some(i) = state.ai.submit() {
+                                actions.push(UiAction::AgentChat {
+                                    text: i.text,
+                                    attach_frame: i.attach_frame,
+                                });
+                            }
+                        }
+                    });
+                });
+            });
+    } else {
+        egui::Panel::right("ai")
+            .resizable(false)
+            .exact_size(28.0)
+            .show_inside(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(8.0);
+                    // Click anywhere on the rail to expand
+                    // (wireframes §"Collapsed state").
+                    if ui
+                        .small_button("AI")
+                        .on_hover_text("expand AI Assistant")
+                        .clicked()
+                    {
+                        state.ai.set_expanded(true);
+                        actions.push(UiAction::SetAiExpanded(true));
+                    }
+                    ui.add_space(6.0);
+                    ui.weak(state.ai.status.label());
+                });
+            });
+    }
 }
 
 fn attach_card(ui: &mut egui::Ui, rect: egui::Rect) {

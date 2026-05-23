@@ -520,40 +520,86 @@ async fn subscription_fanout() {
     assert!(s.agent.unwrap().messages.is_empty());
 }
 
-// ── Frozen-stub UNIMPLEMENTED (Decision 7) + message round-trip ────
+// ── Agent surface — M1 frozen stubs lit up in M6 + message round-trip ─
+//
+// Originally `frozen_stubs_unimplemented` (Decision 7); Phase 5 M6
+// (phase-5-m6.md Decisions 94–96) lights up the wire so the panel
+// renders end-to-end. A deployment without a backend still rejects
+// `agent_chat` cleanly (now `ok=false` with a clear error, not
+// `Status::unimplemented`; the wire surface is implemented). The
+// message-round-trip leg of the gate is unchanged.
 #[tokio::test]
 async fn frozen_stubs_unimplemented() {
-    let (mut client, _h) = spawn_in_process(VizService::builder().agent(true).build())
+    // Phase 5 M6 Decision 94 — agent(true) without a backend means
+    // the capability advertises but the loop is not wired. The RPC
+    // returns ok=false with a clear "no backend configured" error
+    // instead of being silently unimplemented.
+    let (mut no_backend, _h0) = spawn_in_process(VizService::builder().agent(true).build())
         .await
         .unwrap();
-
-    let e = client
+    let reply = no_backend
         .agent_chat(Request::new(pb::AgentChatRequest {
             text: "hi".into(),
             ..Default::default()
         }))
         .await
-        .unwrap_err();
-    assert_eq!(e.code(), tonic::Code::Unimplemented);
-    assert!(e.message().contains("M6"), "must name the gating milestone");
+        .expect("agent_chat is implemented; the deployment policy is the failure")
+        .into_inner();
+    assert!(!reply.ok);
+    assert!(
+        reply.error.to_lowercase().contains("backend"),
+        "no-backend error names the missing piece: {}",
+        reply.error
+    );
 
-    let e = client
+    // Phase 5 M6 Decision 94 — wire in MockAgent and the same call
+    // succeeds with a turn_id the panel can later cancel.
+    let (mut client, _h) = spawn_in_process(
+        VizService::builder()
+            .agent_backend(mili_viz_server::MockAgent)
+            .build(),
+    )
+    .await
+    .unwrap();
+    let reply = client
+        .agent_chat(Request::new(pb::AgentChatRequest {
+            text: "hi".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(reply.ok, "MockAgent ⇒ AgentChat lit up: {}", reply.error);
+    assert!(!reply.turn_id.is_empty(), "turn_id allocated for Interrupt");
+
+    // Phase 5 M6 Decision 98 — Interrupt is always ok (server treats
+    // "stop whatever is happening" as a never-fail intent). Empty id =
+    // current turn per the frozen-proto convention.
+    let reply = client
         .interrupt(Request::new(pb::InterruptRequest::default()))
         .await
-        .unwrap_err();
-    assert_eq!(e.code(), tonic::Code::Unimplemented);
-    assert!(e.message().contains("M6"));
+        .unwrap()
+        .into_inner();
+    assert!(reply.ok);
 
-    let e = client
+    // Phase 5 M6 Decision 96 — CaptureFrame returns deterministic
+    // placeholder bytes of the requested extent / format. The
+    // production server-side wgpu offscreen swap is a separate
+    // milestone.
+    let reply = client
         .capture_frame(Request::new(pb::FrameRequest {
             width: 16,
             height: 16,
             format: "png".into(),
         }))
         .await
-        .unwrap_err();
-    assert_eq!(e.code(), tonic::Code::Unimplemented);
-    assert!(e.message().to_lowercase().contains("renderer"));
+        .unwrap()
+        .into_inner();
+    assert!(reply.ok, "CaptureFrame lit up");
+    assert_eq!(reply.width, 16);
+    assert_eq!(reply.height, 16);
+    assert_eq!(reply.format, "png");
+    assert!(!reply.image.is_empty(), "placeholder PNG is non-empty");
 
     // The frozen messages compile and round-trip on the wire.
     let ev = pb::StateDelta {

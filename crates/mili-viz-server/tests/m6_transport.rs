@@ -129,15 +129,23 @@ async fn remote_transport_grpc_and_flight_over_tcp() {
         .into_inner();
     assert!(!bad.compatible && !bad.mismatch_detail.is_empty());
 
-    // ── frozen stubs are UNIMPLEMENTED over the wire ─────────────────
-    let err = viz
+    // ── agent surface is reachable over the wire ─────────────────────
+    // Phase 5 M6 (phase-5-m6.md Decisions 94/95) — the M1 frozen stub
+    // is gone. Without a backend the call returns ok=false with a
+    // clear error (the wire is implemented, the deployment isn't
+    // configured); with one it succeeds. The M6 server-side gating
+    // gate (`m6_agent.rs`) covers the lit-up path; this M6 transport
+    // gate just verifies the wire reaches the new dispatch.
+    let reply = viz
         .agent_chat(Request::new(pb::AgentChatRequest {
             text: "hi".into(),
             ..Default::default()
         }))
         .await
-        .unwrap_err();
-    assert_eq!(err.code(), tonic::Code::Unimplemented);
+        .expect("the wire surface is implemented in M6")
+        .into_inner();
+    assert!(!reply.ok, "no backend ⇒ clean reject");
+    assert!(reply.error.to_lowercase().contains("backend"));
 
     // ── load + subscribe over the wire ───────────────────────────────
     let loaded = exec(

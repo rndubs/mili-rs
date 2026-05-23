@@ -127,6 +127,12 @@ pub struct Session {
     client: VizClient,
     transport: Transport,
     deltas: std::sync::mpsc::Receiver<pb::StateDelta>,
+    /// Server's advertised capabilities (`Hello` reply). Phase 5 M6
+    /// (`phase-5-m6.md` Decision 94): the client keys the AI Assistant
+    /// panel's existence off `CAP_AGENT`. The in-process
+    /// `connect_in_process` path also runs the handshake so the same
+    /// gate works without a TCP hop.
+    capabilities: Vec<String>,
 }
 
 /// Tune one tonic [`Endpoint`] for an HPC-latency hop
@@ -182,8 +188,36 @@ impl Session {
     /// Returns an error if the transport fails to connect, the
     /// subscription cannot open, or an initial `load` is rejected.
     pub async fn connect_in_process(root: Option<&str>) -> Result<Self, BoxErr> {
-        let svc = VizService::builder().build();
+        Self::connect_in_process_with(VizService::builder().build(), root).await
+    }
+
+    /// Spawn an in-process server backed by a caller-built
+    /// [`VizService`] (Phase 5 M6 — lets the windowed app plug in a
+    /// `MockAgent` via `agent_backend(...)` so the in-process arm
+    /// advertises `CAP_AGENT` and the AI Assistant panel lights up).
+    /// The transport / subscription / `load` flow is identical to
+    /// [`Session::connect_in_process`].
+    ///
+    /// # Errors
+    /// Returns an error if the transport fails to connect, the
+    /// subscription cannot open, or an initial `load` is rejected.
+    pub async fn connect_in_process_with(
+        svc: VizService,
+        root: Option<&str>,
+    ) -> Result<Self, BoxErr> {
         let (mut client, server) = spawn_in_process(svc.clone()).await?;
+
+        // Phase 5 M6: run Hello on the in-process arm too so the
+        // capability gate (CAP_AGENT) is detected consistently across
+        // transports.
+        let hello = client
+            .hello(Request::new(pb::HelloRequest {
+                protocol_version: pb::PROTOCOL_VERSION.to_string(),
+                client_id: "mili-viz-client".to_string(),
+                ..Default::default()
+            }))
+            .await?
+            .into_inner();
 
         let sub = client
             .subscribe(Request::new(pb::SubscribeRequest::default()))
@@ -198,6 +232,7 @@ impl Session {
                 _server: server,
             },
             deltas: rx,
+            capabilities: hello.capabilities,
         };
         run_initial_load(&mut s, root).await?;
         Ok(s)
@@ -254,6 +289,7 @@ impl Session {
             client,
             transport: Transport::Remote { flight },
             deltas: rx,
+            capabilities: hello.capabilities,
         };
         run_initial_load(&mut s, root).await?;
         Ok(s)
@@ -332,6 +368,99 @@ impl Session {
     #[must_use]
     pub fn is_remote(&self) -> bool {
         matches!(self.transport, Transport::Remote { .. })
+    }
+
+    /// The server's advertised capabilities from `Hello`. Phase 5 M6
+    /// — the AI Assistant panel keys off `CAP_AGENT` here.
+    #[must_use]
+    pub fn capabilities(&self) -> &[String] {
+        &self.capabilities
+    }
+
+    /// Whether the server advertised the `CAP_AGENT` capability.
+    #[must_use]
+    pub fn has_cap_agent(&self) -> bool {
+        self.capabilities
+            .iter()
+            .any(|c| c == mili_viz_proto::v1::CAP_AGENT)
+    }
+
+    /// Phase 5 M6 — start one agent turn via the frozen `AgentChat`
+    /// RPC. `attached_frame` is the optional pre-encoded framebuffer
+    /// the client pinned via [`Session::capture_frame`]. Returns the
+    /// server-allocated `turn_id` (passed to [`Session::interrupt`]
+    /// for barge-in) on success.
+    ///
+    /// # Errors
+    /// Returns an error if the transport fails or the server's
+    /// `AgentChatReply.ok == false` (no backend configured, etc.).
+    pub async fn agent_chat(
+        &mut self,
+        text: String,
+        attached_frame: Vec<u8>,
+        format: String,
+    ) -> Result<String, BoxErr> {
+        let attach_frame = !attached_frame.is_empty();
+        let req = pb::AgentChatRequest {
+            text,
+            attach_frame,
+            attached_frame,
+            attached_frame_format: format,
+        };
+        let mut r = Request::new(req);
+        r.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "mili-viz-client".parse()?);
+        let reply = self.client.agent_chat(r).await?.into_inner();
+        if !reply.ok {
+            return Err(format!("agent_chat failed: {}", reply.error).into());
+        }
+        Ok(reply.turn_id)
+    }
+
+    /// Phase 5 M6 — barge-in. Empty `turn_id` cancels the current
+    /// turn (the frozen-proto convention — see
+    /// `proto/mili_viz.proto:437`).
+    ///
+    /// # Errors
+    /// Returns an error if the transport fails. Server replies with
+    /// `ok=true` even when there is no active turn (the call's
+    /// semantics are "stop whatever is happening"); only an Err here
+    /// is a real failure.
+    pub async fn interrupt(&mut self, turn_id: String) -> Result<(), BoxErr> {
+        let mut r = Request::new(pb::InterruptRequest { turn_id });
+        r.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "mili-viz-client".parse()?);
+        let _ = self.client.interrupt(r).await?;
+        Ok(())
+    }
+
+    /// Phase 5 M6 — request a server-side framebuffer encode
+    /// (`CaptureFrame`). Decision 96: M6's server returns a
+    /// deterministic placeholder PNG/JPEG; production-grade
+    /// offscreen-render is a follow-up. Returns `(bytes, format)`.
+    ///
+    /// # Errors
+    /// Returns an error if the transport fails or the server reply's
+    /// `ok == false` (e.g. zero-extent request).
+    pub async fn capture_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: String,
+    ) -> Result<(Vec<u8>, String), BoxErr> {
+        let req = pb::FrameRequest {
+            width,
+            height,
+            format,
+        };
+        let mut r = Request::new(req);
+        r.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "mili-viz-client".parse()?);
+        let reply = self.client.capture_frame(r).await?.into_inner();
+        if !reply.ok {
+            return Err(format!("capture_frame failed: {}", reply.error).into());
+        }
+        Ok((reply.image, reply.format))
     }
 
     async fn fetch_blob(&mut self, ticket: &[u8]) -> Result<Vec<u8>, BoxErr> {

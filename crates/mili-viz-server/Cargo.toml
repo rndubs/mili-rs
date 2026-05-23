@@ -18,6 +18,10 @@ tokio-stream = { version = "0.1", features = ["sync", "net"] }
 tower = "0.5"
 hyper-util = "0.1"
 rayon = "1.10"
+# Phase 5 M6 Decision 96: encode CaptureFrame's placeholder PNG/JPEG
+# without standing up a server-side wgpu offscreen renderer (deferred).
+# default-features=false keeps the dep slim (PNG + JPEG codecs only).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 mili-viz-proto = { path = "../mili-viz-proto" }
@@ -25,6 +29,9 @@ prost = "0.14"
 tonic = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "time"] }
 tokio-stream = "0.1"
+# Phase 5 M6 — decode placeholder PNG/JPEG returned by CaptureFrame in
+# the M6 acceptance gate (Decision 96).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [lints]
 workspace = true
