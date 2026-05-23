@@ -1,5 +1,13 @@
 # `mili-viz` — Python scripting interface
 
+> **Status: ✅ RESOLVED design doc.** This is the original
+> architecture/rationale for `pygriz`. Implementation landed across
+> Phase 6 M1/M2/M3 — see [`phase-6-m1.md`](phase-6-m1.md),
+> [`phase-6-m2.md`](phase-6-m2.md), [`phase-6-m3.md`](phase-6-m3.md),
+> and the live status in [`status.md`](status.md). Phase 6 M4
+> (live sync), M5 (query/Arrow Flight), M6 (output/snapshot) are
+> the remaining work.
+
 A pip-installable Python package that drives a `mili-viz` session from
 **any** interpreter — VS Code, a venv, a notebook — without the
 Visit-style bundled-interpreter problem.

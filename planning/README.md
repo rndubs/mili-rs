@@ -63,24 +63,31 @@ internal milestones (documented in its subdirectory):
    bit-exact vs the upstream `AFileWriter` oracle; the last
    un-exercised writer edge (duplicate snames within a directory type)
    closed and gated. (`mili-py/phase-3.md`, `m4.md` decisions 22–26.)
-4. **Phase 4 — `mili-viz` server. ⏳ NOT STARTED — needs more
-   planning iterations before implementation.** Port griz's command
-   interpreter as the RPC surface. In-process Rust client first, then
-   split over Arrow Flight. Several design questions are still open;
-   see [`mili-viz/status.md`](mili-viz/status.md).
-5. **Phase 5 — `mili-viz` client. ⏳ NOT STARTED — gated on Phase 4
-   M1.** `wgpu` + `egui` viewer; remote mode over Flight when the
-   server runs on an HPC login node. See
+4. **Phase 4 — `mili-viz` server. ✅ COMPLETE.** Command-interpreter
+   RPC surface (frozen `mili_viz.proto`), in-process transport
+   (M1), real `mili-rs`-backed load/state-nav/geometry (M2), primal
+   result display (M3), selection + material visibility (M4), the
+   full derived family across M5/M5b/M5c/M5d, and the gRPC + Arrow
+   Flight TCP remote transport (M6). Single source of truth:
    [`mili-viz/status.md`](mili-viz/status.md).
+5. **Phase 5 — `mili-viz` client. 🟢 IN PROGRESS.** `wgpu` + `egui`
+   viewer. M1 (renderer skeleton), M2 (render server output), M3
+   (egui shell), M3.5 (bottom tabs), M4 (local view manipulation
+   + extensive MVP-polish) landed. **M5 (remote mode)** and **M6
+   (agent integration polish)** remaining. See
+   [`mili-viz/status.md`](mili-viz/status.md).
+6. **Phase 6 — `pygriz` scripting client. 🟢 IN PROGRESS.** A third
+   pure-Python client of the frozen `mili_viz.proto`. M1
+   (scaffold + connect/handshake), M2 (connection model +
+   server-side session file), M3 (Layer-1 object API + the
+   Layer-0 ≡ Layer-1 test) landed. **M4 (live sync)**, **M5 (query
+   payoff)**, **M6 (output + remote tuning)** remaining.
 
-**Phases 1–3 are done: the port is functionally complete and
-hard-gated against drift on both the Rust and Python sides.** Phases
-1–2 unblocked the existing Python user base; Phase 3 unblocked
-retiring `libmili`. **Phases 4–5 are the remaining work** and are a
-new subsystem (a command-language server + renderer), not more
-oracle-validated porting — they need their own design iterations
-before coding starts. The single-source-of-truth for that is the
-`mili-viz` status tracker.
+**Phases 1–3 are done and hard-gated against drift on both the Rust
+and Python sides; Phase 4 (the mili-viz server) is also complete
+and the frozen `mili_viz.proto` contract is what Phases 5 and 6
+build against.** The remaining work is the **client** (Phase 5
+M5/M6) and the **scripting Python client** (Phase 6 M4–M6).
 
 ## Layout
 

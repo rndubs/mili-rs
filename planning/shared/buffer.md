@@ -91,12 +91,12 @@ clone. The mapping is unmapped only when the last clone drops. This
 gives us the property that callers — Python or otherwise — cannot
 accidentally outlive the database; they hold their own refcount.
 
-## Open questions
+## Resolved
 
-- Whether to expose `MiliBuffer<T>` directly in the public `mili-rs`
-  API or hide it behind a higher-level `Results` type that returns
-  `ndarray::ArrayView`. Leaning toward the higher-level type for
-  ergonomics, with the raw buffer reachable via an escape hatch.
-- Whether to support a "lazy byteswap" mode where we swap in-place
-  into the mmap (requires `MmapMut`). Probably no — the byteswap copy
-  is amortized over many reads of the same buffer if we cache.
+- **Public surface.** `MiliBuffer<T>` stays `pub(crate)`; callers
+  consume `ndarray::Array<T,_>` / `ArrayView` returned by
+  `Database::query` / `nodes` / `connectivity`. See
+  [`../mili-rs/plan.md`](../mili-rs/plan.md) § "FFI integration
+  plan".
+- **Lazy in-place byteswap.** Not pursued — the byteswap copy is
+  amortized over repeated reads of the same buffer when cached.

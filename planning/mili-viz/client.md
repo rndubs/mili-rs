@@ -1,5 +1,13 @@
 # `mili-viz` — client wireframe & AI-first design
 
+> **Status: ✅ RESOLVED design doc.** Original wireframe + AI-panel
+> rationale; implementation landed across Phase 5 M1–M4 + M3.5 (see
+> the respective `phase-5-mN.md` summaries). The AI Assistant panel
+> itself (M6 in this doc's "Phasing") is deferred — Phase 5 M5
+> (remote mode) and M6 (agent integration polish) are the remaining
+> Phase 5 work. Live status: [`status.md`](status.md). Region-by-
+> region wireframe coverage: [`wireframe-parity.md`](wireframe-parity.md).
+
 The `wgpu` + `egui` viewer. This pins what the window *looks like* and
 how the headline feature — an AI assistant that can drive, see, and
 debug a session — fits the existing split without becoming a second

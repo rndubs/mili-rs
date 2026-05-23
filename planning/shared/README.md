@@ -49,17 +49,19 @@ byteswap. The byteswap is lazy and recorded on the `MiliBuffer` — see
 
 ### Test corpus
 
-Phase 0 work item: gather a small set of reference databases that
-exercise the format corners we care about — both endiannesses, both
-subrecord orderings (RESULT_ORDERED, OBJECT_ORDERED), mixed element
-classes, time-independent params, multiple state files. The
-mili-python tests under `reference/mili-python/tests/` already point at
-several such databases and become our initial corpus.
+The fixtures under `reference/mili-python/tests/data/`,
+`reference/mili/test/` (including `xmilics/`) and the v3
+`reference/mili-python/tests/data/v3/` set serve as the corpus.
+`scripts/setup-parity.sh` is the canonical setup; bit-exact parity
+vs the `mili` Python oracle is gated by `crates/mili-rs/tests/
+parity_*.rs` (the `parity` feature) and `crates/mili-py/tests/
+test_upstream_readpath.py` (the redirect harness).
 
 ### Naming
 
 - Rust crates: `mili-rs`, `mili-py`, `mili-viz-{proto,server,client}`.
-- Python package name stays `mili` for drop-in compatibility (the
-  PyO3 `cdylib` is named `mili._native`, re-exported by a thin Python
-  shim).
+- Python distribution / import: **`milox`** (`mili` + "ox" — the
+  upstream `mili` name is taken on PyPI). The PyO3 `cdylib` is
+  `milox._native`, re-exported by a thin Python shim.
+- Scripting client: PyPI **`pygriz`**, import as **`griz`**.
 - The viz binaries are `mili-viz-server` and `mili-viz` (the client).
