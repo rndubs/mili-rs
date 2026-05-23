@@ -334,17 +334,25 @@ expanded by `scripting.md` / `client.md`. None started.
       driving the same code paths) + three always-on unit tests
       on `clip_element` (straddle/all-keep/all-drop cases on a
       unit hex).
-- [ ] **M9 — slice operator.** 🟡 **Planned.** Cap-only sister to
-      M8. Adds the **second** post-M1 proto change: an additive
-      `optional bool slice_only = 8;` on `CutPlane` (proto3
-      default `false` → byte-compatible with M8-only deploys; the
-      `Hello`-handshake major bump covers the version step).
-      Server reuses the M8 marching-tables; scalar interpolation
-      is linear along straddled element-edges; cap triangles
-      tagged `tri_material == u32::MAX - 2`. Composes with cut
+- [x] **M9 — slice operator.** ✅ **Landed.** Cap-only sister to
+      M8. Adds the **second** post-M1 proto change (the additive
+      `optional bool slice_only = 8;` on `CutPlane`, Decision 78);
+      proto3 default `false` keeps an M8-only client byte-compatible.
+      Server reuses the M8 per-element clip module with a `ClipMode`
+      arm — `Slice` skips the kept-side polygons + element-edges,
+      keeps the cap (tagged `tri_material == u32::MAX - 2`,
+      Decision 80). Scalar interpolation is linear along the
+      straddled element-edges (Decision 79); cap centroids are the
+      mean of their polygon's resolved scalars. Cut + slice
+      compose into one `MVG3` blob via a new `append_clip` helper
       (independent session-state fields). Scope/decisions:
       [`phase-4-m9.md`](phase-4-m9.md) (78–80). Gating test
-      `crates/mili-viz-server/tests/m9_slice.rs::slice_operator`.
+      `crates/mili-viz-server/tests/m9_slice.rs::slice_operator`
+      (skip-on-absent against `basic1.pltA`) + three additional
+      always-on `clip` unit tests (Slice mode drops kept hull on
+      straddle, returns None on all-keep, scalar lerps to 5 at
+      0.5 along a 0→10 edge). **`mili_viz.proto` is again frozen
+      from here forward unless a comparable bar is met.**
 
 ## Phase 5 — `mili-viz` client (IN PROGRESS — M1–M4 + MVP polish ✅ landed)
 

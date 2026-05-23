@@ -240,6 +240,7 @@ fn sample_commands() -> Vec<(&'static str, pb::command::Cmd)> {
                 ny: 0.0,
                 nz: 0.0,
                 relative: false,
+                slice_only: None,
             }),
         ),
         (
@@ -252,6 +253,7 @@ fn sample_commands() -> Vec<(&'static str, pb::command::Cmd)> {
                 ny: 0.0,
                 nz: 1.0,
                 relative: true,
+                slice_only: None,
             }),
         ),
         ("cmap", Cmd::Colormap(pb::Colormap { name: "jet".into() })),

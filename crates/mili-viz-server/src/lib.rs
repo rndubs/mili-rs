@@ -102,6 +102,10 @@ struct Session {
     // material toggle. Cleared by a `cutpln` with a zero-length
     // normal (the doc's "clear" sentinel).
     cut: Option<clip::Plane>,
+    // M9 slice operator (phase-4-m9.md Decision 80): a *second*
+    // session-level plane, independent of `cut`. Both compose into
+    // one MVG3 blob.
+    slice: Option<clip::Plane>,
     // In-process geometry store keyed by the frozen
     // `GeometryRef.flight_ticket` (phase-4-m2.md Decision 10). M6
     // swaps this for an Arrow-Flight `DoGet` over TCP.
@@ -145,13 +149,41 @@ impl Session {
         let scalar = topo.vertex_scalar(db, svar, self.state);
         let (min, max) = scalar.as_ref().map_or((0.0, 0.0), |(_, lo, hi)| (*lo, *hi));
         let materials = &self.materials;
-        let (blob, layout, num_indices, num_vertices) = if let Some(plane) = &self.cut {
-            // M8 cut-plane operator: replace the geometry with the
-            // per-element clip (phase-4-m8.md Decisions 75–77).
-            // Scalar interpolation along straddled edges is M9; here
-            // the cut blob has no scalar column.
+        let (blob, layout, num_indices, num_vertices) = if self.cut.is_some() || self.slice.is_some()
+        {
+            // M8/M9: cut/slice operators (phase-4-m8.md, phase-4-m9.md).
+            // Per-vertex scalar at existing nodes feeds linear edge
+            // blends along the straddled edges (Decision 79).
             let coords = topo.coords_at(db, self.state);
-            let cb = clip::clip_topology(topo, &coords, plane);
+            let base_n_verts = coords.len() / 3;
+            let scalar_in: Option<Vec<f32>> = scalar.as_ref().map(|(s, _, _)| s.clone());
+            let scalar_ref: Option<&[f32]> = scalar_in.as_deref();
+
+            // Always start from a Cut pass (kept hull + cut cap) when
+            // a cut is active; otherwise an empty hull from a Slice
+            // pass.
+            let cb = if let Some(plane) = &self.cut {
+                clip::clip_topology(topo, &coords, scalar_ref, plane, clip::ClipMode::Cut)
+            } else {
+                // No cut plane → start from an empty buffer with the
+                // base coords/scalar.
+                clip::ClipBuffers {
+                    verts: coords.clone(),
+                    indices: Vec::new(),
+                    tri_material: Vec::new(),
+                    tri_flags: Vec::new(),
+                    edges: Vec::new(),
+                    scalar: scalar_in.clone(),
+                }
+            };
+            let cb = if let Some(plane) = &self.slice {
+                let slice_buf =
+                    clip::clip_topology(topo, &coords, scalar_ref, plane, clip::ClipMode::Slice);
+                clip::append_clip(cb, slice_buf, base_n_verts)
+            } else {
+                cb
+            };
+
             let nv = (cb.verts.len() / 3) as u64;
             let n_idx = cb.indices.len() as u64;
             let buf = geometry::MeshTopology::pack_mvg3_buffers(
@@ -160,6 +192,7 @@ impl Session {
                 &cb.tri_material,
                 &cb.tri_flags,
                 &cb.edges,
+                cb.scalar.as_deref(),
             );
             (buf, geometry::LAYOUT_VOL, n_idx, nv)
         } else {
@@ -542,14 +575,19 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             (D::DeltaResult, P::Result(r))
         }
         Cmd::Cutplane(cp) => {
-            // M8 cut-plane operator (phase-4-m8.md). A zero-length
-            // normal clears the cut (Decision 77). Otherwise the
-            // plane is stored on the session and the next geometry
-            // emit re-clips. We re-emit immediately here so the
-            // client sees the cut hull without an extra round-trip;
-            // the new blob rides the standard `ResultState.geometry`
-            // `GeometryRef`.
-            s.cut = clip::Plane::from_proto(&cp);
+            // M8/M9 cut-plane + slice operators (phase-4-m8.md,
+            // phase-4-m9.md). `slice_only=true` lands the plane in
+            // `Session.slice`; `slice_only=false` lands it in
+            // `Session.cut`. The two compose (Decision 80). A
+            // zero-length normal clears whichever bucket the call
+            // addresses.
+            let slice_only = cp.slice_only.unwrap_or(false);
+            let new_plane = clip::Plane::from_proto(&cp);
+            if slice_only {
+                s.slice = new_plane;
+            } else {
+                s.cut = new_plane;
+            }
             // Preserve the existing result (result/component/min/max
             // stay byte-stable across cut on/off — phase-4-m8.md
             // Decision 75); only the geometry blob changes.

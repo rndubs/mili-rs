@@ -193,6 +193,7 @@ async fn cutplane_operator() {
         ny: 0.0,
         nz: 0.0,
         relative: false,
+        slice_only: None,
     };
     let cut = set_cut(&mut client, &mut sub, &svc, plane).await;
     assert!(

@@ -371,6 +371,10 @@ pub fn parse_line(line: &str) -> Result<Cmd, String> {
             ny: pf(rest.get(4).ok_or("ny")?, "ny")?,
             nz: pf(rest.get(5).ok_or("nz")?, "nz")?,
             relative: verb == "cutrpln",
+            // phase-4-m9.md Decision 78: optional trailing `slice`
+            // keyword toggles slice mode. The 7-arg form stays
+            // byte-compatible with M8 callers.
+            slice_only: rest.get(6).map(|s| *s == "slice"),
         })),
         "cmap" => Ok(Cmd::Colormap(pb::Colormap {
             name: rest.first().ok_or("cmap: missing name")?.to_string(),

@@ -14,12 +14,25 @@ use rayon::prelude::*;
 
 use crate::geometry::{element_edges_table, faces_table, MeshTopology, Superclass};
 
-/// Reserved per-triangle material id for cap triangles
-/// (phase-4-m8.md "What lands" — colormap treats `u32::MAX - 1` as
-/// neutral grey because the cap is a synthetic surface, not a material
-/// face). Distinct from [`crate::geometry::INTERIOR_SENTINEL`]
+/// Reserved per-triangle material id for cut-plane cap triangles
+/// (phase-4-m8.md). Distinct from [`crate::geometry::INTERIOR_SENTINEL`]
 /// (`u32::MAX`).
 pub const CAP_MATERIAL: u32 = u32::MAX - 1;
+
+/// Reserved per-triangle material id for slice-plane cap triangles
+/// (phase-4-m9.md Decision 80). Distinct from [`CAP_MATERIAL`] so the
+/// client can render cut vs slice caps differently without needing
+/// out-of-band intent.
+pub const SLICE_MATERIAL: u32 = u32::MAX - 2;
+
+/// Emission policy for [`clip_topology`] (phase-4-m9.md Decision 79).
+/// `Cut` reproduces M8's closed clipped hull; `Slice` emits only the
+/// plane-element intersection (the cap, tagged with [`SLICE_MATERIAL`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipMode {
+    Cut,
+    Slice,
+}
 
 /// Plane equation `(p - origin) · normal >= 0` defines the keep side.
 /// When `relative` is set, the kept half-space is flipped (the
@@ -63,27 +76,50 @@ impl Plane {
 /// Output buffers for an `MVG3` clipped emit. `verts` carries the
 /// state's coords concatenated with any new intersection vertices
 /// (intersections are appended in element-encounter order).
+///
+/// `scalar` is `Some` iff the caller supplied per-vertex scalars; cap
+/// vertices get linear interpolation along their straddled edge
+/// (`phase-4-m9.md` Decision 79); cap centroid scalars are the mean
+/// of the polygon vertices.
 pub struct ClipBuffers {
     pub verts: Vec<f32>,
     pub indices: Vec<u32>,
     pub tri_material: Vec<u32>,
     pub tri_flags: Vec<u32>,
     pub edges: Vec<u32>,
+    pub scalar: Option<Vec<f32>>,
 }
 
 /// Per-element output, accumulated by the parallel pass and merged
 /// sequentially so vertex ids stay deterministic.
 struct PerElem {
     new_verts: Vec<[f32; 3]>,
+    /// Per-`new_verts` entry: linear interpolation parameters
+    /// `(corner_a, corner_b, t)` so the merge step can resolve the
+    /// scalar at this new vertex given the global per-vertex scalar
+    /// array. Centroid entries use `corner_a == u32::MAX` and stash
+    /// the precomputed mean of the polygon scalars as `t`.
+    new_vert_scalar: Vec<NewVertScalar>,
     // Kept-side triangles, vertex refs (Local(corner) or New(idx into
     // new_verts)) — resolved to global indices at merge time.
     kept_tris: Vec<[VertexRef; 3]>,
     kept_mat: Vec<u32>,
     cap_tris: Vec<[VertexRef; 3]>,
+    cap_mat: u32,
     // Edge refs (corner-corner or corner-new or new-new) for the
     // wireframe pass: kept portions of original element edges + cap
     // boundary edges.
     edges: Vec<[VertexRef; 2]>,
+}
+
+#[derive(Clone, Copy)]
+enum NewVertScalar {
+    /// Linear blend of `scalar[a] (1-t) + scalar[b] t`. Used at
+    /// straddled-edge intersection points (Decision 79).
+    Edge { a: u32, b: u32, t: f32 },
+    /// Cap centroid — mean of the polygon-vertex scalars; filled in
+    /// at merge time once the polygon scalars are resolved.
+    Centroid,
 }
 
 #[derive(Clone, Copy)]
@@ -104,25 +140,23 @@ fn lerp(a: &[f32; 3], b: &[f32; 3], t: f64) -> [f32; 3] {
     ]
 }
 
-/// Linear-edge intersection: returns the point where signed distance
-/// transitions through zero between two corners with signed distances
-/// `da` (>= 0, keep side) and `db` (< 0, drop side). Pre-condition:
-/// `da * db < 0`.
-#[inline]
-fn intersect(p_a: &[f32; 3], p_b: &[f32; 3], da: f64, db: f64) -> [f32; 3] {
-    let t = da / (da - db);
-    lerp(p_a, p_b, t)
-}
-
 /// Clip a single element against the plane (phase-4-m8.md Decisions
-/// 75–76). Per-element only — no global state.
+/// 75–76; phase-4-m9.md Decision 79 adds the `slice_only` branch).
+/// Per-element only — no global state. `cap_mat` is the per-tri
+/// material id used for cap output (CAP_MATERIAL for cut,
+/// SLICE_MATERIAL for slice).
 fn clip_element(
     sc: Superclass,
     corner_global: &[u32],
     corner_pos: &[[f32; 3]],
     material: u32,
     plane: &Plane,
+    mode: ClipMode,
 ) -> Option<PerElem> {
+    let cap_mat = match mode {
+        ClipMode::Cut => CAP_MATERIAL,
+        ClipMode::Slice => SLICE_MATERIAL,
+    };
     let n = corner_global.len();
     let dists: Vec<f64> = corner_pos.iter().map(|p| plane.signed_distance(p)).collect();
     let eps = 1e-9_f64;
@@ -136,14 +170,16 @@ fn clip_element(
         return None;
     }
     if all_keep {
-        // All-keep: emit element faces verbatim (no straddle, no cap).
+        // All-keep: in Cut mode, emit element faces verbatim; in
+        // Slice mode, contribute nothing (the plane misses).
+        if mode == ClipMode::Slice {
+            return None;
+        }
         let mut kept_tris: Vec<[VertexRef; 3]> = Vec::new();
         for face in faces {
             if face.iter().any(|&li| li >= n) {
                 continue;
             }
-            // Fan-triangulate the face. Cap polygons (the new cut
-            // face) are not present for all-keep elements.
             for i in 1..face.len() - 1 {
                 kept_tris.push([
                     VertexRef::Existing(corner_global[face[0]]),
@@ -164,9 +200,11 @@ fn clip_element(
         }
         return Some(PerElem {
             new_verts: Vec::new(),
+            new_vert_scalar: Vec::new(),
             kept_tris,
             kept_mat,
             cap_tris: Vec::new(),
+            cap_mat,
             edges: edges_out,
         });
     }
@@ -174,6 +212,7 @@ fn clip_element(
     // Straddle: build per-edge intersections (deduped within the
     // element by sorted-corner pair).
     let mut new_verts: Vec<[f32; 3]> = Vec::new();
+    let mut new_vert_scalar: Vec<NewVertScalar> = Vec::new();
     let mut isect: std::collections::HashMap<(usize, usize), u32> =
         std::collections::HashMap::new();
     let mut intersect_for = |a: usize, b: usize| -> u32 {
@@ -181,14 +220,24 @@ fn clip_element(
         if let Some(&idx) = isect.get(&key) {
             return idx;
         }
-        let (da, db, pa, pb) = if dists[a] >= 0.0 {
-            (dists[a], dists[b], &corner_pos[a], &corner_pos[b])
-        } else {
-            (dists[b], dists[a], &corner_pos[b], &corner_pos[a])
-        };
-        let p = intersect(pa, pb, da, db);
+        let da = dists[a];
+        let db = dists[b];
+        // Interpolation factor along edge (a → b), parameter at which
+        // signed distance hits zero. Always represent the t-param
+        // along the (key.0 → key.1) edge so the merger can do the
+        // scalar blend regardless of which side was "a".
+        let (lo, hi) = (key.0, key.1);
+        let (d_lo, d_hi, p_lo, p_hi) = (dists[lo], dists[hi], &corner_pos[lo], &corner_pos[hi]);
+        let t = d_lo / (d_lo - d_hi);
+        let p = lerp(p_lo, p_hi, t);
         let idx = new_verts.len() as u32;
         new_verts.push(p);
+        new_vert_scalar.push(NewVertScalar::Edge {
+            a: corner_global[lo],
+            b: corner_global[hi],
+            t: t as f32,
+        });
+        let _ = (da, db);
         isect.insert(key, idx);
         idx
     };
@@ -196,7 +245,9 @@ fn clip_element(
     let mut kept_tris: Vec<[VertexRef; 3]> = Vec::new();
     let mut edges_out: Vec<[VertexRef; 2]> = Vec::new();
 
-    // Kept-side polygons via Sutherland–Hodgman per face.
+    // Kept-side polygons via Sutherland–Hodgman per face. In Slice
+    // mode we still walk the faces (to compute intersection points
+    // and the cap), but discard the kept polygons.
     for face in faces {
         if face.iter().any(|&li| li >= n) {
             continue;
@@ -218,7 +269,7 @@ fn clip_element(
                 poly.push(VertexRef::New(intersect_for(a, b)));
             }
         }
-        if poly.len() >= 3 {
+        if mode == ClipMode::Cut && poly.len() >= 3 {
             for i in 1..poly.len() - 1 {
                 kept_tris.push([poly[0], poly[i], poly[i + 1]]);
             }
@@ -226,31 +277,34 @@ fn clip_element(
     }
     let kept_mat = vec![material; kept_tris.len()];
 
-    // Kept-side portions of the original element edges (so the
-    // wireframe stays clean).
-    for [a, b] in elem_edges {
-        if *a >= n || *b >= n {
-            continue;
-        }
-        let da = dists[*a];
-        let db = dists[*b];
-        let a_kept = da >= -eps;
-        let b_kept = db >= -eps;
-        if a_kept && b_kept {
-            edges_out.push([
-                VertexRef::Existing(corner_global[*a]),
-                VertexRef::Existing(corner_global[*b]),
-            ]);
-        } else if a_kept && !b_kept {
-            edges_out.push([
-                VertexRef::Existing(corner_global[*a]),
-                VertexRef::New(intersect_for(*a, *b)),
-            ]);
-        } else if !a_kept && b_kept {
-            edges_out.push([
-                VertexRef::New(intersect_for(*a, *b)),
-                VertexRef::Existing(corner_global[*b]),
-            ]);
+    // Kept-side portions of the original element edges (Cut only;
+    // Slice emits no element edges — its only wireframe is the cap
+    // boundary).
+    if mode == ClipMode::Cut {
+        for [a, b] in elem_edges {
+            if *a >= n || *b >= n {
+                continue;
+            }
+            let da = dists[*a];
+            let db = dists[*b];
+            let a_kept = da >= -eps;
+            let b_kept = db >= -eps;
+            if a_kept && b_kept {
+                edges_out.push([
+                    VertexRef::Existing(corner_global[*a]),
+                    VertexRef::Existing(corner_global[*b]),
+                ]);
+            } else if a_kept && !b_kept {
+                edges_out.push([
+                    VertexRef::Existing(corner_global[*a]),
+                    VertexRef::New(intersect_for(*a, *b)),
+                ]);
+            } else if !a_kept && b_kept {
+                edges_out.push([
+                    VertexRef::New(intersect_for(*a, *b)),
+                    VertexRef::Existing(corner_global[*b]),
+                ]);
+            }
         }
     }
 
@@ -340,6 +394,11 @@ fn clip_element(
             ];
             let centroid_idx = new_verts.len() as u32;
             new_verts.push(centroid);
+            // Centroid scalar = mean of cap polygon vertex scalars;
+            // we can't compute it here (no scalar in scope), so the
+            // merger fills it in by averaging the resolved scalars.
+            // Stash a placeholder; the merge resolves it.
+            new_vert_scalar.push(NewVertScalar::Centroid);
             for i in 0..ordered.len() {
                 let a = ordered[i];
                 let b = ordered[(i + 1) % ordered.len()];
@@ -355,26 +414,36 @@ fn clip_element(
 
     Some(PerElem {
         new_verts,
+        new_vert_scalar,
         kept_tris,
         kept_mat,
         cap_tris,
+        cap_mat,
         edges: edges_out,
     })
 }
 
 /// Build the clipped volumetric output for the entire mesh
-/// (phase-4-m8.md Decision 76 — `rayon` parallel-per-element). The
+/// (phase-4-m8.md Decision 76 / phase-4-m9.md Decisions 79–80). The
 /// `verts` buffer starts as the state's coords and grows by the
 /// concatenated per-element intersection points; per-element vertex
 /// refs are resolved sequentially after the parallel pass so the
 /// global vertex ids are deterministic across runs.
+///
+/// When `base_scalar` is `Some`, the output `scalar` carries
+/// per-vertex values: existing nodes get the input scalar; new
+/// intersection vertices get the linear blend along the straddled
+/// element-edge (Decision 79); cap centroids get the mean of the
+/// polygon vertex scalars.
 #[must_use]
-pub fn clip_topology(topo: &MeshTopology, coords: &[f32], plane: &Plane) -> ClipBuffers {
+pub fn clip_topology(
+    topo: &MeshTopology,
+    coords: &[f32],
+    base_scalar: Option<&[f32]>,
+    plane: &Plane,
+    mode: ClipMode,
+) -> ClipBuffers {
     let node_count = coords.len() / 3;
-    // (class_index, element_index) → per-element output. Flatten the
-    // class/element nesting into one parallel iterator so rayon can
-    // saturate; collect retains source order for the deterministic
-    // sequential merge.
     let work: Vec<(usize, usize)> = topo
         .elem_class_summary()
         .iter()
@@ -402,11 +471,12 @@ pub fn clip_topology(topo: &MeshTopology, coords: &[f32], plane: &Plane) -> Clip
                     coords[nid * 3 + 2],
                 ]);
             }
-            clip_element(sc, row, &corner_pos, mat, plane)
+            clip_element(sc, row, &corner_pos, mat, plane, mode)
         })
         .collect();
 
     let mut verts: Vec<f32> = coords.to_vec();
+    let mut scalar: Option<Vec<f32>> = base_scalar.map(<[f32]>::to_vec);
     let mut indices: Vec<u32> = Vec::new();
     let mut tri_material: Vec<u32> = Vec::new();
     let mut tri_flags: Vec<u32> = Vec::new();
@@ -421,8 +491,40 @@ pub fn clip_topology(topo: &MeshTopology, coords: &[f32], plane: &Plane) -> Clip
 
     for out in outputs.into_iter().flatten() {
         let vert_base = (verts.len() / 3) as u32;
-        for v in &out.new_verts {
+        for (i, v) in out.new_verts.iter().enumerate() {
             verts.extend_from_slice(v);
+            // Resolve scalar at this new vertex (Decision 79).
+            if let (Some(s_out), Some(s_in)) = (scalar.as_mut(), base_scalar) {
+                let val = match out.new_vert_scalar[i] {
+                    NewVertScalar::Edge { a, b, t } => {
+                        let sa = s_in.get(a as usize).copied().unwrap_or(f32::NAN);
+                        let sb = s_in.get(b as usize).copied().unwrap_or(f32::NAN);
+                        sa + (sb - sa) * t
+                    }
+                    NewVertScalar::Centroid => {
+                        // Mean of the previously-pushed polygon
+                        // scalars from THIS element. They are the
+                        // already-appended new_verts entries (Edge
+                        // type) in [vert_base, vert_base + i).
+                        let start = vert_base as usize;
+                        let here = (vert_base as usize) + i;
+                        let mut sum = 0.0_f32;
+                        let mut cnt = 0u32;
+                        for &s in &s_out[start..here] {
+                            if s.is_finite() {
+                                sum += s;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt == 0 {
+                            f32::NAN
+                        } else {
+                            sum / cnt as f32
+                        }
+                    }
+                };
+                s_out.push(val);
+            }
         }
         for (tri, &mat) in out.kept_tris.iter().zip(&out.kept_mat) {
             indices.push(resolve(&tri[0], vert_base));
@@ -435,7 +537,7 @@ pub fn clip_topology(topo: &MeshTopology, coords: &[f32], plane: &Plane) -> Clip
             indices.push(resolve(&tri[0], vert_base));
             indices.push(resolve(&tri[1], vert_base));
             indices.push(resolve(&tri[2], vert_base));
-            tri_material.push(CAP_MATERIAL);
+            tri_material.push(out.cap_mat);
             tri_flags.push(0);
         }
         for e in &out.edges {
@@ -450,7 +552,53 @@ pub fn clip_topology(topo: &MeshTopology, coords: &[f32], plane: &Plane) -> Clip
         tri_material,
         tri_flags,
         edges,
+        scalar,
     }
+}
+
+/// Compose a cut blob with an additional slice clip (phase-4-m9.md
+/// Decision 80). The two operations are independent — the slice
+/// sees the full mesh, not just the kept side of the cut — so we
+/// run them as two passes and concatenate the outputs. `Existing`
+/// vertex refs in the slice's pass index into the same `coords`
+/// base, so the merge just rebases the slice's new verts by the
+/// cut blob's existing vertex count.
+#[must_use]
+pub fn append_clip(mut into: ClipBuffers, mut tail: ClipBuffers, base_n_verts: usize) -> ClipBuffers {
+    // The first `base_n_verts*3` floats of `tail.verts` duplicate
+    // `into.verts` (both seeded from the same `coords`). Strip the
+    // duplicate; rebase tail's new-vertex indices by the offset
+    // (current `into` verts count minus the duplicate base).
+    let into_v_count = into.verts.len() / 3;
+    let new_offset = (into_v_count - base_n_verts) as u32;
+    let dup_floats = base_n_verts * 3;
+    if tail.verts.len() >= dup_floats {
+        into.verts.extend_from_slice(&tail.verts[dup_floats..]);
+    }
+    if let (Some(out), Some(t)) = (into.scalar.as_mut(), tail.scalar.as_mut()) {
+        if t.len() >= base_n_verts {
+            out.extend_from_slice(&t[base_n_verts..]);
+        }
+    }
+    for &i in &tail.indices {
+        let rebased = if (i as usize) < base_n_verts {
+            i
+        } else {
+            i + new_offset
+        };
+        into.indices.push(rebased);
+    }
+    into.tri_material.extend_from_slice(&tail.tri_material);
+    into.tri_flags.extend_from_slice(&tail.tri_flags);
+    for &e in &tail.edges {
+        let rebased = if (e as usize) < base_n_verts {
+            e
+        } else {
+            e + new_offset
+        };
+        into.edges.push(rebased);
+    }
+    into
 }
 
 #[cfg(test)]
@@ -479,7 +627,8 @@ mod tests {
             origin: [0.5, 0.5, 0.5],
             normal: [1.0, 0.0, 0.0],
         };
-        let out = clip_element(Superclass::Hex, &g, &p, 7, &plane).expect("straddle");
+        let out =
+            clip_element(Superclass::Hex, &g, &p, 7, &plane, ClipMode::Cut).expect("straddle");
         assert!(
             !out.cap_tris.is_empty(),
             "x=0.5 cut produces a square cap (>= 2 tris)"
@@ -494,7 +643,8 @@ mod tests {
             origin: [-1.0, 0.0, 0.0],
             normal: [1.0, 0.0, 0.0],
         };
-        let out = clip_element(Superclass::Hex, &g, &p, 7, &plane).expect("all keep");
+        let out =
+            clip_element(Superclass::Hex, &g, &p, 7, &plane, ClipMode::Cut).expect("all keep");
         assert!(out.cap_tris.is_empty(), "no cap on all-keep");
         assert!(out.new_verts.is_empty(), "no new verts on all-keep");
         assert_eq!(out.kept_tris.len(), 12);
@@ -507,6 +657,71 @@ mod tests {
             origin: [2.0, 0.0, 0.0],
             normal: [1.0, 0.0, 0.0],
         };
-        assert!(clip_element(Superclass::Hex, &g, &p, 7, &plane).is_none());
+        assert!(clip_element(Superclass::Hex, &g, &p, 7, &plane, ClipMode::Cut).is_none());
+    }
+
+    #[test]
+    fn unit_hex_slice_drops_kept_side_keeps_cap() {
+        let (g, p) = unit_hex_corners();
+        let plane = Plane {
+            origin: [0.5, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        };
+        let out = clip_element(Superclass::Hex, &g, &p, 7, &plane, ClipMode::Slice)
+            .expect("slice straddler");
+        assert!(out.kept_tris.is_empty(), "slice drops kept hull");
+        assert!(out.kept_mat.is_empty());
+        assert!(!out.cap_tris.is_empty(), "slice keeps the cap");
+        assert_eq!(out.cap_mat, SLICE_MATERIAL);
+    }
+
+    #[test]
+    fn unit_hex_slice_all_keep_emits_nothing() {
+        let (g, p) = unit_hex_corners();
+        let plane = Plane {
+            origin: [-1.0, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        };
+        assert!(clip_element(Superclass::Hex, &g, &p, 7, &plane, ClipMode::Slice).is_none());
+    }
+
+    #[test]
+    fn scalar_interpolation_is_linear_along_straddled_edge() {
+        // Two-corner edge straddler: corner 0 at x=0 scalar=0,
+        // corner 1 at x=1 scalar=10. Cut at x=0.5 → expected scalar
+        // at the intersection point = 5.0.
+        let g = [0u32, 1, 2, 3, 4, 5, 6, 7];
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let s = [0.0_f32, 10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0];
+        let plane = Plane {
+            origin: [0.5, 0.0, 0.0],
+            normal: [1.0, 0.0, 0.0],
+        };
+        let out = clip_element(Superclass::Hex, &g, &p, 7, &plane, ClipMode::Slice).unwrap();
+        // Find the edge new vert for (0,1): t at 0.5 along scalar
+        // 0→10 = 5.
+        let mut saw_5 = false;
+        for nv in &out.new_vert_scalar {
+            if let NewVertScalar::Edge { a, b, t } = nv {
+                if (*a == 0 && *b == 1) || (*a == 1 && *b == 0) {
+                    let sa = s[*a as usize];
+                    let sb = s[*b as usize];
+                    let v = sa + (sb - sa) * t;
+                    if (v - 5.0).abs() < 1e-5 {
+                        saw_5 = true;
+                    }
+                }
+            }
+        }
+        assert!(saw_5, "linear blend of 0..10 at midpoint = 5");
     }
 }

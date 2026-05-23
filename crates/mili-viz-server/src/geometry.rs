@@ -1070,20 +1070,27 @@ impl MeshTopology {
         tri_material: &[u32],
         tri_flags: &[u32],
         edges: &[u32],
+        scalar: Option<&[f32]>,
     ) -> Vec<u8> {
         let n_verts = (verts.len() / 3) as u64;
         let n_idx = indices.len() as u64;
         let n_edges = edges.len() as u64;
+        let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
         let mut flags_mask: u32 = 2; // tri_flags always present
+        if with_scalar {
+            flags_mask |= 1;
+        }
         if !edges.is_empty() {
             flags_mask |= 4;
         }
+        let scalar_bytes = if with_scalar { n_verts as usize * 4 } else { 0 };
         let mut buf = Vec::with_capacity(
             36 + verts.len() * 4
                 + indices.len() * 4
                 + tri_material.len() * 4
                 + tri_flags.len() * 4
-                + edges.len() * 4,
+                + edges.len() * 4
+                + scalar_bytes,
         );
         buf.extend_from_slice(b"MVG3");
         buf.extend_from_slice(&3u32.to_le_bytes());
@@ -1105,6 +1112,11 @@ impl MeshTopology {
         }
         for e in edges {
             buf.extend_from_slice(&e.to_le_bytes());
+        }
+        if with_scalar {
+            for v in scalar.unwrap() {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
         }
         buf
     }
