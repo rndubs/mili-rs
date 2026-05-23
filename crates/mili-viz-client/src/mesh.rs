@@ -324,6 +324,71 @@ impl Mesh {
         }
     }
 
+    /// Feature / "geometry-only" edges: every undirected triangle edge
+    /// whose two adjacent face normals subtend more than `threshold_rad`
+    /// (the dihedral angle), plus every boundary edge with only one
+    /// adjacent triangle, plus any non-manifold edge shared by three or
+    /// more triangles. Coplanar triangulation diagonals within a single
+    /// quad face have dihedral 0 and are filtered for free — so this
+    /// produces what a CAD viewer would call "silhouette + crease"
+    /// edges (planning/mili-viz/feature-edges.md Decision 100).
+    ///
+    /// Sort-based sweep — O(E log E), no HashMap. Deterministic.
+    #[must_use]
+    pub fn compute_feature_edges(&self, threshold_rad: f32) -> Vec<u32> {
+        let n_tri = self.indices.len() / 3;
+        if n_tri == 0 {
+            return Vec::new();
+        }
+        // `dot < cos_threshold` ⇔ dihedral angle > threshold ⇒ feature.
+        let cos_threshold = threshold_rad.cos();
+        let mut tri_normals: Vec<Vec3> = Vec::with_capacity(n_tri);
+        let mut records: Vec<(u32, u32, u32)> = Vec::with_capacity(3 * n_tri);
+        for (t, tri) in self.indices.chunks_exact(3).enumerate() {
+            let (a, b, c) = (tri[0], tri[1], tri[2]);
+            let pa = Vec3::from(self.positions[a as usize]);
+            let pb = Vec3::from(self.positions[b as usize]);
+            let pc = Vec3::from(self.positions[c as usize]);
+            // `normalize_or_zero` keeps degenerate (zero-area) triangles
+            // from poisoning the dot-product with NaN; their edges then
+            // fall into the conservative "feature" branch below.
+            tri_normals.push((pb - pa).cross(pc - pa).normalize_or_zero());
+            let t = t as u32;
+            for (u, v) in [(a, b), (b, c), (c, a)] {
+                records.push((u.min(v), u.max(v), t));
+            }
+        }
+        records.sort_unstable_by_key(|r| (r.0, r.1));
+
+        let mut features = Vec::new();
+        let mut i = 0;
+        while i < records.len() {
+            let (lo, hi, _) = records[i];
+            let mut j = i + 1;
+            while j < records.len() && records[j].0 == lo && records[j].1 == hi {
+                j += 1;
+            }
+            let is_feature = match j - i {
+                // Boundary: open hull edge, always a feature.
+                1 => true,
+                // Manifold edge — compare the two face normals.
+                2 => {
+                    let n0 = tri_normals[records[i].2 as usize];
+                    let n1 = tri_normals[records[i + 1].2 as usize];
+                    n0.dot(n1) < cos_threshold
+                }
+                // Non-manifold (shell meets solid, etc.) — keep.
+                _ => true,
+            };
+            if is_feature {
+                features.push(lo);
+                features.push(hi);
+            }
+            i = j;
+        }
+        features
+    }
+
     /// Unique undirected triangle edges as a `LineList` index buffer
     /// (pairs into [`Mesh::positions`]). Each shared edge appears once
     /// regardless of how many triangles fan around it, so the

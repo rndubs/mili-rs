@@ -145,6 +145,13 @@ pub enum RenderMode {
     /// high-information "see-through but edges visible" mode.
     /// Phase 5 M7 Decision 81.
     Xray,
+    /// Filled hull plus only the **feature / geometry edges** —
+    /// silhouette + sharp creases (dihedral angle > 30°), with
+    /// per-element subdivision edges filtered out. A meshed cube draws
+    /// only its 12 outer edges; a meshed cylinder draws only the top
+    /// and bottom rims. Computed client-side once per mesh upload from
+    /// the triangle list (planning/mili-viz/feature-edges.md).
+    FeatureEdges,
 }
 
 impl RenderMode {
@@ -156,6 +163,7 @@ impl RenderMode {
             RenderMode::Wireframe => "wireframe",
             RenderMode::Translucent => "translucent",
             RenderMode::Xray => "x-ray",
+            RenderMode::FeatureEdges => "shaded + feature edges",
         }
     }
 }
@@ -1122,6 +1130,7 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                         RenderMode::Wireframe,
                         RenderMode::Translucent,
                         RenderMode::Xray,
+                        RenderMode::FeatureEdges,
                     ] {
                         let mark = if state.render_mode == mode {
                             "● "
