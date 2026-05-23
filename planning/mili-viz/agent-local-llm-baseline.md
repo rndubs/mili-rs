@@ -60,19 +60,48 @@ matter as much as input schemas for v0 — the model can only chain
 tools (e.g. "find peak state, then frame it") if the tool response
 carries the values it needs.
 
-Recommended tool-response shape, pinned per-tool:
+**Pinned per-tool response projections.** A naive serialization of
+the proto `Snapshot` is catastrophic for context budget — `Snapshot.
+loaded.state_times` is `repeated double` and at production scale
+(~10k states) JSON-encodes to ~150 KB / ~40K tokens, **larger than
+FunctionGemma's full context window**, and the LLM cannot use a
+length-N float array anyway. The harness therefore projects every
+tool's response through a tight, model-friendly shape before it
+reaches the model:
 
-| Tool | Response (minimum) |
+| Tool | Projected response |
 |---|---|
-| `load` | `{ok, num_states, classes: [str], error?}` |
-| `set_state`/`step` | `{ok, state, num_states, error?}` |
-| `select`/`clrsel` | `{ok, selected: {class: [ids]}, error?}` |
-| `show` | `{ok, result, component, range: [min,max], error?}` |
-| `material` | `{ok, materials_visible: {id: bool}, error?}` |
-| `view`/`named_view`/`colormap`/`legend`/`iso`/`contour`/`cutplane` | `{ok, error?}` (state read back via `snapshot` next turn) |
-| `query` | `{ok, table: {...}, error?}` (mirror of proto `Query` reply) |
-| `snapshot` | `{ok, state, selection, result, materials, camera}` |
+| `load` | `{ok, num_states, num_classes, classes: [str], state_time_range: [t_min, t_max], current_time, error?}` — **no** `state_times` array, **no** `db` path |
+| `set_state` / `step` | `{ok, state, num_states, current_time, error?}` — single-state lookup, no array |
+| `select` / `clrsel` | `{ok, selection: {class: range_str, ...}, error?}` — only non-empty entries |
+| `show` | `{ok, result, component, range: [min, max], error?}` — `geometry` field dropped entirely (the LLM never sees `flight_ticket`) |
+| `material` | `{ok, hidden_materials: [int], error?}` — list of *off* IDs only (usually shorter than the full map; "everything else is visible" is the default) |
+| `view` / `named_view` / `colormap` / `legend` / `iso` / `contour` / `cutplane` | `{ok, error?}` — model calls `snapshot` if it wants camera/result back |
+| `query` | `{ok, table: ..., error?}` — already result-bearing by design |
+| `snapshot` | `{state, num_states, current_time, classes: [str], selection: {...}, result: {result, component, range}, hidden_materials: [int], camera: {azimuth, elevation, distance, focus: [fx, fy, fz]}}` — pruned `LoadedState` + `ResultState`, `state_times` and `flight_ticket` stripped, `agent` stripped |
 | `griz_raw` | `{ok, output: str, error?}` |
+
+**Harness invariants (pinned, unit-tested).** Three fields must
+never reach the LLM under any code path:
+
+1. `Snapshot.loaded.state_times` — unbounded `repeated double`;
+   replace with `state_time_range` + `current_time`.
+2. `GeometryRef.flight_ticket` — opaque `bytes` for the Arrow Flight
+   client; useless to the LLM, and base64 encoding adds ~33% bloat.
+   `GeometryRef` is dropped wholesale from projected responses.
+3. `Snapshot.agent` — the agent's own transcript. Echoing it back
+   into the agent's tool-response context is a self-echo trap:
+   quadratic growth and likely model confusion. Stripped
+   unconditionally.
+
+Each invariant gets one `test_no_state_times_in_response` /
+`test_no_flight_ticket_in_response` / `test_no_agent_in_response`
+test in `python/mili-llm-bench/tests/test_harness.py` against a
+fabricated raw `Snapshot` carrying all three fields.
+
+Effect: `snapshot` projects to a few hundred bytes regardless of sim
+size; `show`/`set_state`/etc. become stable-sized responses
+independent of the fixture.
 
 Outputs:
 
@@ -154,50 +183,194 @@ Without this taxonomy, "the v0 baseline got 12 / 50" is not
 actionable — we cannot tell whether to invest in better prompts,
 fine-tuning, more macros, or richer tool responses.
 
-### W4 — Driver loop (multi-turn agent harness)
+### W4 — Agent harness + eval driver
 
-Pure Python, on top of pygriz. One file. The same code is reused for
-later teacher rollouts and for the eval harness — it is the "driver
-loop" Stage 5 of `posttraining-dataset.md` implicitly requires.
+W4 splits into a **factored harness** (W4a) reused by three
+consumers — the eval driver here, the future teacher-rollout loop
+(`posttraining-dataset.md` Stage 5), and the live production
+`AgentChat` handler (`client.md` decision 4 + the frozen
+`AgentChat`/`Interrupt` RPCs already in `mili_viz.proto`) — and the
+**v0-specific eval driver** (W4b) that wraps W4a, calls the verifier,
+and writes rollouts.
+
+#### W4a — Harness (the shared core)
+
+Provider-agnostic, session-agnostic. Owns the "tool call JSON →
+real session mutation → projected response JSON" translation. One
+module: `python/mili-llm-bench/src/mili_llm_bench/harness.py`.
+
+Components:
+
+- **Tool registry** — declarative `dict[name, Tool(input_schema,
+  output_schema, dispatch_fn, response_projection)]`. One source of
+  truth; W1's `tools.json` is its serialized form.
+- **Input validator** — `jsonschema` check before dispatch. A miss
+  returns a structured `{ok: false, error: "...", error_kind:
+  "schema_mismatch"}` response to the model, never raises.
+- **Dispatcher** — typed-Command tools lower to the *existing pygriz
+  typed helper* (`material → s.materials.enable/disable`,
+  `set_state → s.state = n`, `show → s.show(...)`); `griz_raw`
+  lowers to `s.command(raw)`; `query`/`snapshot` use the pygriz read
+  paths. **Reuses the code path a human notebook user takes** — the
+  alignment `agent-local-llm.md` "Surface choice" calls out.
+- **Error wrapper** — pygriz exception or `CommandReply.ok == false`
+  → `{ok: false, error: str, error_kind: <enum>}`. The model *sees*
+  the error and can recover; a raw exception kills the rollout.
+- **Response projection** — after every typed call, read a fresh
+  snapshot and run each tool's pinned `response_projection` (the W1
+  table) to build the model-facing dict. **The harness invariants
+  pinned in W1 — no `state_times`, no `flight_ticket`, no
+  `Snapshot.agent` — are enforced here**.
+- **Per-turn budget enforcement** — `step_cap`, `max_new_tokens`,
+  wall-clock `timeout`. Lives in the harness, not the driver, so
+  all three consumers get the same protections.
+
+`error_kind` enum (closed; mirrors the verifier failure-mode
+taxonomy in W3):
 
 ```
-init session (pygriz.launch() → Session)
-load fixture
-build initial messages: [
-  {"role": "developer", "content": <pinned system prompt>},
-  {"role": "user", "content": scenario.instruction}
-]
-loop:
-  emit = provider.generate(messages, tools=tools.json)
-  if emit is a tool_call:
-    response = dispatch(tool_call, session)   # → tool-response JSON
-    messages.append({"role": "assistant", "tool_calls": [emit]})
-    messages.append({"role": "tool", "name": emit.name,
-                     "content": json.dumps(response)})
-    if step_count >= step_cap: break with step_cap_hit
-  else:
-    final_assistant_message = emit; break
-verify(messages, postcondition) → {max_tier, failure_mode, reward}
-session.reset()  # for next scenario
+"parse_error"            # LLM emitted unparseable tool-call shape
+"unknown_tool"           # name not in registry
+"schema_mismatch"        # arguments fail jsonschema
+"dispatch_error"         # pygriz call raised / server CommandReply.ok=false
+"nonexistent_material"   # arg type valid but material id not in fixture
+"nonexistent_class"      # ditto for class_name
+"nonexistent_result"     # ditto for result name
+"state_out_of_range"     # ditto for state index
+"step_cap_hit"           # driver-level
+"token_cap_hit"          # driver-level
+"timeout"                # driver-level
 ```
 
-Pinned dispatch table:
+The harness emits `parse_error` / `unknown_tool` / `schema_mismatch`
+/ `dispatch_error` itself; argument-level `nonexistent_*` /
+`state_out_of_range` are classified by the dispatcher from pygriz's
+returned error string (best-effort pattern match — when the
+dispatcher can't classify, it falls back to `dispatch_error`). The
+driver emits `step_cap_hit` / `token_cap_hit` / `timeout`.
 
-- Each typed-Command tool lowers to the *existing pygriz typed
-  helper* (e.g. `material → s.materials.enable/disable`,
-  `set_state → s.state = n`, `show → s.show(...)`). **Reuses
-  the same code path a human notebook user takes** — the alignment
-  `agent-local-llm.md` "Surface choice" calls out.
-- `griz_raw` lowers to `s.command(raw)`.
-- `query` / `snapshot` use pygriz's existing `_snapshot()` /
-  forthcoming `s.query()` (Phase 6 M5; until M5 lands, `query` is a
-  stub that returns `{ok: false, error: "query unimplemented"}` —
-  that itself is a measurement, not a blocker).
-- After every typed call, the dispatcher reads back a fresh snapshot
-  to populate the response fields (`range`, `materials_visible`,
-  `state`, etc.).
+Public surface:
 
-Caps and determinism:
+```python
+def run_turn(
+    provider: LlmProvider,
+    session: pygriz.Session,
+    messages: list[dict],   # mutated in place; appended to
+    tools: list[dict],
+    *,
+    step_index: int,
+    max_new_tokens: int = 256,
+    temperature: float = 0.0,
+    seed: int = 0,
+    timeout_s: float = 60.0,
+) -> TurnResult: ...
+
+@dataclass
+class TurnResult:
+    kind: Literal["tool_calls", "final_text", "error"]
+    tool_calls: list[ExecutedCall]      # 0..N: see "N tool calls" below
+    final_text: str | None              # populated when kind == "final_text"
+    error_kind: str | None              # populated when kind == "error"
+    tokens_used: int
+    wall_ms: int
+
+@dataclass
+class ExecutedCall:
+    name: str
+    arguments: dict
+    response: dict                       # projected, harness-invariant-safe
+    error_kind: str | None               # None on L2+ success
+    dispatch_ms: int
+```
+
+A driver calls `run_turn` in a loop, deciding when to stop. The
+harness owns per-turn semantics.
+
+**0 / 1 / N tool calls per turn.** FunctionGemma emits at most one
+per turn; OpenAI/Anthropic can emit N. The harness dispatches all
+N in their declared order in a single turn and returns one
+`ExecutedCall` per slot, each with its own projected response. The
+driver appends one `assistant` message (with all N `tool_calls`)
+and N `tool` messages (one per call, in order) before the next
+`run_turn`. Simpler than forcing one-call-per-turn at the prompt
+level; matches the OpenAI / Anthropic tool-use convention; reduces
+to one slot for FunctionGemma.
+
+**Parse-error recovery (option (b), pinned).** If `provider.generate`
+returns text the harness cannot normalize to a canonical
+`{name, arguments}` tool call, the harness emits one `ExecutedCall`
+with `name="<parse_error>"`, `arguments={}`, and `response=
+{ok: false, error: "...", error_kind: "parse_error"}`. The driver
+appends that as a `tool` message and re-enters `run_turn` — the
+model sees the error and can self-correct. This is the same shape
+as L2 dispatch errors; gives the model a recovery loop; matches
+what trained tool-use models expect. Pinned alternative ((a)
+silent retry of `generate`, (c) terminate) explicitly rejected:
+(a) doesn't teach the model anything; (c) kills rollouts on
+recoverable failures.
+
+**Replay mode (pinned, ships in v0).** `harness.run_turn` accepts a
+`ReplayLlmProvider` that yields pre-recorded provider outputs from
+a rollouts file instead of calling generate. Two uses:
+
+1. **Deterministic regression of the verifier.** Re-grade a stored
+   `rollouts.jsonl` under a new post-condition or a new
+   failure-mode taxonomy without re-running the LLM.
+2. **Dataset validation.** Round-trip a training set through the
+   harness to confirm every recorded tool call still parses,
+   dispatches, and produces the recorded response — catches
+   schema drift or fixture-fact drift before it pollutes a fine-tune.
+
+`ReplayLlmProvider` is one file in `providers/replay.py`. Same
+`LlmProvider` Protocol; no driver change. Counts as part of W5's
+provider seam, listed here for completeness.
+
+**Conversation truncation.** v0 stretches the context window as
+far as the model allows (Gemma 3 270M ≈ 32K tokens) and does not
+truncate. With `step_cap=8`, `max_new_tokens=256`, the projected
+responses in the W1 table, and ~3–5K tokens of tools-list overhead,
+typical rollouts stay well under 16K tokens. Truncation becomes
+relevant when (a) traces grow beyond `step_cap=8`, or (b) we add a
+tool whose response cannot be bounded. Not v0 work; tracked as
+an open question for after the baseline run.
+
+#### W4b — Eval driver
+
+The v0-specific loop on top of W4a. One module:
+`python/mili-llm-bench/src/mili_llm_bench/driver.py`.
+
+```
+for scenario in scenarios:
+    session = pygriz.launch()
+    session.open(scenario.fixture)
+    messages = [
+        {"role": "developer", "content": <pinned system prompt>},
+        {"role": "user", "content": scenario.instruction},
+    ]
+    step_index = 0
+    while step_index < step_cap:
+        turn = harness.run_turn(provider, session, messages, tools,
+                                step_index=step_index, ...)
+        if turn.kind == "final_text":
+            break
+        if turn.kind == "error" and turn.error_kind in {"timeout"}:
+            break
+        # tool_calls — N executed calls, all already projected + safe
+        messages.append({"role": "assistant",
+                         "tool_calls": [...]})
+        for ec in turn.tool_calls:
+            messages.append({"role": "tool", "name": ec.name,
+                             "content": json.dumps(ec.response)})
+        step_index += 1
+    else:
+        # step_cap_hit
+        ...
+    result = verifier.verify(messages, scenario.postcondition)
+    write_rollout(scenario, messages, result)
+    session.close()
+```
+
+Caps and determinism (pinned):
 
 - `step_cap = 8` (most v0 scenarios are 1–3 turns; the cap catches
   loops).
@@ -206,7 +379,7 @@ Caps and determinism:
 - Per-turn wall timeout: 60 s.
 
 Pure-logic tests (no LLM, no GPU) via a `MockLlmProvider` that
-replays a scripted tool-call sequence. The same Mock is the test
+emits a scripted tool-call sequence. The same Mock is the test
 harness for `verifier.py` and for future training-data validators.
 
 ### W5 — Inference provider seam
@@ -236,6 +409,9 @@ v0 implementations:
   report and as the future teacher (`posttraining-dataset.md` Stage
   5). Standard `tool_use` / `tool_result` blocks.
 - `MockLlmProvider` — scripted, deterministic, for tests.
+- `ReplayLlmProvider` — yields pre-recorded outputs from a
+  `rollouts.jsonl`, for re-grading a stored run under a new verifier
+  or for dataset validation (W4a "Replay mode").
 
 Future: `VLLMProvider`, `LlamaCppProvider`, `CandleProvider` — swap
 without touching the driver loop.
@@ -282,18 +458,21 @@ python/mili-llm-bench/                 # new package
     schemas.py        # W1: derive tools.json from proto, load+validate
     scenarios.py      # W2: load bootstrap.jsonl, render prompts
     verifier.py       # W3: L0..L3 + failure_mode taxonomy
-    driver.py         # W4: multi-turn loop, dispatch table, caps
+    harness.py        # W4a: run_turn, tool registry, dispatch, projection, error_kind enum
+    driver.py         # W4b: eval-specific loop on top of harness, caps, rollout writer
     providers/
       __init__.py
       base.py         # LlmProvider Protocol
       functiongemma.py
       anthropic.py
       mock.py
-    cli.py            # W6: `mili-llm-bench {derive-schemas,run}`
+      replay.py       # W4a/W5: ReplayLlmProvider (re-grade + dataset validation)
+    cli.py            # W6: `mili-llm-bench {derive-schemas,run,replay}`
   tests/
-    test_schemas.py   # honest-diff vs proto
-    test_verifier.py  # L0..L3 tiers + failure_mode taxonomy
-    test_driver.py    # MockLlmProvider; no LLM, no GPU required
+    test_schemas.py   # W1: honest-diff vs proto
+    test_verifier.py  # W3: L0..L3 tiers + failure_mode taxonomy
+    test_harness.py   # W4a: invariants (no state_times / flight_ticket / agent), N-tool-calls, parse-error feedback, replay round-trip
+    test_driver.py    # W4b: MockLlmProvider; no LLM, no GPU required
 
 data/posttraining/                     # gitignored except generators/pinned
   grammar/
@@ -314,19 +493,28 @@ v0 ships when:
 
 1. `mili-llm-bench derive-schemas` regenerates `tools.json` from
    `mili_viz.proto` and the honest-diff test passes.
-2. `mili-llm-bench run --provider mock --scenarios bootstrap.jsonl`
+2. The harness invariants — no `state_times`, no `flight_ticket`,
+   no `Snapshot.agent` ever reach the LLM — are pinned by the
+   three `test_no_*_in_response` unit tests against a fabricated
+   raw `Snapshot` carrying all three fields.
+3. `mili-llm-bench run --provider mock --scenarios bootstrap.jsonl`
    completes deterministically end-to-end on a laptop with no GPU
    and no live LLM. (This is the always-on test path; everything
    below this point is skip-on-absent.)
-3. `mili-llm-bench run --provider functiongemma` completes in <10
+4. `mili-llm-bench replay --rollouts <path>` re-grades a stored
+   `rollouts.jsonl` against the current verifier deterministically
+   (round-trip identity on an unchanged verifier; a deliberate
+   verifier change shifts at least one row's `max_tier`).
+5. `mili-llm-bench run --provider functiongemma` completes in <10
    min on a developer laptop and writes a valid `summary.json` and
    `report.md`.
-4. `summary.json` carries non-trivial values for every entry in the
+6. `summary.json` carries non-trivial values for every entry in the
    failure-mode taxonomy (the eval set is balanced enough to exercise
    them) — so "we don't know which failure mode dominates" is
    structurally impossible.
-5. `status.md` § "Local LLM agent (exploratory)" rows W1–W6 all
-   flipped to ✅ with the gating tests named.
+7. `status.md` § "Local LLM agent (exploratory)" rows W1–W6 (with
+   W4 split into W4a/W4b) all flipped to ✅ with the gating tests
+   named.
 
 ## What v0 explicitly does *not* do
 
@@ -367,12 +555,15 @@ verifier, the schemas, the scenarios. None of v0 is throwaway.
 
 ## Open questions (carried, not resolved here)
 
-- Tool-response richness vs. context bloat: each `snapshot` projection
-  costs tokens. How many fields per tool response is the sweet spot
-  for a 270M model? Empirical, settled by the v0 run.
+- Tool-response richness vs. context bloat: the W1 projection table
+  pins the *fields* per response and the harness invariants pin what
+  is never echoed, but the right number of fields per turn for a
+  270M model is empirical. Settled by the v0 run + the
+  tokens-per-rollout breakdown the report includes.
 - Should `query`/`snapshot` be **two tools** or a single
   `read(kind=...)` tool? Two tools is closer to FunctionGemma's
-  one-purpose-per-tool convention; settle in W1 before pinning.
+  one-purpose-per-tool convention; settle in W1 before pinning
+  `tools.json`.
 - When the `griz_raw` fallback is used, do we count it as a "miss"
   for the typed-tool benchmark or as a fair pass? v0 treats it as a
   fair pass; the report includes a separate "raw-fallback rate"
@@ -381,3 +572,14 @@ verifier, the schemas, the scenarios. None of v0 is throwaway.
   grammar-constrained decoding on the `griz_raw` argument (as
   `agent-local-llm.md` Decision 3 envisions). Out of scope for v0
   unless the HF-transformers path is too slow on the dev laptop.
+- Conversation truncation: not v0 work (the W4a §"Conversation
+  truncation" paragraph stretches the window instead). Becomes
+  relevant when traces exceed `step_cap=8` or a tool's response
+  cannot be bounded.
+- Dispatcher → `error_kind` classification confidence: the
+  argument-level `nonexistent_material` / `nonexistent_class` /
+  `nonexistent_result` / `state_out_of_range` labels are inferred
+  from pygriz error strings (best-effort pattern match). If
+  misclassification rate is high in the v0 run, promote a
+  structured error path in pygriz / `mili-viz-server` —
+  cross-cutting with `client.md`'s provenance journal.
