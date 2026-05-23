@@ -77,7 +77,13 @@ fn decode(layout: &str, raw: &[u8]) -> Blob {
         .collect();
     let idx_off = header + n_verts * 12;
     let indices: Vec<u32> = (0..n_idx)
-        .map(|i| u32::from_le_bytes(raw[idx_off + i * 4..idx_off + i * 4 + 4].try_into().unwrap()))
+        .map(|i| {
+            u32::from_le_bytes(
+                raw[idx_off + i * 4..idx_off + i * 4 + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        })
         .collect();
     let trimat_off = idx_off + n_idx * 4;
     let tri_material: Vec<u32> = (0..n_tri)

@@ -149,7 +149,8 @@ impl Session {
         let scalar = topo.vertex_scalar(db, svar, self.state);
         let (min, max) = scalar.as_ref().map_or((0.0, 0.0), |(_, lo, hi)| (*lo, *hi));
         let materials = &self.materials;
-        let (blob, layout, num_indices, num_vertices) = if self.cut.is_some() || self.slice.is_some()
+        let (blob, layout, num_indices, num_vertices) = if self.cut.is_some()
+            || self.slice.is_some()
         {
             // M8/M9: cut/slice operators (phase-4-m8.md, phase-4-m9.md).
             // Per-vertex scalar at existing nodes feeds linear edge

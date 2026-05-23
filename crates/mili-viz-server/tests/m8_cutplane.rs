@@ -73,7 +73,13 @@ fn decode(layout: &str, raw: Vec<u8>) -> Blob {
         .collect();
     let idx_off = header + n_verts * 12;
     let indices: Vec<u32> = (0..n_idx)
-        .map(|i| u32::from_le_bytes(raw[idx_off + i * 4..idx_off + i * 4 + 4].try_into().unwrap()))
+        .map(|i| {
+            u32::from_le_bytes(
+                raw[idx_off + i * 4..idx_off + i * 4 + 4]
+                    .try_into()
+                    .unwrap(),
+            )
+        })
         .collect();
     let trimat_off = idx_off + n_idx * 4;
     let tri_material: Vec<u32> = (0..n_tri)
@@ -224,9 +230,7 @@ async fn cutplane_operator() {
 
     // (c) every cap vertex lies on the plane within tolerance.
     // (d) every non-cap (kept-side) vertex has signed_distance >= -eps.
-    let extent = (hi[0] - lo[0])
-        .max(hi[1] - lo[1])
-        .max(hi[2] - lo[2]) as f64;
+    let extent = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]) as f64;
     let eps = (extent.max(1.0)) * 1e-4;
     for (t, &mat) in cut.tri_material.iter().enumerate() {
         for v in 0..3 {

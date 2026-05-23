@@ -218,7 +218,10 @@ async fn volumetric_geometry_contract() {
     );
     let v = decode_mvg3(&vol_blob);
     assert!(v.n_verts > 0, "MVG3 has vertices");
-    assert!(v.n_idx > 0 && v.n_idx.is_multiple_of(3), "MVG3 index list valid");
+    assert!(
+        v.n_idx > 0 && v.n_idx.is_multiple_of(3),
+        "MVG3 index list valid"
+    );
     assert_eq!(v.tri_flags.len(), v.n_idx / 3, "tri_flags column present");
     let interior_count = v.tri_flags.iter().filter(|f| **f & 1 == 1).count();
     let boundary_count = v.tri_flags.iter().filter(|f| **f & 1 == 0).count();

@@ -158,7 +158,10 @@ fn clip_element(
         ClipMode::Slice => SLICE_MATERIAL,
     };
     let n = corner_global.len();
-    let dists: Vec<f64> = corner_pos.iter().map(|p| plane.signed_distance(p)).collect();
+    let dists: Vec<f64> = corner_pos
+        .iter()
+        .map(|p| plane.signed_distance(p))
+        .collect();
     let eps = 1e-9_f64;
     let all_keep = dists.iter().all(|&d| d >= -eps);
     let all_drop = dists.iter().all(|&d| d <= eps);
@@ -387,11 +390,7 @@ fn clip_element(
                 cz += f64::from(p[2]);
             }
             let k = ordered.len() as f64;
-            let centroid = [
-                (cx / k) as f32,
-                (cy / k) as f32,
-                (cz / k) as f32,
-            ];
+            let centroid = [(cx / k) as f32, (cy / k) as f32, (cz / k) as f32];
             let centroid_idx = new_verts.len() as u32;
             new_verts.push(centroid);
             // Centroid scalar = mean of cap polygon vertex scalars;
@@ -465,11 +464,7 @@ pub fn clip_topology(
                 if nid >= node_count {
                     return None;
                 }
-                corner_pos.push([
-                    coords[nid * 3],
-                    coords[nid * 3 + 1],
-                    coords[nid * 3 + 2],
-                ]);
+                corner_pos.push([coords[nid * 3], coords[nid * 3 + 1], coords[nid * 3 + 2]]);
             }
             clip_element(sc, row, &corner_pos, mat, plane, mode)
         })
@@ -564,7 +559,11 @@ pub fn clip_topology(
 /// base, so the merge just rebases the slice's new verts by the
 /// cut blob's existing vertex count.
 #[must_use]
-pub fn append_clip(mut into: ClipBuffers, mut tail: ClipBuffers, base_n_verts: usize) -> ClipBuffers {
+pub fn append_clip(
+    mut into: ClipBuffers,
+    mut tail: ClipBuffers,
+    base_n_verts: usize,
+) -> ClipBuffers {
     // The first `base_n_verts*3` floats of `tail.verts` duplicate
     // `into.verts` (both seeded from the same `coords`). Strip the
     // duplicate; rebase tail's new-vertex indices by the offset

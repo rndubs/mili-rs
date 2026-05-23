@@ -216,7 +216,12 @@ fn decode_mvg3(blob: &[u8]) -> Result<Mesh, DecodeError> {
     let triflag_bytes = if has_tri_flags { n_tri * 4 } else { 0 };
     let edges_bytes = if has_edges { n_edges * 4 } else { 0 };
     let scalar_bytes = if has_scalar { n_verts * 4 } else { 0 };
-    let need = HEADER + verts_bytes + idx_bytes + trimat_bytes + triflag_bytes + edges_bytes
+    let need = HEADER
+        + verts_bytes
+        + idx_bytes
+        + trimat_bytes
+        + triflag_bytes
+        + edges_bytes
         + scalar_bytes;
     if blob.len() < need {
         return Err(DecodeError(format!(

@@ -111,9 +111,7 @@ pub(crate) fn element_edges_table(sc: Superclass) -> &'static [[usize; 2]] {
     match sc {
         Superclass::Tri => &[[0, 1], [1, 2], [2, 0]],
         Superclass::Quad => &[[0, 1], [1, 2], [2, 3], [3, 0]],
-        Superclass::Tet | Superclass::Tet10 => {
-            &[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]]
-        }
+        Superclass::Tet | Superclass::Tet10 => &[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]],
         Superclass::Pyramid => &[
             // base quad
             [0, 1],
@@ -171,9 +169,7 @@ pub(crate) fn faces_table(sc: Superclass) -> &'static [&'static [usize]] {
     match sc {
         Superclass::Tri => &[&[0, 1, 2]],
         Superclass::Quad => &[&[0, 1, 2, 3]],
-        Superclass::Tet | Superclass::Tet10 => {
-            &[&[0, 2, 1], &[0, 1, 3], &[1, 2, 3], &[2, 0, 3]]
-        }
+        Superclass::Tet | Superclass::Tet10 => &[&[0, 2, 1], &[0, 1, 3], &[1, 2, 3], &[2, 0, 3]],
         Superclass::Pyramid => &[
             &[0, 3, 2, 1], // base (inward-facing normal)
             &[0, 1, 4],
@@ -1174,7 +1170,11 @@ impl MeshTopology {
         }
 
         let mut buf = Vec::with_capacity(
-            4 + 4 + 8 + 8 + 8 + 4
+            4 + 4
+                + 8
+                + 8
+                + 8
+                + 4
                 + verts.len() * 4
                 + indices.len() * 4
                 + tri_material.len() * 4
@@ -1382,9 +1382,7 @@ mod tests {
         // VB-005: none of the 6 face diagonals (the index buffer
         // would still contain them, but the dedicated edge buffer
         // must not).
-        let diagonals: [(u32, u32); 6] = [
-            (0, 2), (1, 3), (4, 6), (5, 7), (0, 5), (1, 4),
-        ];
+        let diagonals: [(u32, u32); 6] = [(0, 2), (1, 3), (4, 6), (5, 7), (0, 5), (1, 4)];
         for pair in edges.chunks_exact(2) {
             let key = (pair[0].min(pair[1]), pair[0].max(pair[1]));
             for d in &diagonals {
