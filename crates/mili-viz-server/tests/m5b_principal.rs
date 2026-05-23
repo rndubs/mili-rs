@@ -46,16 +46,31 @@ fn decode(blob: &[u8], layout: &str) -> Geom {
     let magic = &blob[0..4];
     let n_verts = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
-    let mut off = 24 + n_verts * 3 * 4 + n_idx * 4 + (n_idx / 3) * 4;
-    let scalar = if magic == b"MVG2" {
+    let (header, n_edges, flags_mask) = match magic {
+        b"MVG1" | b"MVG2" => (24, 0, u32::from(magic == b"MVG2")),
+        b"MVG3" => (
+            36,
+            u64::from_le_bytes(blob[24..32].try_into().unwrap()) as usize,
+            u32::from_le_bytes(blob[32..36].try_into().unwrap()),
+        ),
+        _ => panic!("bad magic {magic:?}"),
+    };
+    let n_tri = n_idx / 3;
+    let mut off = header + n_verts * 3 * 4 + n_idx * 4 + n_tri * 4;
+    if magic == b"MVG3" && flags_mask & 2 != 0 {
+        off += n_tri * 4;
+    }
+    if magic == b"MVG3" && flags_mask & 4 != 0 {
+        off += n_edges * 4;
+    }
+    let scalar = if flags_mask & 1 != 0 {
         let s: Vec<f32> = (0..n_verts)
             .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
             .collect();
         off += n_verts * 4;
-        assert_eq!(off, blob.len(), "MVG2 blob fully consumed");
+        assert_eq!(off, blob.len(), "blob fully consumed");
         s
     } else {
-        assert_eq!(magic, b"MVG1");
         Vec::new()
     };
     Geom {
@@ -179,7 +194,7 @@ fn assert_traceless(a: &[f32], b: &[f32], c: &[f32], label: &str) -> usize {
 }
 
 fn structural(g: &Geom, res: &pb::ResultState, name: &str) {
-    assert!(g.layout.starts_with("MVG2"), "{name} → MVG2");
+    assert!(g.layout.starts_with("MVG3:"), "{name} → MVG3");
     assert_eq!(g.scalar.len(), g.verts, "{name} scalar is per-vertex");
     let finite: Vec<f32> = g.scalar.iter().copied().filter(|v| v.is_finite()).collect();
     assert!(!finite.is_empty(), "{name}: finite samples on elements");
@@ -221,7 +236,7 @@ async fn derived_principal_families() {
     // ── unknown derived name → graceful M3 bare-hull fallback ─────────
     let unknown = show(&mut client, &mut sub, &svc, "not_a_derived").await.0;
     assert!(
-        unknown.layout.starts_with("MVG1") && unknown.scalar.is_empty(),
+        unknown.layout.starts_with("MVG3:") && unknown.scalar.is_empty(),
         "unsupported derived → bare hull, no error"
     );
 
@@ -250,7 +265,7 @@ async fn derived_principal_families() {
     let (p1, p1r) = show(&mut client, &mut sub, &svc, "prin_stress1").await;
     let (p2, p2r) = show(&mut client, &mut sub, &svc, "prin_stress2").await;
     let (p3, _) = show(&mut client, &mut sub, &svc, "prin_stress3").await;
-    assert_eq!(p1.layout, "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32");
+    assert!(p1.layout.starts_with("MVG3:"));
     structural(&p1, &p1r, "prin_stress1");
     structural(&p2, &p2r, "prin_stress2");
     let n = assert_descending(&p1.scalar, &p2.scalar, &p3.scalar, "prin_stress order");
@@ -329,5 +344,5 @@ async fn derived_principal_families() {
 
     // ── primal path still byte-stable: empty result → bare hull ──────
     let bare = show(&mut client, &mut sub, &svc, "").await.0;
-    assert!(bare.layout.starts_with("MVG1") && bare.scalar.is_empty());
+    assert!(bare.layout.starts_with("MVG3:") && bare.scalar.is_empty());
 }

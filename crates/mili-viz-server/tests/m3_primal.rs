@@ -35,16 +35,32 @@ fn decode(blob: &[u8], layout: &str) -> Geom {
     let magic = &blob[0..4];
     let n_verts = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
-    let mut off = 24 + n_verts * 3 * 4 + n_idx * 4 + (n_idx / 3) * 4;
-    let scalar = if magic == b"MVG2" {
+    let (header, n_edges, flags_mask) = match magic {
+        b"MVG1" | b"MVG2" => (24, 0, u32::from(magic == b"MVG2")),
+        b"MVG3" => (
+            36,
+            u64::from_le_bytes(blob[24..32].try_into().unwrap()) as usize,
+            u32::from_le_bytes(blob[32..36].try_into().unwrap()),
+        ),
+        _ => panic!("bad magic {magic:?}"),
+    };
+    let n_tri = n_idx / 3;
+    let mut off = header + n_verts * 3 * 4 + n_idx * 4 + n_tri * 4;
+    if magic == b"MVG3" && flags_mask & 2 != 0 {
+        off += n_tri * 4; // tri_flags
+    }
+    if magic == b"MVG3" && flags_mask & 4 != 0 {
+        off += n_edges * 4; // edges
+    }
+    let has_scalar = flags_mask & 1 != 0;
+    let scalar = if has_scalar {
         let s: Vec<f32> = (0..n_verts)
             .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
             .collect();
         off += n_verts * 4;
-        assert_eq!(off, blob.len(), "MVG2 blob fully consumed");
+        assert_eq!(off, blob.len(), "blob fully consumed");
         s
     } else {
-        assert_eq!(magic, b"MVG1");
         Vec::new()
     };
     Geom {
@@ -79,7 +95,12 @@ async fn show(
     let mut geom = decode(&svc.fetch_geometry(&g.flight_ticket).unwrap(), &g.layout);
     // Stash the data range for the caller via the scalar vec's
     // companion assertions; expose min/max through ResultState.
-    if g.layout.starts_with("MVG2") {
+    // MVG3 default (post VB-005 promotion) carries scalar when a
+    // result is mapped; MVG2 is the legacy form that still triggers
+    // the bracket check via the same has-scalar invariant.
+    let has_scalar =
+        g.layout.starts_with("MVG2") || g.layout.starts_with("MVG3:") && !geom.scalar.is_empty();
+    if has_scalar {
         assert!(res.min <= res.max, "{result}: min<=max");
         let finite: Vec<f32> = geom
             .scalar
@@ -139,30 +160,38 @@ async fn primal_result_colors_the_mesh() {
         .into_inner();
     let _snap = sub.message().await.unwrap().unwrap();
 
-    // ── empty result → M2 bare hull, no scalar ───────────────────────
+    // ── empty result → bare hull (MVG3, no scalar bit) ───────────────
     let bare = show(&mut client, &mut sub, &svc, "").await;
-    assert_eq!(bare.layout, "MVG1:verts_f32x3+idx_u32+trimat_u32");
-    assert!(bare.scalar.is_empty());
+    assert!(
+        bare.layout.starts_with("MVG3:"),
+        "bare hull is MVG3 since VB-005 promotion: {}",
+        bare.layout
+    );
+    assert!(
+        bare.scalar.is_empty(),
+        "no scalar bit when no result mapped"
+    );
 
     // ── unknown result → graceful fallback to the bare hull ──────────
     let unknown = show(&mut client, &mut sub, &svc, "no_such_svar").await;
-    assert!(unknown.layout.starts_with("MVG1"), "unknown → bare hull");
-
-    // ── element scalar (`sand` on `brick`) → MVG2, nodal-averaged ────
-    let sand = show(&mut client, &mut sub, &svc, "sand").await;
-    assert_eq!(
-        sand.layout,
-        "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32"
+    assert!(
+        unknown.layout.starts_with("MVG3:"),
+        "unknown → bare hull (MVG3)"
     );
+    assert!(unknown.scalar.is_empty());
+
+    // ── element scalar (`sand` on `brick`) → MVG3 with scalar column ─
+    let sand = show(&mut client, &mut sub, &svc, "sand").await;
+    assert!(sand.layout.starts_with("MVG3:"));
     assert_eq!(sand.scalar.len(), sand.verts);
     assert!(
         sand.scalar.iter().any(|v| v.is_finite()),
         "sand: brick nodes carry a value"
     );
 
-    // ── nodal vector (`nodvel`) → MVG2, colored by component 0 ───────
+    // ── nodal vector (`nodvel`) → MVG3, colored by component 0 ───────
     let nv1 = show(&mut client, &mut sub, &svc, "nodvel").await;
-    assert!(nv1.layout.starts_with("MVG2"));
+    assert!(nv1.layout.starts_with("MVG3:"));
     assert!(nv1.scalar.iter().any(|v| v.is_finite()));
 
     // ── scalar tracks the state (basic1 is transient) ────────────────
@@ -173,7 +202,8 @@ async fn primal_result_colors_the_mesh() {
         "nodvel scalar must differ between state 1 and 101"
     );
 
-    // ── all six M1 invariants + M2 untouched: bare hull still MVG1 ───
+    // ── bare hull stays MVG3 with no scalar bit (round-trip) ─────────
     let bare2 = show(&mut client, &mut sub, &svc, "").await;
-    assert!(bare2.layout.starts_with("MVG1"));
+    assert!(bare2.layout.starts_with("MVG3:"));
+    assert!(bare2.scalar.is_empty());
 }

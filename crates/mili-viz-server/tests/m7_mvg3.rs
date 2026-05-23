@@ -198,18 +198,36 @@ async fn volumetric_geometry_contract() {
         .into_inner();
     let _snap = sub.message().await.unwrap().unwrap();
 
-    // ── (d) default path is byte-identical MVG2 (VB-001) ────────────
+    // ── (d) default path is MVG3 since the VB-005 promotion ────────
+    // Before the promotion this was MVG1/MVG2; the boundary hull now
+    // rides as MVG3 too so the client's wireframe pass picks up the
+    // per-element edge buffer (no more face diagonals on hex meshes).
+    // What stays byte-stable is the *rendered pixels* in the
+    // `Shaded` mode — the MVG3 strict-superset blob carries the same
+    // vertex/index/material columns the M2/M3/M4 pipeline drew.
     let (base_layout, base_blob) = show(&mut client, &mut sub, &svc, "").await;
-    assert_eq!(
-        base_layout, "MVG1:verts_f32x3+idx_u32+trimat_u32",
-        "default emit is still M2-era — interior off → MVG1/MVG2 path"
+    assert!(
+        base_layout.starts_with("MVG3:"),
+        "default emit is MVG3 since VB-005 promotion, got {base_layout}"
     );
     // Same show again — bytes match exactly.
     let (l2, b2) = show(&mut client, &mut sub, &svc, "").await;
     assert_eq!(l2, base_layout);
     assert_eq!(b2, base_blob, "repeat show stays byte-stable");
+    // Verify the interior bit is *off* by default: decode the blob and
+    // assert flags_mask & 8 == 0 (boundary-only hull).
+    let base = decode_mvg3(&base_blob);
+    assert_eq!(
+        base.flags_mask & 8,
+        0,
+        "interior bit off by default (no interior tris in the default blob)"
+    );
+    assert!(
+        base.n_edges >= 2,
+        "edges buffer non-empty by default for a hex corpus (VB-005 fix)"
+    );
 
-    // ── (c) IncludeInterior flips to MVG3 with interior tris ────────
+    // ── (c) IncludeInterior flips on the interior bit (still MVG3) ──
     set_interior(&mut client, &mut sub, true).await;
     let (vol_layout, vol_blob) = show(&mut client, &mut sub, &svc, "").await;
     assert!(
@@ -274,15 +292,19 @@ async fn volumetric_geometry_contract() {
         }
     }
 
-    // ── reverting interior re-enters the byte-stable MVG2/MVG1 path ─
+    // ── reverting interior restores the byte-stable boundary blob ──
+    // Both shapes are MVG3 since the VB-005 promotion; what was tested
+    // before as "MVG2 byte-stability" is now "MVG3 byte-stability with
+    // the interior bit off".
     set_interior(&mut client, &mut sub, false).await;
     let (after_layout, after_blob) = show(&mut client, &mut sub, &svc, "").await;
     assert_eq!(
         after_layout, base_layout,
-        "interior off restores the M2 layout"
+        "interior off restores the boundary-MVG3 layout"
     );
     assert_eq!(
         after_blob, base_blob,
-        "interior off restores byte-identical MVG1/MVG2 blob (VB-001)"
+        "interior off restores byte-identical boundary MVG3 blob (VB-001 \
+         updated semantic)"
     );
 }

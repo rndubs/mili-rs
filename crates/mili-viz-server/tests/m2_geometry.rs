@@ -36,7 +36,9 @@ fn with_client_id(cmd: pb::command::Cmd, id: &str) -> Request<pb::Command> {
     req
 }
 
-/// Decode the frozen `MVG1` blob (phase-4-m2.md Decision 11).
+/// Decode the geometry blob — MVG3 since the VB-005 promotion
+/// (phase-4-m7.md / VB-005); also recognizes the legacy MVG1/MVG2
+/// shapes for back-compat inspection.
 struct Geom {
     verts: Vec<f32>,
     indices: Vec<u32>,
@@ -44,14 +46,19 @@ struct Geom {
 }
 
 fn decode(blob: &[u8]) -> Geom {
-    assert_eq!(&blob[0..4], b"MVG1", "bad magic");
+    let magic = &blob[0..4];
+    let header = match magic {
+        b"MVG1" | b"MVG2" => 24,
+        b"MVG3" => 36,
+        _ => panic!("bad magic {magic:?}"),
+    };
     let dims = u32::from_le_bytes(blob[4..8].try_into().unwrap());
-    assert_eq!(dims, 3, "M2 pads to verts_f32x3");
+    assert_eq!(dims, 3, "pads to verts_f32x3");
     let n_verts = u64::from_le_bytes(blob[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(blob[16..24].try_into().unwrap()) as usize;
     assert_eq!(n_idx % 3, 0, "index buffer is a triangle list");
 
-    let mut off = 24;
+    let mut off = header;
     let verts: Vec<f32> = (0..n_verts * 3)
         .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
         .collect();
@@ -176,7 +183,10 @@ async fn load_state_nav_and_real_geometry() {
         panic!("show must broadcast a ResultState");
     };
     let gref = res.geometry.expect("M2 show carries a real GeometryRef");
-    assert_eq!(gref.layout, "MVG1:verts_f32x3+idx_u32+trimat_u32");
+    assert_eq!(
+        gref.layout, "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32",
+        "default emit is MVG3 since the VB-005 promotion"
+    );
     assert!(gref.num_vertices > 0, "mesh has vertices");
     assert!(gref.num_indices > 0 && gref.num_indices % 3 == 0);
 

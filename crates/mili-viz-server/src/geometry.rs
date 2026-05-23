@@ -30,20 +30,27 @@ const HEX_FACE_NODES: [[usize; 4]; 6] = [
     [0, 3, 2, 1],
 ];
 
-/// Bare-hull `GeometryRef.layout` (phase-4-m2.md Decision 11) — no
-/// scalar field. Unchanged from M2.
+/// Legacy bare-hull `GeometryRef.layout` (phase-4-m2.md Decision 11)
+/// — no scalar field. Retained for back-compat decoding only; the
+/// production encoder always emits [`LAYOUT_VOL`] since the VB-005
+/// promotion (the MVG3 blob is a strict superset).
+#[allow(dead_code)]
 pub const LAYOUT: &str = "MVG1:verts_f32x3+idx_u32+trimat_u32";
 
-/// Scalar-hull `GeometryRef.layout` (phase-4-m3.md Decision 14): the
-/// M2 blob plus a trailing per-vertex `f32` scalar array.
+/// Legacy scalar-hull `GeometryRef.layout` (phase-4-m3.md
+/// Decision 14): the MVG1 blob plus a trailing per-vertex `f32`
+/// scalar array. Retained for back-compat decoding only; production
+/// emits [`LAYOUT_VOL`].
+#[allow(dead_code)]
 pub const LAYOUT_SCALAR: &str = "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32";
 
 /// Volumetric `GeometryRef.layout` (phase-4-m7.md Decision 72): strict
 /// superset of `MVG2` with a per-element edge buffer, a `tri_flags`
-/// column (bit 0 = interior), and opt-in interior triangles. Activated
-/// only when the server has new data to ship (currently the
-/// `include_interior` sentinel — Decision 74); otherwise the M2/M3
-/// layouts stay byte-identical (VB-001).
+/// column (bit 0 = interior), and opt-in interior triangles. This is
+/// the **default and only** layout the production server now emits
+/// (VB-005 promotion). The `flags_mask` records which columns are
+/// populated for any given blob; interior triangles ride only when
+/// the reserved `include_interior` sentinel is set (Decision 74).
 pub const LAYOUT_VOL: &str =
     "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32";
 
@@ -93,9 +100,15 @@ pub struct MeshTopology {
     node_labels: Vec<i32>,
     /// Reference (undeformed) coords, flat `[node*3]`, z padded for 2-D.
     ref_coords: Vec<f32>,
-    /// Triangle list into the node array.
+    /// Triangle list into the node array. Built by the constructor as
+    /// a legacy bookkeeping companion; consumed only by the legacy
+    /// [`Self::visible_triangles`] which is itself retained for
+    /// possible MVG1/MVG2 back-compat / inspection. Production encode
+    /// uses [`Self::build_volumetric_faces`] instead.
+    #[allow(dead_code)]
     indices: Vec<u32>,
     /// Material id per triangle (`indices.len() / 3` entries).
+    #[allow(dead_code)]
     tri_material: Vec<u32>,
     /// Per element class, kept for M3 nodal scatter.
     elem_classes: Vec<ElemClass>,
@@ -947,9 +960,11 @@ impl MeshTopology {
     }
 
     /// Triangle list filtered to visible-material triangles, in the
-    /// original order (phase-4-m4.md Decision 16). With nothing
-    /// disabled this is the full list in the M2/M3 order, so the
-    /// encoded blob stays byte-identical for the frozen tests.
+    /// original order (phase-4-m4.md Decision 16). Retained for
+    /// possible MVG1/MVG2 back-compat / inspection; the production
+    /// `encode()` path uses [`Self::build_volumetric_faces`] +
+    /// [`Self::encode_mvg3`] instead since the VB-005 promotion.
+    #[allow(dead_code)]
     fn visible_triangles(&self, materials: &BTreeMap<u32, bool>) -> (Vec<u32>, Vec<u32>) {
         let mut idx = Vec::with_capacity(self.indices.len());
         let mut mat = Vec::with_capacity(self.tri_material.len());
@@ -1211,17 +1226,23 @@ impl MeshTopology {
         (buf, n_idx)
     }
 
-    /// Encode the current-state hull, dropping triangles of disabled
-    /// materials (phase-4-m4.md Decision 16). `scalar` (per-vertex,
-    /// phase-4-m3 Decision 14) yields the `MVG2` layout; `None` is the
-    /// M2 `MVG1` bare hull. With no material disabled the bytes are
-    /// identical to M2/M3. Returns the blob and the post-filter
-    /// `num_indices` for the `GeometryRef`.
+    /// Encode the current-state hull (`MVG3` — `phase-4-m7.md`
+    /// Decisions 72–74). The `MVG3` blob is the natural superset of
+    /// `MVG1`/`MVG2`: same vertex / index / per-tri-material columns,
+    /// **plus** the per-superclass element-edge buffer the client's
+    /// wireframe pass consumes (VB-005 fix; before this promotion the
+    /// `Edges`/`Wireframe` mode over-emitted hex face diagonals from
+    /// the triangle-list extractor) and the `tri_flags` column that
+    /// distinguishes boundary from interior faces.
     ///
-    /// The `MVG3` volumetric layout (phase-4-m7.md Decisions 72–74)
-    /// activates iff `materials[u32::MAX] == true` — the reserved
-    /// `include_interior` sentinel. Otherwise the M2/M3/M4 byte-stable
-    /// path is taken verbatim (VB-001).
+    /// `materials[u32::MAX] == true` (the reserved `include_interior`
+    /// sentinel — `phase-4-m7.md` Decision 74) flips the `flags_mask`
+    /// bit 3 on and includes interior triangles in the index list;
+    /// otherwise interior tris are filtered, yielding a boundary-hull
+    /// blob whose **rendered pixels** match the old M2/M3/M4 paths
+    /// byte-for-byte (the wire-level bytes are now MVG3, but the
+    /// scalar / per-vertex / per-tri columns are identical and the
+    /// renderer's `Shaded` pass ignores `element_edges`).
     pub fn encode(
         &self,
         db: &Database,
@@ -1230,42 +1251,8 @@ impl MeshTopology {
         materials: &BTreeMap<u32, bool>,
     ) -> (Vec<u8>, &'static str, u64) {
         let include_interior = matches!(materials.get(&INTERIOR_SENTINEL), Some(true));
-        if include_interior {
-            let (buf, n_idx) = self.encode_mvg3(db, state, scalar, materials, true);
-            return (buf, LAYOUT_VOL, n_idx);
-        }
-        let verts = self.coords_at_state(db, state);
-        let n_verts = (verts.len() / 3) as u64;
-        let (indices, tri_material) = self.visible_triangles(materials);
-        let n_idx = indices.len() as u64;
-        let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
-
-        let mut buf = Vec::with_capacity(
-            24 + verts.len() * 4
-                + indices.len() * 4
-                + tri_material.len() * 4
-                + if with_scalar { verts.len() / 3 * 4 } else { 0 },
-        );
-        buf.extend_from_slice(if with_scalar { b"MVG2" } else { b"MVG1" });
-        buf.extend_from_slice(&3u32.to_le_bytes());
-        buf.extend_from_slice(&n_verts.to_le_bytes());
-        buf.extend_from_slice(&n_idx.to_le_bytes());
-        for f in &verts {
-            buf.extend_from_slice(&f.to_le_bytes());
-        }
-        for i in &indices {
-            buf.extend_from_slice(&i.to_le_bytes());
-        }
-        for m in &tri_material {
-            buf.extend_from_slice(&m.to_le_bytes());
-        }
-        if with_scalar {
-            for v in scalar.unwrap() {
-                buf.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-        let layout = if with_scalar { LAYOUT_SCALAR } else { LAYOUT };
-        (buf, layout, n_idx)
+        let (buf, n_idx) = self.encode_mvg3(db, state, scalar, materials, include_interior);
+        (buf, LAYOUT_VOL, n_idx)
     }
 
     pub fn num_vertices(&self) -> u64 {
