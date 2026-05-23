@@ -1,0 +1,39 @@
+# mili-llm-bench — v0 baseline harness for the local-LLM agent track.
+#
+# Drives one defensible number (stock FunctionGemma-270M-it's L3
+# success rate on a 50-scenario bootstrap eval) per
+# planning/mili-viz/agent-local-llm-baseline.md. Off the Phase 4/5/6
+# critical path; capability-gated via the frozen AgentChat surface.
+#
+# This is PR-1 (W1 only): tool-schema artifact + package scaffold.
+# Inference-provider deps (transformers, anthropic) intentionally
+# absent until W5; pygriz left out of the install_requires for now so
+# the always-on W1 schema test stays GPU-free / server-free / pygriz-
+# free in CI. They will move into `dependencies` (or behind extras) as
+# the later workstreams land.
+
+[project]
+name = "mili-llm-bench"
+version = "0.0.0"
+description = "Bench harness for the mili-viz local-LLM agent v0 baseline"
+requires-python = ">=3.11"
+license = { text = "MIT OR Apache-2.0" }
+dependencies = [
+  "jsonschema>=4.20",
+  "protobuf>=4.25",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+]
+
+[project.scripts]
+mili-llm-bench = "mili_llm_bench.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

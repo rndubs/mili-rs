@@ -1,0 +1,845 @@
+[
+  {
+    "name": "close",
+    "description": "Close the currently loaded database.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "clrsel",
+    "description": "Clear the selection for one class (empty class clears all).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "colormap",
+    "description": "Pick a named colormap (e.g. 'cool', 'jet').",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "contour",
+    "description": "Draw scalar contour lines for a result with a given count.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "cutplane",
+    "description": "Set or clear the cut-plane (origin + normal; relative or absolute).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "ox": {
+          "type": "number"
+        },
+        "oy": {
+          "type": "number"
+        },
+        "oz": {
+          "type": "number"
+        },
+        "nx": {
+          "type": "number"
+        },
+        "ny": {
+          "type": "number"
+        },
+        "nz": {
+          "type": "number"
+        },
+        "relative": {
+          "type": "boolean"
+        },
+        "slice_only": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "griz_raw",
+    "description": "Escape hatch: run one raw griz/grizinit line (Layer-0).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "line": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "line"
+      ],
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "output": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "iso",
+    "description": "Toggle isosurfaces for a result with explicit levels or a count.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "on": {
+          "type": "boolean"
+        },
+        "levels": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "legend",
+    "description": "Set the legend's min/max range (omit a bound to autoscale that end).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "load",
+    "description": "Load a Mili database by root path (e.g. 'd3samp6').",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "num_states": {
+          "type": "integer"
+        },
+        "num_classes": {
+          "type": "integer"
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state_time_range": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "current_time": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "material",
+    "description": "Enable or disable a material (whole-class when material is omitted).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "enable": {
+          "type": "boolean"
+        },
+        "class_name": {
+          "type": "string"
+        },
+        "material": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "hidden_materials": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "named_view",
+    "description": "Save, restore, or list named camera views.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": [
+            "SAVE",
+            "RESTORE",
+            "LIST"
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "query",
+    "description": "Query result values for a class/labels/states subset.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "class_name": {
+          "type": "string"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "states": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "component": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "table": {
+          "type": "object"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "select",
+    "description": "Add elements/nodes of one class to the selection by range string.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "class_name": {
+          "type": "string"
+        },
+        "range": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "set_state",
+    "description": "Jump to a specific 1-based state index.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "integer"
+        },
+        "num_states": {
+          "type": "integer"
+        },
+        "current_time": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "show",
+    "description": "Color the mesh by a result (primal svar or derived family).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "opts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "range": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "snapshot",
+    "description": "Read the current session state (state, selection, result, camera).",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "integer"
+        },
+        "num_states": {
+          "type": "integer"
+        },
+        "current_time": {
+          "type": "number"
+        },
+        "classes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "result": {
+          "type": "object",
+          "properties": {
+            "result": {
+              "type": "string"
+            },
+            "component": {
+              "type": "string"
+            },
+            "range": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "additionalProperties": false
+        },
+        "hidden_materials": {
+          "type": "array",
+          "items": {
+            "type": "integer"
+          }
+        },
+        "camera": {
+          "type": "object",
+          "properties": {
+            "azimuth": {
+              "type": "number"
+            },
+            "elevation": {
+              "type": "number"
+            },
+            "distance": {
+              "type": "number"
+            },
+            "focus": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 3,
+              "maxItems": 3
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "step",
+    "description": "Step the state cursor: NEXT, PREV, FIRST, or LAST.",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string",
+          "enum": [
+            "NEXT",
+            "PREV",
+            "FIRST",
+            "LAST"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "integer"
+        },
+        "num_states": {
+          "type": "integer"
+        },
+        "current_time": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "view",
+    "description": "Manipulate the camera (rotate / translate / scale / zoom / set / reset).",
+    "input_schema": {
+      "type": "object",
+      "properties": {
+        "rotate": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "z": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "translate": {
+          "type": "object",
+          "properties": {
+            "dx": {
+              "type": "number"
+            },
+            "dy": {
+              "type": "number"
+            },
+            "dz": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "scale": {
+          "type": "object",
+          "properties": {
+            "factor": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "zoom": {
+          "type": "object",
+          "properties": {
+            "factor": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "set": {
+          "type": "object",
+          "properties": {
+            "azimuth": {
+              "type": "number"
+            },
+            "elevation": {
+              "type": "number"
+            },
+            "distance": {
+              "type": "number"
+            },
+            "fx": {
+              "type": "number"
+            },
+            "fy": {
+              "type": "number"
+            },
+            "fz": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        },
+        "reset": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "rotate"
+          ]
+        },
+        {
+          "required": [
+            "translate"
+          ]
+        },
+        {
+          "required": [
+            "scale"
+          ]
+        },
+        {
+          "required": [
+            "zoom"
+          ]
+        },
+        {
+          "required": [
+            "set"
+          ]
+        },
+        {
+          "required": [
+            "reset"
+          ]
+        }
+      ]
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  }
+]
