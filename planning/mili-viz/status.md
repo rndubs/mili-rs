@@ -708,19 +708,55 @@ Each row flips to ✅ when its gating test lands.
       at the schema layer by parametrized property-tree-walk tests.
       Always-on (no pygriz, no LLM, no GPU). Discharges
       [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W1.
-- [ ] **W2 — Bootstrap eval scenarios.** Hand-author 50 scenarios
-      (~10 intents × `d3samp6`, `cylinder`) with closed-kind
-      post-conditions grounded in the parity-suite's known-good
-      values; emit `data/posttraining/eval/bootstrap.jsonl`. Checked
-      in (small + stable). No interface dep. Discharges §W2.
-- [ ] **W3 — Verifier (L0..L3 + failure-mode taxonomy).**
-      Single Python module reused by v0 *and* by the future
-      `posttraining-dataset.md` Stage 4 pipeline. Emits `max_tier`,
-      `reward`, **and** a closed `failure_mode` label
-      (`parse_error`/`unknown_tool`/`schema_mismatch`/
-      `dispatch_error`/`nonexistent_material`/.../`wrong_final_state`/
-      `step_cap_hit`). Pure-logic tests against fabricated
-      rollouts; no LLM, no GPU. Discharges §W3.
+- [x] **W2 — Bootstrap eval scenarios.** ✅ **Landed.** 50 hand-authored
+      scenarios in `data/posttraining/eval/bootstrap.jsonl` covering
+      the 10 v0 intents (`load`, `set-state`, `step`, `select`,
+      `clrsel`, `show-primal`, `show-derived`, `material`,
+      `view-reset`, `colormap`) across `d3samp6` (101 states, 5 mats)
+      and `cylinder` (11 states, 2 mats) plus one compound multi-tool
+      scenario. Fixture facts (class names, state counts, material
+      ids) pulled from `reference/mili-python/tests/test_miliinternal.py`
+      and a live probe of both fixtures — not invented. Closed-kind
+      `postcondition` per scenario, validated at load time so drift
+      between the file and the W3 verifier fails loudly (the W2 × W3
+      contract). `mili_llm_bench.scenarios` carries the
+      `Scenario`/`Postcondition` dataclasses + a JSONL loader/dumper
+      that round-trips byte-identically. Always-on (no LLM, no GPU,
+      no pygriz). Discharges §W2. Gating test
+      `python/mili-llm-bench/tests/test_scenarios.py` (28 always-on:
+      round-trip, unique ids, count == 50, closed-kind enforcement,
+      10×2 intent×fixture coverage matrix, compound presence, loader
+      rejects unknown kinds / missing keys, dataclass round-trip);
+      W1's `test_schemas.py` (12) unchanged and green.
+- [x] **W3 — Verifier (L0..L3 + failure-mode taxonomy).** ✅ **Landed.**
+      `mili_llm_bench.verifier.verify(messages, postcondition)`
+      returns a `VerifierResult(max_tier: int, reward: float,
+      failure_mode: str | None)`. Two-column L0..L3 table (typed
+      tool call vs `griz_raw` arm — the latter's L1 grammar check is
+      a `# TODO(stage-1)` pointer at
+      `posttraining-dataset.md` Stage 1; v0 degenerates it to
+      "`arguments.line` is a string"). Closed 16-entry failure-mode
+      taxonomy mirroring the W4a `error_kind` enum pre-declared in
+      the design (`parse_error`/`unknown_tool`/`schema_mismatch` at
+      L0/L1, `dispatch_error`/`nonexistent_{material,class,result}`/
+      `state_out_of_range` at L2 from a structured
+      `response.error_kind` tag, `wrong_{final_state,selection,result,
+      range,materials}` at L3, driver-level
+      `step_cap_hit`/`token_cap_hit`/`timeout` via a synthetic
+      `stop:<reason>` system message). One handler per
+      post-condition kind (the 7-arm closed dispatch table). Reuses
+      the W1 `tools.json` artifact for input-schema validation; no
+      live pygriz, no LLM, no GPU. Discharges §W3. Gating tests
+      `python/mili-llm-bench/tests/test_verifier.py` (43 always-on:
+      one per L0..L3 tier, one per failure-mode taxonomy entry, one
+      happy + one failure per post-condition kind, taxonomy
+      completeness + closed-set pin, griz_raw degeneration,
+      `verify` rejects unknown kinds) + the W2 × W3 contract test
+      `python/mili-llm-bench/tests/test_scenarios_meet_verifier.py`
+      (1 always-on: fabricates the canonical perfect rollout for
+      each of the 50 scenarios and asserts `max_tier == 3`); W1's
+      `test_schemas.py` (12) + W2's `test_scenarios.py` (28)
+      unchanged and green.
 - [ ] **W4a — Agent harness (the factored core).** Tool registry +
       `jsonschema` input validator + dispatcher (typed Commands →
       pygriz typed helpers; `griz_raw` → `s.command(raw)`;

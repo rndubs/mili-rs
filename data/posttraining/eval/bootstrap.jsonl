@@ -1,0 +1,50 @@
+{"id": "bs-001", "fixture": "d3samp6", "intent_id": "load", "instruction": "load the d3samp6 database", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-002", "fixture": "d3samp6", "intent_id": "load", "instruction": "open d3samp6", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-003", "fixture": "d3samp6", "intent_id": "load", "instruction": "load fixture d3samp6 from disk", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-004", "fixture": "d3samp6", "intent_id": "set-state", "instruction": "jump to state 50", "postcondition": {"kind": "state_index", "expect": {"state": 50}}}
+{"id": "bs-005", "fixture": "d3samp6", "intent_id": "set-state", "instruction": "go to state 101", "postcondition": {"kind": "state_index", "expect": {"state": 101}}}
+{"id": "bs-006", "fixture": "d3samp6", "intent_id": "set-state", "instruction": "set the state cursor to 25", "postcondition": {"kind": "state_index", "expect": {"state": 25}}}
+{"id": "bs-007", "fixture": "d3samp6", "intent_id": "step", "instruction": "step to the next state", "postcondition": {"kind": "state_index", "expect": {"state": 2}}}
+{"id": "bs-008", "fixture": "d3samp6", "intent_id": "step", "instruction": "go to the last state", "postcondition": {"kind": "state_index", "expect": {"state": 101}}}
+{"id": "bs-009", "fixture": "d3samp6", "intent_id": "step", "instruction": "rewind to the first state", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-010", "fixture": "d3samp6", "intent_id": "select", "instruction": "select bricks 1 through 10", "postcondition": {"kind": "selection_set", "expect": {"selection": {"brick": "1-10"}}}}
+{"id": "bs-011", "fixture": "d3samp6", "intent_id": "select", "instruction": "pick beam 1", "postcondition": {"kind": "selection_set", "expect": {"selection": {"beam": "1"}}}}
+{"id": "bs-012", "fixture": "d3samp6", "intent_id": "clrsel", "instruction": "clear the brick selection", "postcondition": {"kind": "selection_set", "expect": {"selection": {}}}}
+{"id": "bs-013", "fixture": "d3samp6", "intent_id": "clrsel", "instruction": "deselect everything", "postcondition": {"kind": "selection_set", "expect": {"selection": {}}}}
+{"id": "bs-014", "fixture": "d3samp6", "intent_id": "show-primal", "instruction": "color the mesh by sx", "postcondition": {"kind": "active_result", "expect": {"result": "sx"}}}
+{"id": "bs-015", "fixture": "d3samp6", "intent_id": "show-primal", "instruction": "show stress component sy", "postcondition": {"kind": "active_result", "expect": {"result": "sy"}}}
+{"id": "bs-016", "fixture": "d3samp6", "intent_id": "show-primal", "instruction": "display velocity vx on the mesh", "postcondition": {"kind": "active_result", "expect": {"result": "vx"}}}
+{"id": "bs-017", "fixture": "d3samp6", "intent_id": "show-derived", "instruction": "color the mesh by effective stress", "postcondition": {"kind": "active_result", "expect": {"result": "eff_stress"}}}
+{"id": "bs-018", "fixture": "d3samp6", "intent_id": "show-derived", "instruction": "show pressure", "postcondition": {"kind": "active_result", "expect": {"result": "pressure"}}}
+{"id": "bs-019", "fixture": "d3samp6", "intent_id": "material", "instruction": "disable material 3", "postcondition": {"kind": "materials_visible", "expect": {"hidden_materials": [3]}}}
+{"id": "bs-020", "fixture": "d3samp6", "intent_id": "material", "instruction": "hide material 1", "postcondition": {"kind": "materials_visible", "expect": {"hidden_materials": [1]}}}
+{"id": "bs-021", "fixture": "d3samp6", "intent_id": "material", "instruction": "enable material 3", "postcondition": {"kind": "materials_visible", "expect": {"hidden_materials": []}}}
+{"id": "bs-022", "fixture": "d3samp6", "intent_id": "view-reset", "instruction": "reset the view", "postcondition": {"kind": "camera_named_view", "expect": {"action": "reset"}}}
+{"id": "bs-023", "fixture": "d3samp6", "intent_id": "colormap", "instruction": "use the cool colormap", "postcondition": {"kind": "camera_named_view", "expect": {"action": "colormap", "name": "cool"}}}
+{"id": "bs-024", "fixture": "d3samp6", "intent_id": "colormap", "instruction": "switch to the jet colormap", "postcondition": {"kind": "camera_named_view", "expect": {"action": "colormap", "name": "jet"}}}
+{"id": "bs-025", "fixture": "cylinder", "intent_id": "load", "instruction": "load the cylinder database", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-026", "fixture": "cylinder", "intent_id": "load", "instruction": "open cylinder", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-027", "fixture": "cylinder", "intent_id": "load", "instruction": "load fixture cylinder", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-028", "fixture": "cylinder", "intent_id": "set-state", "instruction": "jump to state 5", "postcondition": {"kind": "state_index", "expect": {"state": 5}}}
+{"id": "bs-029", "fixture": "cylinder", "intent_id": "set-state", "instruction": "go to state 11", "postcondition": {"kind": "state_index", "expect": {"state": 11}}}
+{"id": "bs-030", "fixture": "cylinder", "intent_id": "set-state", "instruction": "set the cursor to state 3", "postcondition": {"kind": "state_index", "expect": {"state": 3}}}
+{"id": "bs-031", "fixture": "cylinder", "intent_id": "step", "instruction": "advance to the next state", "postcondition": {"kind": "state_index", "expect": {"state": 2}}}
+{"id": "bs-032", "fixture": "cylinder", "intent_id": "step", "instruction": "go to the last state", "postcondition": {"kind": "state_index", "expect": {"state": 11}}}
+{"id": "bs-033", "fixture": "cylinder", "intent_id": "step", "instruction": "rewind to state 1", "postcondition": {"kind": "state_index", "expect": {"state": 1}}}
+{"id": "bs-034", "fixture": "cylinder", "intent_id": "select", "instruction": "select bricks 1-5", "postcondition": {"kind": "selection_set", "expect": {"selection": {"brick": "1-5"}}}}
+{"id": "bs-035", "fixture": "cylinder", "intent_id": "select", "instruction": "pick brick 7", "postcondition": {"kind": "selection_set", "expect": {"selection": {"brick": "7"}}}}
+{"id": "bs-036", "fixture": "cylinder", "intent_id": "clrsel", "instruction": "clear the brick selection", "postcondition": {"kind": "selection_set", "expect": {"selection": {}}}}
+{"id": "bs-037", "fixture": "cylinder", "intent_id": "clrsel", "instruction": "clear all selections", "postcondition": {"kind": "selection_set", "expect": {"selection": {}}}}
+{"id": "bs-038", "fixture": "cylinder", "intent_id": "show-primal", "instruction": "color by sx", "postcondition": {"kind": "active_result", "expect": {"result": "sx"}}}
+{"id": "bs-039", "fixture": "cylinder", "intent_id": "show-primal", "instruction": "show vy", "postcondition": {"kind": "active_result", "expect": {"result": "vy"}}}
+{"id": "bs-040", "fixture": "cylinder", "intent_id": "show-primal", "instruction": "display vz", "postcondition": {"kind": "active_result", "expect": {"result": "vz"}}}
+{"id": "bs-041", "fixture": "cylinder", "intent_id": "show-derived", "instruction": "color by effective stress", "postcondition": {"kind": "active_result", "expect": {"result": "eff_stress"}}}
+{"id": "bs-042", "fixture": "cylinder", "intent_id": "show-derived", "instruction": "show eff_stress on the mesh", "postcondition": {"kind": "active_result", "expect": {"result": "eff_stress"}}}
+{"id": "bs-043", "fixture": "cylinder", "intent_id": "material", "instruction": "disable material 2", "postcondition": {"kind": "materials_visible", "expect": {"hidden_materials": [2]}}}
+{"id": "bs-044", "fixture": "cylinder", "intent_id": "material", "instruction": "hide material 1", "postcondition": {"kind": "materials_visible", "expect": {"hidden_materials": [1]}}}
+{"id": "bs-045", "fixture": "cylinder", "intent_id": "material", "instruction": "enable material 2", "postcondition": {"kind": "materials_visible", "expect": {"hidden_materials": []}}}
+{"id": "bs-046", "fixture": "cylinder", "intent_id": "view-reset", "instruction": "reset the view", "postcondition": {"kind": "camera_named_view", "expect": {"action": "reset"}}}
+{"id": "bs-047", "fixture": "cylinder", "intent_id": "view-reset", "instruction": "reset camera", "postcondition": {"kind": "camera_named_view", "expect": {"action": "reset"}}}
+{"id": "bs-048", "fixture": "cylinder", "intent_id": "colormap", "instruction": "use cool", "postcondition": {"kind": "camera_named_view", "expect": {"action": "colormap", "name": "cool"}}}
+{"id": "bs-049", "fixture": "cylinder", "intent_id": "colormap", "instruction": "switch to the jet colormap", "postcondition": {"kind": "camera_named_view", "expect": {"action": "colormap", "name": "jet"}}}
+{"id": "bs-050", "fixture": "d3samp6", "intent_id": "compound", "instruction": "disable material 3 and then color the mesh by effective stress", "postcondition": {"kind": "active_result", "expect": {"result": "eff_stress"}}}
