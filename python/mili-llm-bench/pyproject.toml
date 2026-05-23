@@ -5,12 +5,12 @@
 # planning/mili-viz/agent-local-llm-baseline.md. Off the Phase 4/5/6
 # critical path; capability-gated via the frozen AgentChat surface.
 #
-# This is PR-1 (W1 only): tool-schema artifact + package scaffold.
-# Inference-provider deps (transformers, anthropic) intentionally
-# absent until W5; pygriz left out of the install_requires for now so
-# the always-on W1 schema test stays GPU-free / server-free / pygriz-
-# free in CI. They will move into `dependencies` (or behind extras) as
-# the later workstreams land.
+# PR-3 adds W4a (the factored agent harness) + W5 partial
+# (MockLlmProvider + ReplayLlmProvider — FunctionGemma + Anthropic
+# providers land in PR-5 with their own extras). The pygriz adapter
+# (the only file in the package that imports `pygriz`) lives behind
+# the [pygriz] extra so the always-on test path (W1+W2+W3+W4a) stays
+# GPU-free / server-free / pygriz-free in CI.
 
 [project]
 name = "mili-llm-bench"
@@ -26,6 +26,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest",
+]
+# Optional — needed only by `mili_llm_bench.dispatchers.pygriz`. The
+# always-on harness tests run with FakeDispatcher and do NOT require
+# this extra.
+pygriz = [
+  "pygriz",
 ]
 
 [project.scripts]

@@ -757,25 +757,49 @@ Each row flips to ✅ when its gating test lands.
       each of the 50 scenarios and asserts `max_tier == 3`); W1's
       `test_schemas.py` (12) + W2's `test_scenarios.py` (28)
       unchanged and green.
-- [ ] **W4a — Agent harness (the factored core).** Tool registry +
-      `jsonschema` input validator + dispatcher (typed Commands →
-      pygriz typed helpers; `griz_raw` → `s.command(raw)`;
-      `query`/`snapshot` → pygriz read paths) + error wrapper +
-      response projection (the W1 table) + per-turn budget caps.
-      Public surface `run_turn(provider, session, messages, tools,
-      ...) → TurnResult`; closed `error_kind` enum mirrors W3's
-      failure-mode taxonomy. **N tool calls per turn dispatched in
-      declared order**; **parse errors fed back as `tool` responses
-      so the model self-corrects (option (b))**; **`ReplayLlmProvider`
-      ships in v0** for verifier-regression + dataset-validation
-      round-trips. Provider-agnostic + session-agnostic: reused by
-      W4b (eval driver), future `posttraining-dataset.md` Stage 5
-      (teacher rollouts), and the eventual server-side `AgentChat`
-      handler. Gating tests: invariants
-      (`test_no_state_times_in_response` /
-      `test_no_flight_ticket_in_response` /
-      `test_no_agent_in_response`), N-tool-calls-per-turn,
-      parse-error feedback, replay round-trip. Discharges §W4a.
+- [x] **W4a — Agent harness (the factored core).** ✅ **Landed.**
+      `python/mili-llm-bench/src/mili_llm_bench/harness.py` ships
+      `run_turn(provider, dispatcher, messages, tools, *,
+      step_index, ...) → TurnResult` with a closed `error_kind`
+      enum re-exported from `verifier.FAILURE_MODES` (the same
+      tuple — enum-identity pinned by
+      `test_error_kind_enum_identity_with_verifier_failure_modes`,
+      so the two-source-of-truth anti-pattern is structurally
+      impossible). The harness owns: tool registry
+      (`Registry.load_from_artifact()` reads the pinned W1
+      `tools.json`), `jsonschema` input validation, per-slot
+      dispatch through a separated `Dispatcher` Protocol seam,
+      the defensive forbidden-field projection belt (the three
+      harness invariants from baseline.md §W1), structured error
+      responses (parse/unknown/schema/dispatch + dispatcher-tagged
+      argument-level L2 failures), and the per-turn wall-clock
+      `timeout_s` budget. **N tool calls per turn dispatched in
+      declared order**; **parse errors fed back as one synthetic
+      `<parse_error>` `ExecutedCall` + matching `tool` message so
+      the model self-corrects on the next turn (option (b))**.
+      The pygriz adapter (`dispatchers/pygriz.py`) is the **only**
+      file in the package that imports `pygriz` — kept behind the
+      `[project.optional-dependencies].pygriz` extra so the
+      always-on test path stays GPU-free / server-free /
+      pygriz-free. `ReplayLlmProvider` lands here too (Mock +
+      Replay are W5's pure-Python sliver; FunctionGemma +
+      Anthropic deferred to PR-5 — Decision L5 surface unchanged).
+      Discharges §W4a. Gating tests
+      `python/mili-llm-bench/tests/test_harness.py` (17 always-on:
+      three forbidden-field per-field invariants on a fabricated
+      raw `Snapshot` + end-to-end strip through `run_turn`,
+      N-tool-calls-per-turn dispatch ordering + canonical message
+      shape, parse-error feedback both standalone and embedded in
+      a mixed batch, error_kind enum identity vs verifier, replay
+      round-trip on a fabricated `rollouts.jsonl` + exhaustion
+      raise, per-turn timeout, schema mismatch + unknown tool +
+      dispatcher-classified L2 + closed-taxonomy fallback,
+      final_text arm, registry sanity, projection no-op, and the
+      W2×W3×W4a contract test driving `bs-001` to L3 via the
+      live `verifier.verify`); W1's `test_schemas.py` (12) + W2's
+      `test_scenarios.py` (28) + W3's `test_verifier.py` (43) +
+      W2×W3 contract (1) all unchanged and green (101 always-on
+      total).
 - [ ] **W4b — Eval driver.** v0-specific loop on top of W4a — opens
       a pygriz `Session` per scenario, runs `run_turn` until
       `final_text` / `step_cap_hit` / `timeout`, calls
@@ -784,15 +808,25 @@ Each row flips to ✅ when its gating test lands.
       `step_cap=8`, `max_new_tokens=256`, `temperature=0`,
       `seed=0`, per-turn `timeout=60s`. Pure-logic tests via
       `MockLlmProvider` — no LLM, no GPU. Discharges §W4b.
-- [ ] **W5 — Inference provider seam.** `LlmProvider` Protocol +
+- [ ] **W5 — Inference provider seam.** 🟡 **Partial — Mock +
+      Replay landed (PR-3 with W4a); FunctionGemma + Anthropic
+      deferred to PR-5.** `LlmProvider` Protocol +
+      `ProviderOutput` dataclass in
+      `python/mili-llm-bench/src/mili_llm_bench/providers/base.py`,
+      `MockLlmProvider` (scripted, deterministic, with optional
+      per-call sleep for the harness-timeout test) and
+      `ReplayLlmProvider` (reads a `rollouts.jsonl`, replays the
+      assistant turns of one stored record) shipped — both
+      pure-Python with no LLM / GPU / network requirement.
       `FunctionGemmaProvider` (HF transformers, the model card's
-      documented path), `AnthropicProvider` (frontier baseline +
-      future teacher), `MockLlmProvider` (deterministic tests),
-      `ReplayLlmProvider` (pre-recorded outputs for re-grading /
-      dataset validation; W4a "Replay mode"). The
+      documented chat-template path) and `AnthropicProvider`
+      (frontier baseline + future teacher) deferred to PR-5 with
+      their own optional-dependency extras. The
       Candle/llama.cpp/vLLM runtime swap from
-      [`agent-local-llm.md`](agent-local-llm.md) Decision 2 happens
-      behind this seam later. Discharges §W5.
+      [`agent-local-llm.md`](agent-local-llm.md) Decision 2
+      happens behind this seam later. Discharges §W5 partially —
+      every consumer (W4a tests, W4b driver-to-be) can already
+      build against the Protocol without the heavy deps.
 - [ ] **W6 — Bootstrap run + report.**
       `mili-llm-bench run --provider functiongemma --scenarios
       bootstrap.jsonl` produces `config.yaml`+`rollouts.jsonl`+
