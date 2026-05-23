@@ -48,9 +48,9 @@ pub use renderer::{
 };
 pub use session::{fetch_server_mesh, Session};
 pub use shell::{
-    build_shell_ui, control_menu_items, cutplane_cmd, dock_rail_glyphs, BottomTab, CutPlaneState,
-    CutThrottle, LoadedInfo, Overlay, Overlays, RenderMode, ResultInfo, SessionPhase, ShellState,
-    Theme, TimeSample, TranscriptKind, TranscriptLine, UiAction, CUT_PREVIEW_INTERVAL,
-    DERIVED_RESULTS,
+    build_shell_ui, control_menu_items, cutplane_cmd, dock_rail_glyphs, slice_cmd, BottomTab,
+    CutPlaneState, CutThrottle, LoadedInfo, Overlay, Overlays, RenderMode, ResultInfo,
+    SessionPhase, ShellState, Theme, TimeSample, TranscriptKind, TranscriptLine, UiAction,
+    CUT_GIZMO_COLOR, CUT_PREVIEW_INTERVAL, DERIVED_RESULTS, SLICE_GIZMO_COLOR,
 };
 pub use tweaks::{is_persisted_action, PersistedTweaks, ThemePref};
