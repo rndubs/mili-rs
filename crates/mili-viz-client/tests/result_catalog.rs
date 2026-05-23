@@ -28,6 +28,8 @@ use mili_viz_client::{
     ResultCatalog, Session, SessionPhase, ShellState, UiAction,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -145,7 +147,9 @@ async fn composite_render() {
     let mesh = fetch_server_mesh(&path.to_string_lossy(), "")
         .await
         .expect("in-process load/show yields a decoded hull");
-    let (w, h) = (240u32, 240u32);
+    // 480×320 so a real central viewport exists past the default
+    // dock+AI-rail chrome (see `tests/common/mod.rs`).
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -160,11 +164,6 @@ async fn composite_render() {
         ..ShellState::default()
     };
 
-    let at = |px: &[u8], x: u32, y: u32| {
-        let i = ((y * w + x) * 4) as usize;
-        [px[i], px[i + 1], px[i + 2]]
-    };
-
     // (a) Default (catalog None) — the byte-stable placeholder seam.
     let mut bare = base.clone();
     let Some(bpx) = render_shell_to_image(w, h, &camera, &mesh, None, &mut bare) else {
@@ -174,11 +173,7 @@ async fn composite_render() {
         );
         return;
     };
-    let bc = at(&bpx, w / 2, h / 2);
-    assert!(
-        bc.iter().copied().max().unwrap() > 60,
-        "no-catalog: viewport centre is the mesh, got {bc:?}"
-    );
+    common::assert_mesh_visible(&bpx, 20, "no-catalog: viewport centre is the mesh");
 
     // (b) The real fetched catalog applied — the primal listing must
     // not perturb the viewport (it lives in the collapsed left dock);
@@ -187,9 +182,5 @@ async fn composite_render() {
     full.catalog = Some(catalog);
     let fpx = render_shell_to_image(w, h, &camera, &mesh, None, &mut full)
         .expect("adapter was present for render (a)");
-    let fc = at(&fpx, w / 2, h / 2);
-    assert!(
-        fc.iter().copied().max().unwrap() > 60,
-        "catalog: viewport centre is still the mesh, got {fc:?}"
-    );
+    common::assert_mesh_visible(&fpx, 20, "catalog: viewport centre is still the mesh");
 }

@@ -32,6 +32,8 @@ use mili_viz_client::{
     SessionPhase, ShellState, UiAction,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -151,7 +153,9 @@ async fn composite_render() {
         .await
         .expect("in-process load/show yields a decoded hull");
 
-    let (w, h) = (240u32, 240u32);
+    // 480×320 so a real central viewport exists past the default
+    // dock+AI-rail chrome (see `tests/common/mod.rs`).
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -188,11 +192,7 @@ async fn composite_render() {
         return;
     };
     assert_eq!(px.len() as u32, w * h * 4);
-    let cp = at(&px, w / 2, h / 2);
-    assert!(
-        cp.iter().copied().max().unwrap() > 60,
-        "collapsed: viewport centre should be the mesh, got {cp:?}"
-    );
+    common::assert_mesh_visible(&px, 20, "collapsed: viewport centre should be the mesh");
     let dock_chrome = (40..h - 30).any(|y| is_chrome(at(&px, 40, y)));
     assert!(dock_chrome, "collapsed: left dock chrome over the mesh");
 

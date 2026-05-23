@@ -17,6 +17,8 @@ use mili_viz_client::{
     render_shell_to_image, Camera, ResultInfo, SessionPhase, ShellState,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -171,7 +173,11 @@ async fn composite_render() {
         .await
         .expect("in-process load/show yields a decoded hull");
 
-    let (w, h) = (200u32, 160u32);
+    // 480×320 so a real central viewport exists past the default
+    // dock+AI-rail chrome (see `tests/common/mod.rs`). The chrome
+    // sub-band the `(40..h-30) any` scan below targets still falls
+    // inside the dock at this larger size.
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -200,13 +206,12 @@ async fn composite_render() {
         [px[i], px[i + 1], px[i + 2]]
     };
 
-    // The viewport centre is still the rendered mesh (the egui pass
-    // is additive and the CentralPanel is transparent — Decision 45).
-    let center_px = at(w / 2, h / 2);
-    assert!(
-        center_px.iter().copied().max().unwrap() > 60,
-        "viewport centre should be the mesh, got {center_px:?}"
-    );
+    // The mesh pass is additive over a transparent CentralPanel
+    // (Decision 45); check via frame-wide mesh-pixel count (see
+    // `tests/common/mod.rs`) rather than a single centre pixel —
+    // non-convex corpus meshes leave a hollow line-of-sight at the
+    // bounding-sphere centre.
+    common::assert_mesh_visible(&px, 20, "viewport centre should be the mesh");
 
     // A column deep inside the left dock is opaque egui chrome: it is
     // neither the dark clear colour (a bare corner would be < 40) nor

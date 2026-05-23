@@ -873,7 +873,12 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        let mut renderer = Renderer::new(device, queue, format);
+        // 4× MSAA on the windowed path so the 1-px `LineList` edge pass
+        // (VB-003) and the hull silhouette don't alias into the broken
+        // "dashed" look they show at native resolution; headless tests
+        // still go through `Renderer::new` (sample_count=1) so the
+        // byte-stable composite gate (VB-001) is untouched.
+        let mut renderer = Renderer::new_with_samples(device, queue, format, 4);
         if let Some(mesh) = &self.mesh {
             renderer.upload_mesh(mesh, self.shell.effective_range(), &self.shell.colormap);
         }

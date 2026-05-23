@@ -27,6 +27,8 @@ use mili_viz_client::{
     ShellState,
 };
 
+mod common;
+
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -159,7 +161,9 @@ async fn composite_render() {
         .await
         .expect("in-process load/show yields a decoded hull");
 
-    let (w, h) = (240u32, 240u32);
+    // 480×320 so a real central viewport exists past the default
+    // dock+AI-rail chrome (see `tests/common/mod.rs`).
+    let (w, h) = (480u32, 320u32);
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);
 
@@ -204,10 +208,5 @@ async fn composite_render() {
          on={on_amber} off={off_amber}"
     );
     // The mesh is still there under/around the glyph (not occluded).
-    let i = (((h / 2) * w + w / 2) * 4) as usize;
-    let centre = [on_px[i], on_px[i + 1], on_px[i + 2]];
-    assert!(
-        centre.iter().copied().max().unwrap() > 60,
-        "viewport centre still shows the mesh, got {centre:?}"
-    );
+    common::assert_mesh_visible(&on_px, 20, "viewport centre still shows the mesh");
 }
