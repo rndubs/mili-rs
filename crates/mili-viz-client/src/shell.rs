@@ -105,11 +105,19 @@ impl Overlays {
     }
 }
 
-/// How the renderer draws the mesh (VB-003). The default
+/// How the renderer draws the mesh (VB-003 + Phase 5 M7). The default
 /// [`RenderMode::Shaded`] is the unchanged single filled
 /// `TriangleList` pass, so the byte-stable M3 composite path
 /// (`render_shell_to_image`, always `Shaded`) is unaffected
 /// (`bug-tracker.md` VB-001).
+///
+/// `Translucent` and `Xray` are Phase 5 M7 (Decisions 81–82): they
+/// consume the new `MVG3` server-supplied per-element edge buffer
+/// when present, and fall back to the legacy triangle-edge extractor
+/// for `MVG1`/`MVG2` servers (byte-stable). `Interior` is **not** a
+/// `RenderMode`; the include-interior toggle lives separately on
+/// [`ShellState::interior_on`] (Decision 83 — server round-trip via
+/// the reserved `MaterialVisibility{ material: u32::MAX }` sentinel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
     /// Filled lit hull only — the M2/M3 pass, unchanged.
@@ -122,6 +130,14 @@ pub enum RenderMode {
     /// Unique mesh edges only over the cleared background — a
     /// see-through wireframe (no fill to occlude back edges).
     Wireframe,
+    /// Alpha-blended fill (depth-test on, depth-write off): the
+    /// silhouette plus any interior-triangle layer the server is
+    /// shipping. Phase 5 M7 Decision 81.
+    Translucent,
+    /// `Translucent` fill plus the element-edge overlay — the
+    /// high-information "see-through but edges visible" mode.
+    /// Phase 5 M7 Decision 81.
+    Xray,
 }
 
 impl RenderMode {
@@ -131,6 +147,8 @@ impl RenderMode {
             RenderMode::Shaded => "shaded",
             RenderMode::Edges => "shaded + edges",
             RenderMode::Wireframe => "wireframe",
+            RenderMode::Translucent => "translucent",
+            RenderMode::Xray => "x-ray",
         }
     }
 }
@@ -243,6 +261,13 @@ pub enum UiAction {
     /// [`ShellState`]; the windowed app retargets the renderer. No
     /// proto change — the frozen `Command` set is untouched.
     SetRenderMode(RenderMode),
+    /// Include-interior toggle (Phase 5 M7 Decision 83). Already
+    /// applied to [`ShellState::interior_on`]; the windowed app
+    /// lowers this to the frozen `Cmd::Material` with the reserved
+    /// `material: Some(u32::MAX)` sentinel that the server reads via
+    /// `MaterialsState.visible` (Phase 4 M7 Decision 74). The
+    /// re-emitted blob then carries the interior triangles.
+    SetInteriorMode(bool),
     /// Pure-client picking-mode toggle. Already applied to
     /// [`ShellState`]; client-side ray-cast against the cached hull,
     /// no proto command.
@@ -430,6 +455,14 @@ pub struct ShellState {
     /// Default [`RenderMode::Shaded`] keeps the M3 composite gate
     /// byte-stable.
     pub render_mode: RenderMode,
+    /// Phase 5 M7 (Decision 83) include-interior toggle. `false`
+    /// (default) keeps the server emitting an `MVG1`/`MVG2` boundary
+    /// hull so the M2/M3/M4/MVP-polish composite paths stay
+    /// byte-identical. Flipping it true lowers a `Cmd::Material` with
+    /// the reserved `u32::MAX` sentinel, which makes the next `show`
+    /// re-emit an `MVG3` blob carrying the interior triangles
+    /// (`tri_flags & 1 == 1`).
+    pub interior_on: bool,
     /// Active egui theme (wireframes §"Tweaks"), driven by the
     /// Preferences menu. Default [`Theme::Dark`] == egui's default
     /// visuals, so the M3 composite path is pixel-unchanged.
@@ -498,6 +531,7 @@ impl Default for ShellState {
             legend_min: None,
             legend_max: None,
             render_mode: RenderMode::default(),
+            interior_on: false,
             theme: Theme::default(),
             dock_collapsed: false,
             focus_mode: false,
@@ -532,6 +566,15 @@ impl ShellState {
     pub fn set_render_mode(&mut self, mode: RenderMode) -> UiAction {
         self.render_mode = mode;
         UiAction::SetRenderMode(mode)
+    }
+
+    /// Toggle the include-interior flag (Phase 5 M7 Decision 83).
+    /// Updates [`ShellState::interior_on`]; the returned action is
+    /// lowered by the windowed app to the frozen `Cmd::Material`
+    /// with the reserved `u32::MAX` sentinel.
+    pub fn set_interior_mode(&mut self, on: bool) -> UiAction {
+        self.interior_on = on;
+        UiAction::SetInteriorMode(on)
     }
 
     /// Switch the egui theme (wireframes §"Tweaks"). Pure client
@@ -774,7 +817,13 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     });
                 });
                 ui.menu_button("Rendering", |ui| {
-                    for mode in [RenderMode::Shaded, RenderMode::Edges, RenderMode::Wireframe] {
+                    for mode in [
+                        RenderMode::Shaded,
+                        RenderMode::Edges,
+                        RenderMode::Wireframe,
+                        RenderMode::Translucent,
+                        RenderMode::Xray,
+                    ] {
                         let mark = if state.render_mode == mode {
                             "● "
                         } else {
@@ -784,6 +833,14 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                         if ui.button(format!("{mark}{}", mode.label())).clicked() {
                             actions.push(state.set_render_mode(mode));
                         }
+                    }
+                    ui.separator();
+                    // Include-interior is composable with any RenderMode
+                    // (Phase 5 M7 Decision 83). Visible cell-cell faces
+                    // need the server round-trip; the toggle re-emits.
+                    let mark = if state.interior_on { "● " } else { "○ " };
+                    if ui.button(format!("{mark}include interior")).clicked() {
+                        actions.push(state.set_interior_mode(!state.interior_on));
                     }
                 });
                 ui.menu_button("Picking", |ui| {

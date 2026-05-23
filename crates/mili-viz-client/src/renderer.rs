@@ -89,11 +89,22 @@ pub struct Renderer {
     /// `mode != Shaded`, so the default path's command stream is
     /// byte-for-byte unchanged.
     edge_pipeline: wgpu::RenderPipeline,
+    /// Alpha-blended fill pipeline (Phase 5 M7 Decision 81):
+    /// depth-test on, depth-write off, source factor =
+    /// `Constant`/`OneMinusConstant`. The per-pass blend constant
+    /// applied via [`wgpu::RenderPass::set_blend_constant`] picks the
+    /// alpha (default 0.35). Only recorded for `Translucent`/`Xray`.
+    translucent_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     mesh: Option<MeshBuffers>,
     mode: RenderMode,
 }
+
+/// Phase 5 M7 Decision 81: default alpha for `Translucent`/`Xray`. A
+/// future `Preferences → Transparency` tweak can lower this through a
+/// setter without re-opening the milestone.
+const TRANSLUCENT_ALPHA: f32 = 0.35;
 
 impl Renderer {
     /// Build a renderer for an existing device/queue targeting
@@ -243,11 +254,69 @@ impl Renderer {
             cache: None,
         });
 
+        // Translucent fill pipeline (Phase 5 M7 Decision 81). Reuses
+        // the mesh shader and vertex layout; the only differences are
+        // blend = constant-alpha over destination, depth-write off so
+        // overlapping translucent triangles don't occlude each other.
+        // The shader still outputs alpha = 1.0; the visible alpha is
+        // the per-pass blend constant set in [`render_in`].
+        let translucent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("translucent pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Constant,
+                            dst_factor: wgpu::BlendFactor::OneMinusConstant,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::Zero,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         Self {
             device,
             queue,
             pipeline,
             edge_pipeline,
+            translucent_pipeline,
             uniform_buffer,
             bind_group,
             mesh: None,
@@ -320,17 +389,27 @@ impl Renderer {
                 contents: bytemuck::cast_slice(&mesh.indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
-        let edges = mesh.edge_indices();
+        // Phase 5 M7 Decision 82: prefer the server-supplied per-element
+        // edge buffer (`MVG3.element_edges`) over the on-the-fly
+        // triangle-edge extractor. The extractor over-emits face
+        // diagonals for any superclass whose face is not already a
+        // triangle (VB-005, the hex case); the server table enumerates
+        // the element's true edges. The legacy fallback keeps `MVG1`/
+        // `MVG2` byte-stable (VB-001).
+        let edges: Vec<u32> = mesh
+            .element_edges
+            .clone()
+            .unwrap_or_else(|| mesh.edge_indices());
         let edge_count = edges.len() as u32;
         // wgpu rejects a zero-sized buffer; a degenerate (no-triangle)
         // mesh keeps a 1-pair placeholder that `edge_count == 0` never
         // draws.
-        let edges: &[u32] = if edges.is_empty() { &[0, 0] } else { &edges };
+        let edges_payload: &[u32] = if edges.is_empty() { &[0, 0] } else { &edges };
         let edge_index_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("mesh edge indices"),
-                contents: bytemuck::cast_slice(edges),
+                contents: bytemuck::cast_slice(edges_payload),
                 usage: wgpu::BufferUsages::INDEX,
             });
         self.mesh = Some(MeshBuffers {
@@ -444,10 +523,29 @@ impl Renderer {
                 // sequence so the byte-stable composite gate (VB-001 /
                 // status 23) is untouched. Edges adds a depth-tested
                 // overlay; Wireframe draws only the edges (VB-003).
+                // Phase 5 M7 (Decision 81): Translucent swaps the fill
+                // pipeline for the alpha-blended one with depth-write
+                // off; Xray is Translucent fill + the element-edge
+                // overlay so cell-cell structure stays legible.
+                let translucent_fill =
+                    matches!(self.mode, RenderMode::Translucent | RenderMode::Xray);
                 let draw_fill = self.mode != RenderMode::Wireframe;
-                let draw_edges = self.mode != RenderMode::Shaded && m.edge_count > 0;
+                let draw_edges = matches!(
+                    self.mode,
+                    RenderMode::Edges | RenderMode::Wireframe | RenderMode::Xray
+                ) && m.edge_count > 0;
                 if draw_fill {
-                    pass.set_pipeline(&self.pipeline);
+                    if translucent_fill {
+                        pass.set_blend_constant(wgpu::Color {
+                            r: f64::from(TRANSLUCENT_ALPHA),
+                            g: f64::from(TRANSLUCENT_ALPHA),
+                            b: f64::from(TRANSLUCENT_ALPHA),
+                            a: f64::from(TRANSLUCENT_ALPHA),
+                        });
+                        pass.set_pipeline(&self.translucent_pipeline);
+                    } else {
+                        pass.set_pipeline(&self.pipeline);
+                    }
                     pass.set_bind_group(0, &self.bind_group, &[]);
                     pass.set_vertex_buffer(0, m.vertex_buffer.slice(..));
                     pass.set_index_buffer(m.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

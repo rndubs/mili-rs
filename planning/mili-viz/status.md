@@ -446,16 +446,27 @@ expanded by `scripting.md` / `client.md`. None started.
 - [ ] **M5 — remote mode** (connect to a remote server; tune buffers
       for HPC latency).
 - [ ] **M6 — agent integration polish** (`client.md`).
-- [ ] **M7 — render modes consuming `MVG3`.** 🟡 **Planned.** Sibling
-      to Phase 4 M7 on the client side. `Translucent` / `Xray` /
-      `Interior` `RenderMode` arms; `Edges`/`Wireframe` prefer
-      server-supplied `Mesh::element_edges`, fall back to the
-      existing extractor (byte-stable for older servers — the
-      VB-005 fix activates only when the server speaks `MVG3`);
-      `Interior` toggle is a server round-trip via the M7
-      sentinel (no proto change). Scope/decisions:
-      [`phase-5-m7.md`](phase-5-m7.md) (81–83). Gating test
-      `crates/mili-viz-client/tests/m7_render_modes.rs`.
+- [x] **M7 — render modes consuming `MVG3`.** ✅ **Landed.**
+      Sibling to Phase 4 M7 on the client side.
+      `RenderMode::{Translucent, Xray}` arms (alpha-blended fill
+      pipeline; depth-test on, depth-write off; the `Xray` pass
+      additionally overlays element-edges); `Edges`/`Wireframe`/
+      `Translucent`/`Xray` all **prefer** the server-supplied
+      `Mesh::element_edges` when present and fall back to the
+      legacy triangle-edge extractor when not (Decision 82 — the
+      VB-005 fix activates only when the server speaks `MVG3`;
+      `MVG1`/`MVG2` paths stay byte-stable, VB-001).
+      `Interior` is a separate viz-state toggle on
+      `ShellState::interior_on` (Decision 83 — composes with any
+      `RenderMode`); the windowed app lowers
+      `UiAction::SetInteriorMode` to the frozen `Cmd::Material`
+      with the reserved `material: Some(u32::MAX)` sentinel, which
+      the server reads through `MaterialsState.visible` to re-emit
+      an `MVG3` blob carrying the interior triangles. Zero proto
+      change. Scope/decisions: [`phase-5-m7.md`](phase-5-m7.md)
+      (81–83). Gating test
+      `crates/mili-viz-client/tests/m7_render_modes.rs::{render_mode_arms_have_distinct_labels, interior_toggle_is_pure_observable_and_emits_no_proto_directly, decode_mvg3_roundtrips_all_four_flag_bits, mvg2_decode_has_no_mvg3_columns, element_edges_supersede_triangle_extraction_on_mvg3, render_modes_differ_translucent_and_xray}`
+      (five always-on + one skip-on-absent composite-render).
 - [ ] **M8 — cut-plane gizmo + Rendering→Cut UI.** 🟡 **Planned.**
       Client UI for Phase 4 M8's server operator. `egui`-overlay
       gizmo (no new `wgpu` pipeline; reuses the M3 additive-paint
