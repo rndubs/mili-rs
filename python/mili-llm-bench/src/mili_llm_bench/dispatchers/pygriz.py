@@ -1,0 +1,371 @@
+"""``PygrizDispatcher`` — typed Commands → pygriz typed helpers.
+
+This is the **only** file in the ``mili-llm-bench`` package that
+imports ``pygriz``. ``pygriz`` is an optional dep
+(``[project.optional-dependencies].pygriz``) so the always-on test
+path (W4a harness tests, W2 scenarios, W3 verifier) stays GPU-free /
+server-free / pygriz-free.
+
+Lowering follows the table in baseline.md §W4a "Dispatcher":
+
+* ``set_state`` / ``step`` → ``s.state = n`` / ``s.next()`` / ``s.prev()`` / ``s.first()`` / ``s.last()``
+* ``select`` → ``s.select(class_name, range)``
+* ``clrsel`` → ``s.selection.clear(class_name)``
+* ``show`` → ``s.show(result[, component])``
+* ``material`` → ``s.materials.enable(...)`` / ``s.materials.disable(...)``
+* ``view`` → ``s.view.*`` (op-dispatched)
+* ``cutplane`` / ``iso`` / ``contour`` / ``colormap`` / ``legend`` / ``named_view`` → typed helpers
+* ``load`` / ``close`` → ``s.open(root)`` / ``s.close()``
+* ``griz_raw`` → ``s.command(raw)``
+* ``query`` / ``snapshot`` → pygriz read paths
+
+After every successful typed call the adapter reads a fresh snapshot
+(or the appropriate per-tool affordance) and projects it through the
+W1 response table; the harness then runs the defensive
+``_project_response`` belt on top. Argument-level failures
+(``nonexistent_material``/``_class``/``_result``/``state_out_of_range``)
+are tagged via best-effort substring match on the pygriz error message;
+classification falls back to ``dispatch_error`` when the message
+doesn't match any closed-set pattern.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Callable
+
+# ``pygriz`` is intentionally imported lazily — at adapter-construction
+# time, not at module-import time — so importing this module from
+# ``mili_llm_bench.dispatchers.pygriz`` on a machine that does not have
+# ``pygriz`` installed still yields a clear ``ImportError`` only when a
+# caller actually constructs ``PygrizDispatcher``.
+
+
+def _import_pygriz() -> Any:
+    try:
+        import griz  # type: ignore[import-not-found]
+    except ImportError as exc:  # pragma: no cover — exercised on the user's box.
+        raise ImportError(
+            "PygrizDispatcher requires the 'pygriz' optional dependency. "
+            "Install with `pip install mili-llm-bench[pygriz]` or "
+            "`pip install -e python/pygriz`."
+        ) from exc
+    return griz
+
+
+# Best-effort substring patterns for argument-level error classification.
+# These mirror the closed L2 set in ``verifier._L2_ARG_FAILS``. The
+# patterns intentionally match pygriz's error-message conventions
+# (lowercased before matching) — drift in pygriz wording falls back to
+# the generic ``dispatch_error`` (and one of the always-on tests in
+# ``test_harness.py`` pins the closed set).
+
+_ERROR_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("nonexistent_material", "unknown material"),
+    ("nonexistent_material", "no such material"),
+    ("nonexistent_class", "unknown class"),
+    ("nonexistent_class", "no such class"),
+    ("nonexistent_result", "unknown result"),
+    ("nonexistent_result", "no such result"),
+    ("nonexistent_result", "no such svar"),
+    ("state_out_of_range", "state out of range"),
+    ("state_out_of_range", "no such state"),
+    ("state_out_of_range", "invalid state"),
+)
+
+
+def _classify(msg: str) -> str:
+    low = msg.lower()
+    for tag, pattern in _ERROR_PATTERNS:
+        if pattern in low:
+            return tag
+    return "dispatch_error"
+
+
+# ---------------------------------------------------------------------------
+# Per-tool lowering helpers. Each returns the *projected* response dict
+# (the W1 table shape). On failure they raise — the harness catches the
+# exception and tags ``error_kind`` via the defensive belt, but we
+# pre-tag in the adapter (via the ``ok=False`` shape) when we already
+# have a classified message, so the model sees the most specific label
+# available.
+# ---------------------------------------------------------------------------
+
+
+def _proj_load(session: Any, _arguments: dict[str, Any], result: Any) -> dict[str, Any]:
+    snap = session._snapshot()
+    loaded = getattr(snap, "loaded", None)
+    state_times = list(getattr(loaded, "state_times", []) or [])
+    state_time_range: list[float] = (
+        [float(state_times[0]), float(state_times[-1])] if state_times else [0.0, 0.0]
+    )
+    classes = list(getattr(loaded, "classes", []) or [])
+    return {
+        "ok": True,
+        "num_states": int(getattr(loaded, "num_states", 0)),
+        "num_classes": len(classes),
+        "classes": classes,
+        "state_time_range": state_time_range,
+        "current_time": float(getattr(snap, "current_time", 0.0)),
+    }
+
+
+def _proj_state(session: Any) -> dict[str, Any]:
+    snap = session._snapshot()
+    loaded = getattr(snap, "loaded", None)
+    return {
+        "ok": True,
+        "state": int(getattr(snap, "state", 0)),
+        "num_states": int(getattr(loaded, "num_states", 0)),
+        "current_time": float(getattr(snap, "current_time", 0.0)),
+    }
+
+
+def _proj_selection(session: Any) -> dict[str, Any]:
+    snap = session._snapshot()
+    sel = getattr(snap, "selection", None)
+    by_class = dict(getattr(sel, "by_class", {}) or {})
+    return {
+        "ok": True,
+        "selection": {k: v for k, v in by_class.items() if v},
+    }
+
+
+def _proj_show(_session: Any, arguments: dict[str, Any], result: Any) -> dict[str, Any]:
+    rng = getattr(result, "range", (0.0, 0.0))
+    return {
+        "ok": True,
+        "result": arguments.get("result", ""),
+        "component": arguments.get("component", ""),
+        "range": [float(rng[0]), float(rng[1])],
+    }
+
+
+def _proj_materials(session: Any) -> dict[str, Any]:
+    snap = session._snapshot()
+    mats = getattr(snap, "materials", None)
+    visible_map = dict(getattr(mats, "visible", {}) or {})
+    hidden = sorted(int(k) for k, v in visible_map.items() if not v)
+    return {"ok": True, "hidden_materials": hidden}
+
+
+def _proj_snapshot(session: Any) -> dict[str, Any]:
+    snap = session._snapshot()
+    loaded = getattr(snap, "loaded", None)
+    sel = getattr(snap, "selection", None)
+    res = getattr(snap, "result", None)
+    cam = getattr(snap, "camera", None)
+    mats = getattr(snap, "materials", None)
+
+    classes = list(getattr(loaded, "classes", []) or [])
+    by_class = dict(getattr(sel, "by_class", {}) or {})
+    visible_map = dict(getattr(mats, "visible", {}) or {})
+    hidden_materials = sorted(int(k) for k, v in visible_map.items() if not v)
+
+    res_dict: dict[str, Any] | None = None
+    if res is not None:
+        rng = getattr(res, "range", None)
+        res_dict = {
+            "result": str(getattr(res, "result", "")),
+            "component": str(getattr(res, "component", "")),
+            "range": (
+                [float(rng[0]), float(rng[1])]
+                if rng is not None and len(rng) == 2
+                else [0.0, 0.0]
+            ),
+        }
+
+    cam_dict: dict[str, Any] | None = None
+    if cam is not None:
+        focus = list(getattr(cam, "focus", []) or [0.0, 0.0, 0.0])
+        if len(focus) != 3:
+            focus = [0.0, 0.0, 0.0]
+        cam_dict = {
+            "azimuth": float(getattr(cam, "azimuth", 0.0)),
+            "elevation": float(getattr(cam, "elevation", 0.0)),
+            "distance": float(getattr(cam, "distance", 0.0)),
+            "focus": [float(x) for x in focus],
+        }
+
+    out: dict[str, Any] = {
+        "state": int(getattr(snap, "state", 0)),
+        "num_states": int(getattr(loaded, "num_states", 0)),
+        "current_time": float(getattr(snap, "current_time", 0.0)),
+        "classes": classes,
+        "selection": {k: v for k, v in by_class.items() if v},
+        "hidden_materials": hidden_materials,
+    }
+    if res_dict is not None:
+        out["result"] = res_dict
+    if cam_dict is not None:
+        out["camera"] = cam_dict
+    return out
+
+
+def _proj_griz_raw(reply: Any) -> dict[str, Any]:
+    output = getattr(reply, "output", "") or ""
+    ok = bool(getattr(reply, "ok", True))
+    out: dict[str, Any] = {"ok": ok, "output": str(output)}
+    if not ok:
+        err = getattr(reply, "error", "") or ""
+        out["error"] = str(err)
+        out["error_kind"] = _classify(str(err))
+    return out
+
+
+def _step_dir(arguments: dict[str, Any]) -> Callable[[Any], None]:
+    direction = str(arguments.get("dir", "")).upper()
+    if direction == "NEXT":
+        return lambda s: s.next()
+    if direction == "PREV":
+        return lambda s: s.prev()
+    if direction == "FIRST":
+        return lambda s: s.first()
+    if direction == "LAST":
+        return lambda s: s.last()
+    raise ValueError(f"unknown step direction {direction!r}")
+
+
+@dataclass
+class PygrizDispatcher:
+    """Dispatcher backed by a live ``griz.Session``.
+
+    Construction does not import ``pygriz`` — only the first
+    ``dispatch`` call does (lazy via ``_import_pygriz()``). This keeps
+    test-only imports of ``mili_llm_bench.dispatchers.pygriz`` cheap on
+    a machine that does not have ``pygriz`` installed.
+    """
+
+    session: Any  # griz.Session — typed as Any so the import stays lazy.
+
+    def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self._dispatch_inner(name, arguments)
+        except Exception as exc:
+            msg = str(exc)
+            return {
+                "ok": False,
+                "error": msg,
+                "error_kind": _classify(msg),
+            }
+
+    def _dispatch_inner(
+        self, name: str, arguments: dict[str, Any]
+    ) -> dict[str, Any]:
+        s = self.session
+
+        if name == "load":
+            result = s.open(arguments["root"])
+            return _proj_load(s, arguments, result)
+
+        if name == "close":
+            s.close()
+            return {"ok": True}
+
+        if name == "set_state":
+            s.state = int(arguments["state"])
+            return _proj_state(s)
+
+        if name == "step":
+            _step_dir(arguments)(s)
+            return _proj_state(s)
+
+        if name == "select":
+            s.select(
+                class_name=arguments["class_name"],
+                range=arguments.get("range", ""),
+            )
+            return _proj_selection(s)
+
+        if name == "clrsel":
+            class_name = arguments.get("class_name", "") or ""
+            sel = s.selection
+            if class_name:
+                sel.clear(class_name)
+            else:
+                sel.clear_all()
+            return _proj_selection(s)
+
+        if name == "show":
+            result_handle = s.show(
+                arguments["result"], arguments.get("component", "") or ""
+            )
+            return _proj_show(s, arguments, result_handle)
+
+        if name == "material":
+            target = arguments.get("material")
+            enable = bool(arguments.get("enable", True))
+            mats = s.materials
+            (mats.enable if enable else mats.disable)(mat=target)
+            return _proj_materials(s)
+
+        if name == "view":
+            op = str(arguments.get("op", "")).lower()
+            view = s.view
+            if op == "reset" or arguments.get("reset"):
+                view.reset()
+            elif op in ("rotate", "translate", "scale", "zoom", "set"):
+                # The L1 typed helper resolves the op; we just lower.
+                getattr(view, op)(**{k: v for k, v in arguments.items() if k != "op"})
+            else:
+                raise ValueError(f"unknown view op {op!r}")
+            return {"ok": True}
+
+        if name == "named_view":
+            op = str(arguments.get("op", "")).upper()
+            nv_name = arguments.get("name", "")
+            if op == "SAVE":
+                s.view.save(nv_name)
+            elif op == "RESTORE":
+                s.view.restore(nv_name)
+            elif op == "LIST":
+                pass  # read-only; result is in the snapshot
+            else:
+                raise ValueError(f"unknown named_view op {op!r}")
+            return {"ok": True}
+
+        if name == "colormap":
+            s.colormap(arguments["name"])
+            return {"ok": True}
+
+        if name == "legend":
+            legend = s.legend
+            if "min" in arguments:
+                legend.min = float(arguments["min"])
+            if "max" in arguments:
+                legend.max = float(arguments["max"])
+            return {"ok": True}
+
+        if name == "iso":
+            s.isosurface(arguments["result"], **{
+                k: v for k, v in arguments.items() if k != "result"
+            })
+            return {"ok": True}
+
+        if name == "contour":
+            s.contour(
+                arguments["result"],
+                count=int(arguments.get("count", 0)),
+            )
+            return {"ok": True}
+
+        if name == "cutplane":
+            s.cutplane(**arguments)
+            return {"ok": True}
+
+        if name == "query":
+            table = s.query(**arguments)
+            return {"ok": True, "table": table if isinstance(table, dict) else {}}
+
+        if name == "snapshot":
+            return _proj_snapshot(s)
+
+        if name == "griz_raw":
+            reply = s.command(arguments["line"])
+            return _proj_griz_raw(reply)
+
+        return {
+            "ok": False,
+            "error": f"unknown tool {name!r}",
+            "error_kind": "unknown_tool",
+        }
