@@ -139,8 +139,10 @@ See [`status.md`](status.md) and the per-milestone
    placeholder + `egui_plot` time-history).
 5. **M4** ✅ — local view manipulation (predict + reconcile against
    server-authoritative camera) + extensive MVP polish.
-6. **M5** ⏳ — remote mode (wire `connect`/`attach` over the
-   landed gRPC + Flight TCP transport; HPC-latency buffer tuning).
+6. **M5** ✅ — remote mode (`-r host:port` / `--attach [id]` wired
+   over the landed gRPC + Flight TCP transport; HPC-latency tuning:
+   `tcp_nodelay`, TCP + HTTP/2 keep-alives, explicit connect
+   timeout).
 7. **M6** ⏳ — agent integration polish (`client.md`).
 
 ## Phase 6 (`pygriz` scripting client) milestones

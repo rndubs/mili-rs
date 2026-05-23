@@ -36,7 +36,7 @@ mod tweaks;
 pub use app::run;
 pub use camera::Camera;
 pub use catalog::{decode_catalog, ResultCatalog};
-pub use cli::{parse_args, CliArgs, CliOutcome};
+pub use cli::{parse_args, CliArgs, CliOutcome, TransportChoice};
 pub use colormap::{
     normalize as colormap_normalize, sample as colormap_sample,
     sample_named as colormap_sample_named, NAMES as COLORMAP_NAMES,
