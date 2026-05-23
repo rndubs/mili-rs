@@ -690,13 +690,23 @@ parallel of `crates/`). Milestone breakdown + M1 detail:
 The build order from [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md).
 Each row flips to ✅ when its gating test lands.
 
-- [ ] **W1 — Tool-schema artifact.** Auto-derive
+- [x] **W1 — Tool-schema artifact.** ✅ **Landed.** Auto-derive
       `data/posttraining/grammar/tools.json` (input + output schema
       per tool) from `crates/mili-viz-proto/proto/mili_viz.proto`'s
       `Command` oneof + the two read tools + `griz_raw`. Honest-diff
       test (`python/mili-llm-bench/tests/test_schemas.py`)
       regenerates and diffs vs the pinned file — drift fails CI.
-      No interface dep; runs off the proto alone. Discharges
+      No interface dep; runs off the proto alone. Lightweight
+      hand-parser of the .proto text (option (a) per
+      [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md))
+      keeps the v0 dep surface small (no `grpcio-tools` runtime dep
+      just for schema derivation). 18 tools (15 typed Command
+      variants + `query`/`snapshot` + `griz_raw`; `render` and `raw`
+      excluded — Decision L0). Output schemas mirror the W1
+      projection table; the three harness invariants (no
+      `state_times` / `flight_ticket` / `agent`) are pre-enforced
+      at the schema layer by parametrized property-tree-walk tests.
+      Always-on (no pygriz, no LLM, no GPU). Discharges
       [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W1.
 - [ ] **W2 — Bootstrap eval scenarios.** Hand-author 50 scenarios
       (~10 intents × `d3samp6`, `cylinder`) with closed-kind
