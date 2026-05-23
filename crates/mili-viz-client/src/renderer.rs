@@ -99,6 +99,16 @@ pub struct Renderer {
     bind_group: wgpu::BindGroup,
     mesh: Option<MeshBuffers>,
     mode: RenderMode,
+    /// MSAA sample count for the mesh + edge + translucent pipelines.
+    /// `1` is the headless byte-stable default (`Renderer::new`); the
+    /// windowed app picks `4` via [`Renderer::new_with_samples`] so the
+    /// 1-px `LineList` edge pass and the hull silhouette don't alias.
+    /// When > 1, `render_in` allocates an MSAA color texture and
+    /// resolves into the caller-supplied `view`.
+    sample_count: u32,
+    /// Color format the pipelines were built against — needed to
+    /// allocate a matching MSAA color attachment when `sample_count > 1`.
+    target_format: wgpu::TextureFormat,
 }
 
 /// Phase 5 M7 Decision 81: default alpha for `Translucent`/`Xray`. A
@@ -111,12 +121,42 @@ impl Renderer {
     /// `target_format` (the window surface format, or
     /// [`OFFSCREEN_FORMAT`] for headless). No mesh until
     /// [`upload_mesh`](Self::upload_mesh).
+    ///
+    /// Pipelines are built with `sample_count = 1` — the headless
+    /// byte-stable path (`render_mesh_to_image`, `render_shell_to_image`)
+    /// depends on this so the VB-001 / status 23 composite gate stays
+    /// pixel-exact. The windowed app calls [`new_with_samples`] with
+    /// `4` for MSAA.
+    ///
+    /// [`new_with_samples`]: Self::new_with_samples
     #[must_use]
     pub fn new(
         device: wgpu::Device,
         queue: wgpu::Queue,
         target_format: wgpu::TextureFormat,
     ) -> Self {
+        Self::new_with_samples(device, queue, target_format, 1)
+    }
+
+    /// As [`new`](Self::new), but with an explicit MSAA `sample_count`
+    /// for the mesh + edge + translucent pipelines. The windowed app
+    /// picks `4` so 1-px `LineList` edges (VB-003) and the hull
+    /// silhouette read crisply; the headless paths keep `1` so the
+    /// byte-stable composite gate (VB-001) is untouched. When > 1,
+    /// [`render_in`](Self::render_in) allocates a matching MSAA color
+    /// texture and resolves into the caller-supplied view.
+    #[must_use]
+    pub fn new_with_samples(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        let multisample = wgpu::MultisampleState {
+            count: sample_count,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        };
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mili-viz mesh shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("mesh.wgsl").into()),
@@ -193,7 +233,7 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample,
             multiview_mask: None,
             cache: None,
         });
@@ -249,7 +289,7 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample,
             multiview_mask: None,
             cache: None,
         });
@@ -306,7 +346,7 @@ impl Renderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState::default(),
+            multisample,
             multiview_mask: None,
             cache: None,
         });
@@ -321,6 +361,8 @@ impl Renderer {
             bind_group,
             mesh: None,
             mode: RenderMode::default(),
+            sample_count,
+            target_format,
         }
     }
 
@@ -459,15 +501,17 @@ impl Renderer {
         // surface size never trips texture-size validation
         // (`phase-5-m4.md` Decision 62).
         let max_dim = self.device.limits().max_texture_dimension_2d;
+        let target_w = width.clamp(1, max_dim);
+        let target_h = height.clamp(1, max_dim);
         let depth = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("depth"),
             size: wgpu::Extent3d {
-                width: width.clamp(1, max_dim),
-                height: height.clamp(1, max_dim),
+                width: target_w,
+                height: target_h,
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: self.sample_count,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -475,17 +519,51 @@ impl Renderer {
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // MSAA color attachment when `sample_count > 1` — the pipelines
+        // require it to match their declared sample count. The single-
+        // sample headless path (`sample_count == 1`) keeps writing the
+        // caller's `view` directly so the byte-stable composite gate
+        // (VB-001) sees the same command stream.
+        let msaa_color = (self.sample_count > 1).then(|| {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("msaa color"),
+                size: wgpu::Extent3d {
+                    width: target_w,
+                    height: target_h,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: self.sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            tex.create_view(&wgpu::TextureViewDescriptor::default())
+        });
+
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frame encoder"),
             });
         {
+            // MSAA path: render into the multisampled color and resolve
+            // into the caller's single-sample `view`; the surface only
+            // needs the resolved pixels stored (`StoreOp::Discard` on
+            // the MSAA target is fine but explicit `Store` keeps the
+            // resolve well-defined across backends). Single-sample path
+            // writes the view directly — byte-identical command stream
+            // to the original code (VB-001).
+            let (color_view, resolve_target) = match msaa_color.as_ref() {
+                Some(msaa) => (msaa, Some(view)),
+                None => (view, None),
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
+                    view: color_view,
+                    resolve_target,
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(CLEAR_COLOR),

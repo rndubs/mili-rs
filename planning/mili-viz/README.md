@@ -206,6 +206,25 @@ See [`status.md`](status.md) and the per-milestone
   `run_script`, `-V` → version, `-w <w> <h>` → window size. The rest
   of griz's flags (`reference/griz/Src/viewer.c:2900`) are
   Motif/X11/launcher-specific and dropped. Client-only; no proto.
+- **Edge rendering — thicker / anti-aliased lines.** Open follow-up.
+  Today the VB-003 element-edge pass uses `wgpu::PrimitiveTopology::LineList`,
+  which is fixed at 1 device pixel (core WebGPU has no `lineWidth`).
+  We landed **4× MSAA on the windowed path** (`renderer.rs`
+  `Renderer::new_with_samples`, called with `4` from `app.rs`) plus a
+  black edge colour (`edges.wgsl`) which fixes ~80% of the broken-edge
+  look — but at HiDPI the lines still read thin. If we ever want
+  variable-width, crisply anti-aliased edges, the proper fix is a
+  **screen-space line-quad pass**: expand each edge to two triangles
+  in the vertex shader using the endpoints + a screen-space normal,
+  then do an AA falloff in the fragment shader. ~60 lines of new
+  WGSL, a new pipeline, and a `tweaks.rs` thickness knob; the
+  `Mesh::edge_indices` / `element_edges` wiring upstream of it stays
+  put. An alternative is a **barycentric wireframe** rendered inside
+  the mesh fragment shader (cheapest GPU cost) but it conflicts with
+  the current indexed vertex sharing — needs un-indexing or vertex
+  duplication. MSAA was deliberately kept off the headless paths
+  (`render_mesh_to_image*`, `render_shell_to_image`) so the VB-001 /
+  status 23 byte-stable composite gate stays pixel-exact.
 - **Client wireframe + AI-first design.** Resolved — see
   `client.md`. The window mirrors griz's shape (left dock for
   Results/Materials/Surfaces, center viewport, bottom tabs for
