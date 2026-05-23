@@ -313,18 +313,27 @@ expanded by `scripting.md` / `client.md`. None started.
       (skip-on-absent end-to-end) + five in-module unit tests on
       the volumetric build helpers (always-on: 12-edge Hex,
       multi-superclass table counts, two-hex interior dedup).
-- [ ] **M8 — cut-plane operator.** 🟡 **Planned.** Wires the
-      frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528`
-      stub since [`phase-4-m1.md`](phase-4-m1.md) Δ1). Closed
-      clipped hull (kept-side outward boundary ∪ tessellated cap),
-      per-superclass marching tables (Hex/Tet/Wedge/Pyramid),
-      `rayon` parallel-per-element, session-state that composes
-      with `show`/state-step/material toggles, cap triangles
-      tagged with a reserved sentinel (`tri_material == u32::MAX -
-      1`). No `.proto` change. Scope/decisions:
+- [x] **M8 — cut-plane operator.** ✅ **Landed.** Wires the
+      previously stubbed `Cmd::Cutplane` arm: a new
+      `crates/mili-viz-server/src/clip.rs` module runs a
+      per-element Sutherland–Hodgman clip in a `rayon` parallel
+      pass against the cached `MeshTopology`, emits a closed
+      clipped hull (kept-side faces ∪ fan-triangulated cap),
+      and packs the result through the existing `MVG3` carrier
+      (`MeshTopology::pack_mvg3_buffers`). Cap triangles ride
+      `tri_material == u32::MAX - 1` (Decision 75 sentinel).
+      Session-level state (`Session.cut`) composes with
+      `show`/state-step/material toggles (Decision 77); a cut
+      with an all-zero normal clears it and restores the
+      byte-identical M2/M3 path (verified by the gating test).
+      No `.proto` change. Scope/decisions:
       [`phase-4-m8.md`](phase-4-m8.md) (75–77). Gating test
       `crates/mili-viz-server/tests/m8_cutplane.rs::cutplane_operator`
-      (skip-on-absent against `bar71.pltA`).
+      (skip-on-absent against `basic1.pltA` — `bar71.pltA` is not
+      in the fixture tree; `basic1` carries 238 hex bricks
+      driving the same code paths) + three always-on unit tests
+      on `clip_element` (straddle/all-keep/all-drop cases on a
+      unit hex).
 - [ ] **M9 — slice operator.** 🟡 **Planned.** Cap-only sister to
       M8. Adds the **second** post-M1 proto change: an additive
       `optional bool slice_only = 8;` on `CutPlane` (proto3

@@ -1542,6 +1542,7 @@ dependencies = [
  "mili-rs",
  "mili-viz-proto",
  "prost",
+ "rayon",
  "tokio",
  "tokio-stream",
  "tonic",

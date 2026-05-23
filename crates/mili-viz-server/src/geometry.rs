@@ -10,7 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mili_rs::{Database, MeshId, QueryArgs, QueryResult, StateValues, Superclass};
+pub use mili_rs::Superclass;
+use mili_rs::{Database, MeshId, QueryArgs, QueryResult, StateValues};
 
 /// Zero-based local node indices of each hex face, transcribed from
 /// `reference/mili-python/src/mili/miliinternal.py:675-682` — the
@@ -56,21 +57,29 @@ pub const INTERIOR_SENTINEL: u32 = u32::MAX;
 /// One prepped element class kept for M3 nodal scatter: the element →
 /// corner-node-id rows and the parallel element label list (same row
 /// order as `connectivity_ids` / `labels`).
-struct ElemClass {
-    name: String,
-    n_nodes: usize,
+pub(crate) struct ElemClass {
+    #[allow(dead_code)]
+    pub(crate) name: String,
+    pub(crate) n_nodes: usize,
     /// Flat `[elem * n_nodes]` 0-based node ids.
-    conns: Vec<u32>,
+    pub(crate) conns: Vec<u32>,
     /// Element label per row (`conns.len() / n_nodes` entries).
-    labels: Vec<i32>,
+    pub(crate) labels: Vec<i32>,
     /// Per-element material id (parallel to `labels`). The last
     /// column of `connectivity_ids` for this class — captured at
     /// build time so the M7 volumetric path can re-emit faces with
     /// the correct `tri_material` without re-querying the database.
-    materials: Vec<u32>,
+    pub(crate) materials: Vec<u32>,
     /// Element superclass (phase-4-m7.md Decisions 73–74): looks up
     /// the per-class edge and face tables for the volumetric emit.
-    superclass: Superclass,
+    pub(crate) superclass: Superclass,
+}
+
+/// Lightweight per-class element-count summary for the M8 clip
+/// dispatch (avoids exposing the full [`ElemClass`] in iteration
+/// contexts).
+pub(crate) struct ClassSummary {
+    pub(crate) elements: usize,
 }
 
 /// State-invariant mesh topology, built once per `load`.
@@ -98,7 +107,7 @@ pub struct MeshTopology {
 /// Pyramid = 8. `Tet10` is corner-only (6) for M7; mid-edge nodes
 /// are a follow-up (M7 § "Open questions"). Mirrors the shape of
 /// [`triangulation`]: a fixed table, one per superclass.
-fn element_edges_table(sc: Superclass) -> &'static [[usize; 2]] {
+pub(crate) fn element_edges_table(sc: Superclass) -> &'static [[usize; 2]] {
     match sc {
         Superclass::Tri => &[[0, 1], [1, 2], [2, 0]],
         Superclass::Quad => &[[0, 1], [1, 2], [2, 3], [3, 0]],
@@ -158,7 +167,7 @@ fn element_edges_table(sc: Superclass) -> &'static [[usize; 2]] {
 /// shared faces between elements for interior-triangle emission. The
 /// Hex case matches [`HEX_FACE_NODES`] (the surface-strain face
 /// indexing, phase-4-m5c.md Decision 30).
-fn faces_table(sc: Superclass) -> &'static [&'static [usize]] {
+pub(crate) fn faces_table(sc: Superclass) -> &'static [&'static [usize]] {
     match sc {
         Superclass::Tri => &[&[0, 1, 2]],
         Superclass::Quad => &[&[0, 1, 2, 3]],
@@ -1049,6 +1058,57 @@ impl MeshTopology {
         (indices, tri_material, tri_flags)
     }
 
+    /// Serialize pre-built volumetric buffers into the `MVG3` layout
+    /// (phase-4-m8.md — used by the cut-plane operator after the
+    /// per-element clip has already produced the index/material/edge
+    /// arrays). Scalar interpolation is M9's concern; M8 emits no
+    /// scalar (`flags_mask & 1 == 0`).
+    #[must_use]
+    pub(crate) fn pack_mvg3_buffers(
+        verts: &[f32],
+        indices: &[u32],
+        tri_material: &[u32],
+        tri_flags: &[u32],
+        edges: &[u32],
+    ) -> Vec<u8> {
+        let n_verts = (verts.len() / 3) as u64;
+        let n_idx = indices.len() as u64;
+        let n_edges = edges.len() as u64;
+        let mut flags_mask: u32 = 2; // tri_flags always present
+        if !edges.is_empty() {
+            flags_mask |= 4;
+        }
+        let mut buf = Vec::with_capacity(
+            36 + verts.len() * 4
+                + indices.len() * 4
+                + tri_material.len() * 4
+                + tri_flags.len() * 4
+                + edges.len() * 4,
+        );
+        buf.extend_from_slice(b"MVG3");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&n_verts.to_le_bytes());
+        buf.extend_from_slice(&n_idx.to_le_bytes());
+        buf.extend_from_slice(&n_edges.to_le_bytes());
+        buf.extend_from_slice(&flags_mask.to_le_bytes());
+        for f in verts {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for i in indices {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        for m in tri_material {
+            buf.extend_from_slice(&m.to_le_bytes());
+        }
+        for f in tri_flags {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for e in edges {
+            buf.extend_from_slice(&e.to_le_bytes());
+        }
+        buf
+    }
+
     /// Encode the current-state volumetric blob (phase-4-m7.md
     /// Decisions 72–74). Layout: see [`LAYOUT_VOL`].
     fn encode_mvg3(
@@ -1202,6 +1262,28 @@ impl MeshTopology {
 
     pub fn mesh_id(&self) -> MeshId {
         self.mesh_id
+    }
+
+    /// Per-class element-count summary (phase-4-m8.md — drives the
+    /// rayon-parallel clip dispatch in [`crate::clip`]).
+    pub(crate) fn elem_class_summary(&self) -> Vec<ClassSummary> {
+        self.elem_classes
+            .iter()
+            .map(|ec| ClassSummary {
+                elements: ec.conns.len() / ec.n_nodes,
+            })
+            .collect()
+    }
+
+    pub(crate) fn elem_class_at(&self, idx: usize) -> &ElemClass {
+        &self.elem_classes[idx]
+    }
+
+    /// Node coordinates at 1-based `state` (phase-4-m8.md — public
+    /// hook for `clip::clip_topology`, which needs the same per-state
+    /// vertex buffer the encoder uses).
+    pub fn coords_at(&self, db: &Database, state: u32) -> Vec<f32> {
+        self.coords_at_state(db, state)
     }
 }
 
