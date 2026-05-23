@@ -418,6 +418,19 @@ impl App {
                 class_name: class_name.clone(),
                 material: None,
             })),
+            UiAction::SetInteriorMode(on) => {
+                // Phase 5 M7 Decision 83: the include-interior viz-state
+                // boolean rides the frozen `Cmd::Material` with the
+                // reserved `u32::MAX` sentinel material id (Phase 4 M7
+                // Decision 74). No proto change. The server's next
+                // `show` re-emits an `MVG3` blob with the interior
+                // triangles; the renderer just draws what arrives.
+                Some(pb::command::Cmd::Material(pb::MaterialVisibility {
+                    enable: *on,
+                    class_name: String::new(),
+                    material: Some(u32::MAX),
+                }))
+            }
             UiAction::SetRenderMode(m) => {
                 // Pure-client (VB-003): retarget the renderer; no
                 // proto command (the frozen set is untouched).
