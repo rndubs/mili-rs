@@ -219,6 +219,32 @@ impl PyMiliDatabase {
         }
     }
 
+    /// `_MiliInternal.supported_derived_variables` — the static set of
+    /// derived names the core can compute if the primals exist
+    /// (`DERIVED_REGISTRY` order). Thin pass-through to the
+    /// parity-gated Rust core (`reshape.rs`); milox.derived no longer
+    /// re-implements the enumeration.
+    fn supported_derived_variables(&self) -> Vec<String> {
+        self.db0().supported_derived_variables()
+    }
+
+    /// `_MiliInternal.derived_variables_of_class` — derived names
+    /// computable for `class_name`. Empty when the class is unknown
+    /// (upstream returns `[]`); the milox `_MiliInternal` wrapper
+    /// guards class membership before delegating.
+    fn derived_variables_of_class(&self, class_name: &str) -> Vec<String> {
+        self.db0().derived_variables_of_class(self.mesh, class_name)
+    }
+
+    /// `(classes, found)` — `found=False` means the derived name is
+    /// unknown (upstream raises `KeyError`; milox.derived re-raises it).
+    fn classes_of_derived_variable(&self, var_name: &str) -> (Vec<String>, bool) {
+        match self.db0().classes_of_derived_variable(self.mesh, var_name) {
+            Ok(c) => (c, true),
+            Err(_) => (vec![], false),
+        }
+    }
+
     /// `(svars, svar_ok, class_ok)`.
     fn containing_state_variables_of_class(
         &self,

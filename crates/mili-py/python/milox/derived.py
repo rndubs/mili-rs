@@ -1,25 +1,30 @@
 """milox derived-variable engine — listing sub-slice (Phase H).
 
-The derived-variable *listing* surface — ``supported_variables``,
-``derived_variable_titles``, ``derived_variables_of_class``,
-``classes_of_derived_variable`` — is pure metadata: a static
-expression table plus set-membership over the already-ported core
-accessors (``classes_of_state_variable`` / ``mesh_object_classes`` /
-``queriable_svars`` / ``class_names``). It is **not** parity-sensitive
-value/topology computation, so per the architecture invariant and the
-decision-18/19 precedent (reductions, the GeometricMeshInfo adapter)
-it is ported **verbatim** from
-``reference/mili-python/src/mili/derived.py`` into milox.
+The derived-variable *enumeration* surface — ``supported_variables``,
+``derived_variables_of_class``, ``classes_of_derived_variable`` — is
+**not** re-implemented here. It is a thin pass-through to the
+parity-gated Rust core accessors (``mili_rs::reshape``:
+``supported_derived_variables`` / ``derived_variables_of_class`` /
+``classes_of_derived_variable``) through the pyo3 bridge
+(``PyMiliDatabase`` in ``crates/mili-py/src/database.rs``), mirroring
+the existing ``queriable_svars`` / ``classes_of_state_variable`` /
+``state_variables_of_class`` pass-throughs. This removes the
+duplicated Python re-implementation that could drift from the
+parity-gated core (m4.md decision 28's deferred follow-up; decision
+29). The core composes these from the already parity-gated primal
+reshapes — a reshape, not a re-port (decision-19 invariant intact).
 
-The ``__derived_expressions`` table is copied verbatim (titles /
+The ``__derived_expressions`` table is retained verbatim (titles /
 primals / primals_class / only_sclasses / alternate_primals /
-supports_batching). The value ``compute_function``s are *not* this
+supports_batching): it still backs ``derived_variable_titles`` and
+``find_batchable_queries``, which are not part of the Rust core
+enumeration surface. The value ``compute_function``s are *not* this
 sub-slice — they are parity-sensitive value math that belongs in the
 Rust core (decision 19; node displacement already landed in
 ``mili_rs::derived``). They are wired to an explicit typed-error stub
 so ``DerivedExpressions.query`` / ``find_batchable_queries`` raise
 ``MiliPythonError`` naming the next sub-slice — never a silent wrong
-answer. See planning/mili-py/m4.md decision 19.
+answer. See planning/mili-py/m4.md decisions 19, 28, 29.
 """
 
 from __future__ import annotations
@@ -725,8 +730,12 @@ class DerivedExpressions:
         NOTE: This does not mean all derived variables can be calculated
               for a given simulation. Only that mili-python can
               caclulate them if all required inputs exist.
+
+        Thin pass-through to the parity-gated Rust core
+        (``PyMiliDatabase.supported_derived_variables``); see module
+        docstring / m4.md decision 29.
         """
-        return list(self.__derived_expressions.keys())
+        return list(self.db._db.supported_derived_variables())
 
     def derived_variable_titles(self) -> Dict[str, str]:
         """Return dictionary containing the title for each derived variable."""
@@ -735,122 +744,27 @@ class DerivedExpressions:
             for var, spec in self.__derived_expressions.items()
         }
 
-    def __variable_exists_for_class(
-        self, variable: str, class_name: str
-    ) -> bool:
-        primal_exists = class_name in self.db.classes_of_state_variable(variable)
-        try:
-            derived_exists = class_name in self.db.classes_of_derived_variable(
-                variable
-            )
-        except Exception:
-            derived_exists = False
-        self.db.clear_return_code()
-        return primal_exists or derived_exists
-
     def derived_variables_of_class(self, class_name: str) -> List[str]:
-        """Return list of derived variables that can be calculated for a given class."""
-        derived_list = []
-        if class_name in self.db.class_names():
-            class_def = self.db.mesh_object_classes()[class_name]
-            queriable_state_variables = self.db.queriable_svars()
-            for var_name, spec in self.__derived_expressions.items():
-                if "only_sclasses" in spec:
-                    if class_def.sclass not in spec["only_sclasses"]:
-                        continue
-                primals_found = []
-                for req_primal, req_primal_class in zip(
-                    spec["primals"], spec["primals_class"]
-                ):
-                    # Check that primal exists
-                    if (
-                        req_primal in queriable_state_variables
-                        or req_primal in self.__derived_expressions
-                    ):
-                        # Check that primal exists for required element class
-                        req_primal_class = (
-                            class_name
-                            if req_primal_class is None
-                            else req_primal_class
-                        )
-                        if self.__variable_exists_for_class(
-                            req_primal, req_primal_class
-                        ):
-                            primals_found.append(True)
-                # Check if all primals were found
-                if len(primals_found) == len(spec["primals"]) and all(
-                    primals_found
-                ):
-                    derived_list.append(var_name)
-                elif "alternate_primals" in spec:
-                    primals_found = []
-                    for req_primal, req_primal_class in zip(
-                        spec["alternate_primals"], spec["primals_class"]
-                    ):
-                        # Check that primal exists
-                        if (
-                            req_primal in queriable_state_variables
-                            or req_primal in self.__derived_expressions
-                        ):
-                            # Check that primal exists for required element class
-                            req_primal_class = (
-                                class_name
-                                if req_primal_class is None
-                                else req_primal_class
-                            )
-                            if self.__variable_exists_for_class(
-                                req_primal, req_primal_class
-                            ):
-                                primals_found.append(True)
-                    # Check if all primals were found
-                    if len(primals_found) == len(spec["primals"]) and all(
-                        primals_found
-                    ):
-                        derived_list.append(var_name)
+        """Return list of derived variables that can be calculated for a given class.
 
-        return derived_list
+        Thin pass-through to the parity-gated Rust core
+        (``PyMiliDatabase.derived_variables_of_class``); see module
+        docstring / m4.md decision 29.
+        """
+        return list(self.db._db.derived_variables_of_class(class_name))
 
     def classes_of_derived_variable(self, var_name: str) -> List[str]:
-        """Return list of element classes for which the specified derived variable can be calculated."""
-        if var_name not in self.__derived_expressions:
+        """Return list of element classes for which the specified derived variable can be calculated.
+
+        Thin pass-through to the parity-gated Rust core
+        (``PyMiliDatabase.classes_of_derived_variable``); the core
+        reports the unknown-name case so the upstream ``KeyError`` is
+        preserved. See module docstring / m4.md decision 29.
+        """
+        classes, found = self.db._db.classes_of_derived_variable(var_name)
+        if not found:
             raise KeyError(f"The derived result '{var_name}' does not exist")
-        derived_spec = self.__derived_expressions[var_name]
-        classes_of_derived = []
-        element_class_data = self.db.mesh_object_classes()
-
-        if all(
-            [
-                primal_class is None
-                for primal_class in derived_spec["primals_class"]
-            ]
-        ):
-            # CASE 1: All primals must exist for same element class as derived result
-            for class_name, class_def in element_class_data.items():
-                if "only_sclasses" in derived_spec:
-                    if class_def.sclass not in derived_spec["only_sclasses"]:
-                        continue
-                primals_found = [
-                    self.__variable_exists_for_class(primal, class_name)
-                    for primal in derived_spec["primals"]
-                ]
-                if all(primals_found):
-                    classes_of_derived.append(class_name)
-        else:
-            # CASE 2: primals must exists for class different from derived result
-            for class_name, class_def in element_class_data.items():
-                if "only_sclasses" in derived_spec:
-                    if class_def.sclass not in derived_spec["only_sclasses"]:
-                        continue
-                primals_found = [
-                    self.__variable_exists_for_class(primal, primal_class)
-                    for primal, primal_class in zip(
-                        derived_spec["primals"], derived_spec["primals_class"]
-                    )
-                ]
-                if all(primals_found):
-                    classes_of_derived.append(class_name)
-
-        return classes_of_derived
+        return list(classes)
 
     def find_batchable_queries(
         self, result_names: List[str]
