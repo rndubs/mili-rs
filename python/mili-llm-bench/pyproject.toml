@@ -5,12 +5,15 @@
 # planning/mili-viz/agent-local-llm-baseline.md. Off the Phase 4/5/6
 # critical path; capability-gated via the frozen AgentChat surface.
 #
-# PR-3 adds W4a (the factored agent harness) + W5 partial
-# (MockLlmProvider + ReplayLlmProvider — FunctionGemma + Anthropic
-# providers land in PR-5 with their own extras). The pygriz adapter
-# (the only file in the package that imports `pygriz`) lives behind
-# the [pygriz] extra so the always-on test path (W1+W2+W3+W4a) stays
-# GPU-free / server-free / pygriz-free in CI.
+# PR-3 added W4a (the factored agent harness) + W5 partial
+# (MockLlmProvider + ReplayLlmProvider). PR-5 finishes W5 (FunctionGemma
+# + Anthropic providers behind their own extras) and lands W6 (the
+# `run` / `replay` CLI subcommands + `report.md` generator).
+#
+# Always-on test path (CI default) imports neither `transformers` /
+# `torch` / `anthropic` nor `pygriz`. The heavy providers each live
+# behind an optional-dependency extra; the pygriz dispatcher factory
+# stays behind the [pygriz] extra.
 
 [project]
 name = "mili-llm-bench"
@@ -21,6 +24,7 @@ license = { text = "MIT OR Apache-2.0" }
 dependencies = [
   "jsonschema>=4.20",
   "protobuf>=4.25",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +36,21 @@ dev = [
 # this extra.
 pygriz = [
   "pygriz",
+]
+# Optional — needed only by `mili_llm_bench.providers.functiongemma`.
+# `accelerate` is the documented runtime for FunctionGemma-270M-it per
+# its model card; `transformers` carries the chat-template path; `torch`
+# is the inference runtime. Heavy by intent — the v0 baseline runs on
+# CPU but a GPU box is faster.
+functiongemma = [
+  "transformers>=4.50",
+  "torch>=2.2",
+  "accelerate>=0.30",
+]
+# Optional — needed only by `mili_llm_bench.providers.anthropic`. The
+# frontier-baseline provider; `anthropic` is the official SDK.
+anthropic = [
+  "anthropic>=0.40",
 ]
 
 [project.scripts]
