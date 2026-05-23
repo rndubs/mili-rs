@@ -24,10 +24,13 @@ planning. That stays with the Claude-API backend (decision 4) or a
 larger local model.
 
 What a tiny fine-tuned model *can* do is the narrow slice: natural
-language → a sequence of Layer-0 griz commands (closed ~321-command
-vocabulary) or Layer-1 `griz` Python calls (small, regular API). This
-is constrained NL→DSL translation, which is tiny-model-friendly,
-especially with grammar-constrained decoding.
+language → a sequence of structured calls into the griz surface. That
+slice is constrained NL → action translation, which is
+tiny-model-friendly with constrained decoding. The choice of *which*
+projection of the griz surface the model emits — raw Layer-0 DSL,
+typed `Command` tool calls, or free-form pygriz Python — is decided
+in "Surface choice" below; the rest of this doc assumes the typed
+tool-call surface that section settles on.
 
 So the design is **two-tier behind the existing `LlmProvider` seam**:
 
@@ -42,6 +45,96 @@ A small router (heuristic or a classifier) decides "pure translation"
 (tiny model) vs. "needs reasoning/tools" (full agent). The tiny model
 is a capability *fallback*, not a swap-in for the agent.
 
+## Surface choice: typed tool calls, not raw DSL or free-form Python
+
+Griz exposes the *same* operations through three projections:
+
+1. **Layer-0 raw DSL** — `disable mat 3; rfit` strings, parsed by
+   `interpret.c`'s `parse_command` dispatch (~318 keywords; see
+   `posttraining-dataset.md` Stage 1).
+2. **Layer-1 typed `Command`** — the `mili-viz-proto` `Command` oneof:
+   ~15 variants (`load`, `set_state`, `step`, `select`, `clrsel`,
+   `show`, `iso`, `contour`, `material`, `cutplane`, `colormap`,
+   `legend`, `view`, `named_view`, plus `raw`) with `Query` and
+   `Subscribe` as the read paths. This is also what `pygriz`'s
+   `Session` already lowers every typed call to
+   (`python/pygriz/src/griz/__init__.py`).
+3. **Layer-1 Python (pygriz)** — `s.materials.disable(mat=3);
+   s.view.reset()` against the `Session` object directly.
+
+**Decision: the tiny model emits surface (2)** — one JSON-schema tool
+per typed `Command` oneof variant, plus `query`/`snapshot` as read
+tools, plus a small handful of *analysis macros* (e.g. `query_extreme`,
+`scan_states`) implemented server-side as pygriz functions, plus
+`griz_raw(line: str)` as the long-tail fallback. Approximate
+inventory:
+
+- ~15 typed-`Command` tools (one per oneof variant),
+- ~2 read tools (`query`, `snapshot`),
+- ~3 analysis macros (TBD; see "tool inventory" question below),
+- 1 fallback (`griz_raw`).
+
+**≈ 20 tools total** — inside the tested footprint for
+FunctionGemma-class (270M) and APIGen-MT / xLAM / ToolACE-class (1B–3B)
+function-calling models. Crucially, the long tail of ~318 griz
+keywords does **not** inflate the schema; the model just learns to
+fall back to `griz_raw` when the typed tools don't cover the request.
+
+### Why typed tools, not raw DSL alone
+
+The original Decision 3 below targeted "griz command lines under GBNF
+constraint". That works for single-turn translation, but does not
+naturally express *multi-step plans whose later steps depend on
+intermediate values* — e.g. "find the state where `sx` peaks on bricks
+1–100, then frame it and show `evm`". Tool calling's
+`function_call → function_response → next function_call` protocol is
+exactly what FunctionGemma's chat template (and APIGen-MT, ToolACE,
+Magnet, xLAM training data) is shaped to. Surface (2) gets multi-turn
+intermediate-value chaining for free; surface (1) does not.
+
+### Why not free-form Python
+
+For a 270M–1.5B model, free-form Python over the `Session` object is
+the wrong target:
+
+- No equivalent of grammar-constrained decoding (Python's grammar is
+  large; semantic validity over a live `Session` is harder still).
+- Verifier L0/L1 (see `agent-local-llm-posttraining.md` §2) would
+  collapse to "did `ast.parse` succeed and was every attribute access
+  on a real `Session` member?" — strictly weaker than the per-call
+  JSON-schema check on a typed `Command`.
+- Recent open work on small tool-use models (Magnet, xLAM, APIGen-MT,
+  FunctionGemma) consistently sits at the tool-call layer, not
+  free-form code, for sub-3B models.
+
+Python via pygriz is the right surface for **humans** (notebooks,
+scripts) and for the **Claude-API reasoning tier** (`client.md`
+decision 4) — not for the tiny command-writer. The two-tier
+architecture above already separates these.
+
+### Pleasing alignment with pygriz
+
+Compound macros that earn a tool slot are *implemented* as pygriz
+functions on top of `Session` — the same code a user would write in a
+notebook. So pygriz is not the LLM's emit target, but it is the LLM's
+tool-implementation language. "What a user types in a notebook" ≡
+"what backs the agent's `query_extreme`." This keeps a single
+authoritative library of analysis macros, callable from both humans
+and the model.
+
+### Tradeoff this introduces
+
+JSON-schema validation gives "argument *type* is valid"; it does not
+give "argument *exists for this fixture*" (e.g. `material: 7` when only
+1–4 exist). Layer-0 DSL had the same semantic gap, but its dispatcher
+already returns rich runtime errors. So **L2-execution carries more
+weight than the original plan assumed**: schema validity covers less
+ground than grammar-parse did. The verifier's L1 tier accordingly
+thins; L2 must catch most argument-level errors. This matches the
+vLLM caveat the deep-research report cites — structured decoding
+guarantees parseable, not semantically correct. See
+`posttraining-dataset.md` Stage 4 for the verifier-side fold-in.
+
 ## Decisions (proposed, to revisit)
 
 1. **Server-hosted, consistent with `client.md` decision 1.** The
@@ -53,11 +146,17 @@ is a capability *fallback*, not a swap-in for the agent.
    quantized GGUF. Best distribution + air-gap story. `llama-cpp-2` is
    the alternative if we want llama.cpp's GBNF grammar-constrained
    decoding out of the box (we likely do — see below).
-3. **Grammar-constrained decoding is mandatory, not optional.** The
-   output is near-formal; constraining generation to the griz
-   command/`griz`-API grammar (GBNF or logit masking) means the model
-   only has to get *intent mapping* right, not syntax. This is what
-   collapses the model-size requirement.
+3. **Constrained decoding is mandatory, not optional — but the
+   constraint follows "Surface choice" above.** Primary constraint:
+   the FunctionGemma-style chat template + per-tool JSON schema, so
+   tool-call output is parseable by construction and the model only
+   has to get *intent and argument mapping* right, not syntax.
+   Secondary constraint, scoped to the `griz_raw` fallback only: the
+   griz GBNF derived from `interpret.c` (Stage-1 artifact in
+   `posttraining-dataset.md`) — kept because it is independently
+   useful and because it constrains the one tool whose argument is a
+   free-form command string. This is what collapses the model-size
+   requirement.
 4. **CPU-only target.** Sub-1B 4-bit runs at tens of tok/s on a server
    CPU; outputs are short (~50–300 tokens); <1–2 GB RAM incl. KV
    cache. HPC login nodes are CPU-fat and GPU-contended — CPU-only is
@@ -150,6 +249,16 @@ signal and a clean SFT-data filter without human labeling.
 
 ## Open questions (do not resolve until exploration)
 
+- **Tool inventory: which analysis macros earn a tool slot vs. stay as
+  multi-turn orchestration?** First-pass candidates: `query_extreme`
+  (find the state index where a result peaks/troughs over a class +
+  range), `scan_states` (sweep state indices and report a vector of
+  per-state values), `diff_states` (compare result fields at two
+  states). Each macro shrinks the model's required reasoning depth at
+  the cost of one more schema to learn. The pre-experiment (decision 6
+  / Stage 8) is the right place to settle this — run with **typed
+  tools only** first, then add macros only where the eval set's
+  failure modes demand them.
 - Is there enough *intent diversity* to synthesize without a natural
   corpus, or does teacher-generated data collapse to a narrow style?
 - Router design: heuristic, a tiny classifier, or "let the small model

@@ -44,7 +44,10 @@ harness) is built **before and independent of** that delivery.
 Two consumers, one corpus. Generate a single canonical record set;
 project it into the two training formats.
 
-**Canonical rollout record** (`rollouts/*.jsonl`, one JSON per line):
+**Canonical rollout record** (`rollouts/*.jsonl`, one JSON per line)
+— under the typed-tool surface (`agent-local-llm.md` "Surface
+choice"), the `messages` array is FunctionGemma / OpenAI-style with
+`tool_calls` and `tool` role responses, not raw griz strings:
 
 ```json
 {
@@ -53,11 +56,26 @@ project it into the two training formats.
   "intent_id": "disable-mat-then-frame",
   "instruction": "hide material 3 and zoom to fit",
   "instruction_source": "template|manual-paraphrase|teacher-paraphrase",
+  "tools": ["material", "view", "snapshot", "griz_raw", "..."],
   "messages": [
+    {"role": "developer", "content": "You are a model that can do function calling with the following functions."},
     {"role": "user", "content": "hide material 3 and zoom to fit"},
-    {"role": "assistant", "content": "disable mat 3\nrfit"}
+    {"role": "assistant", "tool_calls": [
+      {"type": "function", "function": {"name": "material",
+        "arguments": {"enable": false, "material": 3}}}
+    ]},
+    {"role": "tool", "name": "material", "content": "{\"ok\": true}"},
+    {"role": "assistant", "tool_calls": [
+      {"type": "function", "function": {"name": "view",
+        "arguments": {"op": "reset"}}}
+    ]},
+    {"role": "tool", "name": "view", "content": "{\"ok\": true}"},
+    {"role": "assistant", "content": "Material 3 hidden; view reset to fit."}
   ],
-  "commands": ["disable mat 3", "rfit"],
+  "tool_calls_flat": [
+    {"name": "material", "arguments": {"enable": false, "material": 3}},
+    {"name": "view", "arguments": {"op": "reset"}}
+  ],
   "verifier": {
     "max_tier": 3,
     "l0_in_grammar": true,
@@ -73,6 +91,16 @@ project it into the two training formats.
   "split": "train"
 }
 ```
+
+`tool_calls_flat` is a denormalized view used by the verifier and by
+dedup (Stage 6) — `(intent, fixture, tool_calls_flat)` is the
+deduplication key, replacing the earlier `(…, commands)` key. `tools`
+is the JSON-schema list shown to the model at this rollout (typically
+the full inventory, but can be ablated for tool-surface robustness
+experiments — see `agent-local-llm.md` open Q on macro inventory).
+A rollout that uses the `griz_raw` fallback emits one
+`{"name": "griz_raw", "arguments": {"line": "..."}}` tool call whose
+inner `line` is graded against the Stage-1 grammar at L0/L1.
 
 - **SFT (Q&A) projection** — emit `{messages}` for every record with
   `max_tier >= 3` (configurable floor; L2 fallback only if L3 coverage
@@ -119,6 +147,23 @@ Source: `reference/griz/Src/interpret.c` (11,139 lines; **318**
 Deliverable now; independently useful (documents the vocab the main
 agent needs) → low-regret even if the tiny model is dropped.
 
+**Role under the typed-tool surface choice
+(`agent-local-llm.md` "Surface choice").** The tiny model emits JSON
+tool calls into the typed `Command` oneof, not raw griz lines, so
+this grammar is no longer the model's *primary* output constraint —
+its primary constraint is the per-tool JSON schema. The Stage-1
+artifact stays on the critical path for three other reasons:
+
+1. it constrains the **one fallback tool** (`griz_raw(line: str)`),
+   whose argument *is* a raw griz line;
+2. it remains the L1-parse oracle for verifier inputs that come back
+   from `griz_raw`;
+3. it documents the surface that the larger reasoning-agent tier
+   (`client.md` decision 4) also drives.
+
+So Stage 1 is unchanged in scope; only its *consumer* shifts from "the
+tiny model's whole grammar" to "the fallback tool's grammar".
+
 ### Stage 2 — Intent / NL grounding corpus (no dependency)
 
 Sources: `Src/viewer.c usage_text[]` (terse NL ↔ command pairs),
@@ -160,14 +205,30 @@ Fixtures (`reference/mili/test/xmilics/`): `bar1`, `bar5`, `basic2`,
 ### Stage 4 — The verifier (built now against `MockGrizSession`)
 
 The single graded check reused as SFT filter, RL reward, and eval
-metric. Tiers from `agent-local-llm-posttraining.md` §2:
+metric. Tiers from `agent-local-llm-posttraining.md` §2, refolded onto
+the typed-tool surface (`agent-local-llm.md` "Surface choice"):
 
-| Tier | Check | Needs interface? |
-|---|---|---|
-| L0 | output ∈ grammar (Stage 1 artifact) | no |
-| L1 | `parse_command` accepts (`valid_command`) | no — uses the Stage-1 parser model / dispatcher |
-| L2 | runs against a fixture session, no error | **yes — `GrizSession::execute`** |
-| L3 | post-condition reached (`snapshot`/`query` vs. expected) | **yes — `snapshot`/`query`** |
+| Tier | Check (typed tool call) | Check (`griz_raw` fallback) | Needs interface? |
+|---|---|---|---|
+| L0 | output parses as a tool-call object (`{name, arguments}`) | inner `line` ∈ Stage-1 grammar | no |
+| L1 | `name` is a known tool **and** `arguments` matches its JSON schema (type + arity) | `parse_command` accepts (`valid_command`) | no |
+| L2 | tool dispatch runs against the fixture session, no error | raw line runs, no error | **yes — `GrizSession::execute`** |
+| L3 | post-condition reached (`snapshot`/`query` vs. expected) | post-condition reached | **yes — `snapshot`/`query`** |
+
+**L1 thins, L2 carries more weight.** JSON-schema validity says only
+"argument type and arity are valid"; it does not say "argument *exists
+for this fixture*" (e.g. `material: 7` when only 1–4 exist). The
+original Layer-0 grammar had the same gap, but its dispatcher returned
+rich runtime errors that the verifier could lean on at L1. Under the
+typed-tool surface those errors only surface at L2 (real dispatch), so
+the L2 oracle must catch most argument-level mistakes. This matches
+the vLLM "structured decoding guarantees parseable, not semantically
+correct" caveat called out in the deep-research report.
+
+Practical implication for L2: do **not** rely on the tool call shape
+alone; always execute against a real (or `MockGrizSession`) backend
+that returns the dispatcher's argument-validity errors, and treat
+"executed without error" as the L2 pass condition.
 
 Post-condition kinds (closed set, declared by the intent):
 `state_index`, `selection_set`, `active_result`, `result_range`,
@@ -202,9 +263,10 @@ The only interface-dependent stage.
 
 ### Stage 6 — Dataset assembly, dedup, splits (no dependency)
 
-- Deduplicate on `(normalized_instruction, fixture, commands)`;
-  near-dup instruction filter (embedding or MinHash) to stop
-  paraphrase collapse inflating counts.
+- Deduplicate on `(normalized_instruction, fixture,
+  tool_calls_flat)` (the typed-tool dedup key — see §1; the earlier
+  `commands` key was the raw-DSL form); near-dup instruction filter
+  (embedding or MinHash) to stop paraphrase collapse inflating counts.
 - **Contamination control:** split by `intent_id × fixture`, not by
   row. Held-out eval = whole `(intent, fixture)` cells never seen in
   train, so eval measures generalization, not memorization. Reserve
