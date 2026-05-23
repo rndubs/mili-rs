@@ -800,14 +800,62 @@ Each row flips to ✅ when its gating test lands.
       `test_scenarios.py` (28) + W3's `test_verifier.py` (43) +
       W2×W3 contract (1) all unchanged and green (101 always-on
       total).
-- [ ] **W4b — Eval driver.** v0-specific loop on top of W4a — opens
-      a pygriz `Session` per scenario, runs `run_turn` until
-      `final_text` / `step_cap_hit` / `timeout`, calls
-      `verifier.verify`, writes a canonical rollout record
-      (`posttraining-dataset.md` §1 shape). Caps pinned:
-      `step_cap=8`, `max_new_tokens=256`, `temperature=0`,
-      `seed=0`, per-turn `timeout=60s`. Pure-logic tests via
-      `MockLlmProvider` — no LLM, no GPU. Discharges §W4b.
+- [x] **W4b — Eval driver.** ✅ **Landed.**
+      `python/mili-llm-bench/src/mili_llm_bench/driver.py` ships
+      `EvalConfig` (frozen; baseline caps pinned — `step_cap=8`,
+      `max_new_tokens=256`, `temperature=0`, `seed=0`, per-turn
+      `timeout=60s`, plus the pinned `system_prompt` whose
+      SHA-256 prefix is the falsifiability pin per baseline.md
+      §"Acceptance gate" #1), `run_one_scenario(provider,
+      dispatcher_factory, scenario, tools, config, registry)`,
+      `extract_tool_calls_flat`, `write_rollout_record`,
+      `build_summary` + `write_summary`, and a top-level
+      `run_eval(scenarios, provider_factory, dispatcher_factory,
+      config, out_dir, ...)` orchestrator that writes
+      `rollouts.jsonl` (one record per scenario) +
+      `summary.json` (pretty-printed). Driver-level stops ride
+      on the synthetic `"stop:<reason>"` system message
+      convention W3's `verifier._detect_driver_stop` reads —
+      the harness stays neutral on driver bookkeeping (returns
+      `kind="error"` / `error_kind="timeout"` and leaves
+      `messages` alone; the driver appends `"stop:timeout"` and
+      on `step_cap` exhaustion appends `"stop:step_cap_hit"`).
+      `token_cap_hit` stays reserved in the closed enum but is
+      **not emitted in v0** — the provider's per-call
+      `max_new_tokens` is sufficient; a per-rollout token
+      budget is a deliberate non-goal (baseline §W4b). The
+      `dispatcher_factory(Scenario) -> Dispatcher` +
+      `provider_factory(Scenario) -> LlmProvider` seams keep
+      the always-on test path pygriz-free / LLM-free /
+      GPU-free — PR-5's CLI plugs in `PygrizDispatcher`-per-
+      scenario + a live provider behind the same signatures
+      without touching the orchestrator. Rollout records match
+      the canonical `posttraining-dataset.md` §1 shape with
+      `instruction_source = "bootstrap-handauthored"` (Stage 5
+      teacher rollouts will flip it to `"teacher-paraphrase"`);
+      `tool_calls_flat` carries the **parsed-dict** form (the
+      dedup key — the wire-shape JSON-stringified arguments
+      live only in `messages`). `summary["by_failure_mode"]`
+      is zero-initialized over the entire `verifier.FAILURE_MODES`
+      tuple so "we don't know which failure mode dominates" is
+      structurally impossible per baseline.md §"Acceptance
+      gate" #6. Discharges §W4b. Gating tests
+      `python/mili-llm-bench/tests/test_driver.py` (11
+      always-on: happy-path L3 on `bs-001`, step-cap
+      exhaustion → `"stop:step_cap_hit"`, per-turn timeout →
+      `"stop:timeout"`, rollout-record canonical-shape pin
+      (every §1 key + parsed-dict `tool_calls_flat`),
+      `extract_tool_calls_flat` ordering across N-call turns +
+      wire-string parsing, summary-writer completeness over
+      4 scripted scenarios covering L3 / schema_mismatch /
+      wrong_result / timeout, end-to-end `run_eval` smoke over
+      `bootstrap.jsonl[0:3]`, system-prompt content-hash
+      stability, `write_summary` returns the same dict it
+      serializes, `EvalConfig` frozen with baseline defaults);
+      W1's `test_schemas.py` (12) + W2's `test_scenarios.py`
+      (28) + W3's `test_verifier.py` (43) + W2×W3 contract (1)
+      + W4a's `test_harness.py` (17) all unchanged and green
+      (112 always-on total).
 - [ ] **W5 — Inference provider seam.** 🟡 **Partial — Mock +
       Replay landed (PR-3 with W4a); FunctionGemma + Anthropic
       deferred to PR-5.** `LlmProvider` Protocol +
