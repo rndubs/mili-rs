@@ -147,7 +147,7 @@
 | [`README.md`](README.md) | Server/client split, crate layout, transport + renderer stack, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` authoritative) |
 | [`scripting.md`](scripting.md) | Scripting = second pure-Python client of `mili-viz-proto`; camera server-authoritative; `attach()` to a running GUI; `grizinit` via `run_script()`. Implementation home: Phase 6 | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design; server-hosted agent peer with barge-in + provenance journal. Adds `AgentChat`/`DELTA_AGENT`/`Snapshot`/`Interrupt` to M1; introduces Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
-| [`agent-local-llm.md`](agent-local-llm.md), [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md), [`posttraining-dataset.md`](posttraining-dataset.md) | Local-LLM agent investigation (model + post-training) + the dataset-construction build plan | 🔎 research notes — not yet binding |
+| [`agent-local-llm.md`](agent-local-llm.md), [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md), [`posttraining-dataset.md`](posttraining-dataset.md), [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) | Local-LLM agent investigation (model + post-training) + the dataset-construction build plan + the v0 baseline plan (the next concrete milestone). Progress in § "Local LLM agent (exploratory)" below | 🔎 research notes — not yet binding; v0 baseline plan drafted |
 
 The reference implementation we are porting from is read-only under
 `reference/griz/Src/` (cited by file:path in the docs above).
@@ -656,6 +656,132 @@ parallel of `crates/`). Milestone breakdown + M1 detail:
       numpy/pandas types as milox; Arrow Flight for large results).
 - [ ] **M6 — output + remote tuning** (`render`/`save_animation`/
       `snapshot` via `CaptureFrame`; HPC-latency buffers).
+
+## Local LLM agent (exploratory)
+
+> **Status: research / exploratory / off the Phase 4–6 critical
+> path.** Capability-gated per `phase-4-m1.md` Decision 6 — the agent
+> *contract* is in M1 (the frozen `AgentChat`/`Interrupt` stubs); the
+> *impl* and any post-training work is **not** gating any Phase 4/5/6
+> milestone. This tracker exists so the work has one central
+> checkbox surface alongside the phase tables above; nothing here
+> blocks anything above.
+>
+> Read in this order:
+> [`agent-local-llm.md`](agent-local-llm.md) →
+> [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md) →
+> [`posttraining-dataset.md`](posttraining-dataset.md) →
+> [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md).
+
+### Surface + post-training decisions (pinned in the research docs)
+
+| # | Decision | State | Where |
+|---|---|---|---|
+| L0 | **Surface choice — typed `Command` JSON tool calls**, not raw Layer-0 DSL and not free-form pygriz Python; ≈18 tools (15 typed + `query`/`snapshot` + `griz_raw` fallback); pygriz is *humans and the reasoning agent*, not the tiny model's emit target | ✅ pinned | [`agent-local-llm.md`](agent-local-llm.md) § "Surface choice" |
+| L1 | Constrained decoding: per-tool JSON schema as primary; griz GBNF scoped to the `griz_raw` argument only | ✅ pinned | [`agent-local-llm.md`](agent-local-llm.md) Decision 3 |
+| L2 | Verifier tiers refolded onto the typed-tool surface (L0 = tool-call shape; L1 = name + schema; L2 = dispatch ok; L3 = post-condition); **L1 thins, L2 carries more weight** | ✅ pinned | [`posttraining-dataset.md`](posttraining-dataset.md) Stage 4 |
+| L3 | Canonical rollout record updated to FunctionGemma-style `tool_calls`/`tool` messages + `tools` schemas + `tool_calls_flat` (the new dedup key) | ✅ pinned | [`posttraining-dataset.md`](posttraining-dataset.md) §1, Stage 6 |
+| L4 | V0 baseline plan drafted: produce one defensible L3 pass-rate number for stock FunctionGemma-270M-it on a 50-scenario bootstrap eval, no fine-tune, pygriz-driven | ✅ drafted | [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) |
+| L5 | **Harness contract pinned.** Three consumers share one factored harness (eval driver, future teacher rollouts, future server-side `AgentChat`). `run_turn(provider, session, messages, tools, ...) → TurnResult` with closed `error_kind` enum; dispatches N tool calls per turn in order; parse errors fed back as `tool` responses (model self-corrects, option (b)); replay mode ships in v0 (`ReplayLlmProvider`) for verifier regression and dataset validation | ✅ pinned | [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W4a |
+| L6 | **Harness invariants pinned.** Three fields **never** reach the LLM under any code path: `Snapshot.loaded.state_times` (unbounded `repeated double`; replaced by `state_time_range`+`current_time`), `GeometryRef.flight_ticket` (opaque bytes; `GeometryRef` dropped wholesale from projected responses), `Snapshot.agent` (self-echo trap). Enforced by per-field unit tests on a fabricated raw `Snapshot` | ✅ pinned | [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W1 "Harness invariants" |
+
+### V0 baseline milestone (the next concrete thing to build)
+
+The build order from [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md).
+Each row flips to ✅ when its gating test lands.
+
+- [ ] **W1 — Tool-schema artifact.** Auto-derive
+      `data/posttraining/grammar/tools.json` (input + output schema
+      per tool) from `crates/mili-viz-proto/proto/mili_viz.proto`'s
+      `Command` oneof + the two read tools + `griz_raw`. Honest-diff
+      test (`python/mili-llm-bench/tests/test_schemas.py`)
+      regenerates and diffs vs the pinned file — drift fails CI.
+      No interface dep; runs off the proto alone. Discharges
+      [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W1.
+- [ ] **W2 — Bootstrap eval scenarios.** Hand-author 50 scenarios
+      (~10 intents × `d3samp6`, `cylinder`) with closed-kind
+      post-conditions grounded in the parity-suite's known-good
+      values; emit `data/posttraining/eval/bootstrap.jsonl`. Checked
+      in (small + stable). No interface dep. Discharges §W2.
+- [ ] **W3 — Verifier (L0..L3 + failure-mode taxonomy).**
+      Single Python module reused by v0 *and* by the future
+      `posttraining-dataset.md` Stage 4 pipeline. Emits `max_tier`,
+      `reward`, **and** a closed `failure_mode` label
+      (`parse_error`/`unknown_tool`/`schema_mismatch`/
+      `dispatch_error`/`nonexistent_material`/.../`wrong_final_state`/
+      `step_cap_hit`). Pure-logic tests against fabricated
+      rollouts; no LLM, no GPU. Discharges §W3.
+- [ ] **W4a — Agent harness (the factored core).** Tool registry +
+      `jsonschema` input validator + dispatcher (typed Commands →
+      pygriz typed helpers; `griz_raw` → `s.command(raw)`;
+      `query`/`snapshot` → pygriz read paths) + error wrapper +
+      response projection (the W1 table) + per-turn budget caps.
+      Public surface `run_turn(provider, session, messages, tools,
+      ...) → TurnResult`; closed `error_kind` enum mirrors W3's
+      failure-mode taxonomy. **N tool calls per turn dispatched in
+      declared order**; **parse errors fed back as `tool` responses
+      so the model self-corrects (option (b))**; **`ReplayLlmProvider`
+      ships in v0** for verifier-regression + dataset-validation
+      round-trips. Provider-agnostic + session-agnostic: reused by
+      W4b (eval driver), future `posttraining-dataset.md` Stage 5
+      (teacher rollouts), and the eventual server-side `AgentChat`
+      handler. Gating tests: invariants
+      (`test_no_state_times_in_response` /
+      `test_no_flight_ticket_in_response` /
+      `test_no_agent_in_response`), N-tool-calls-per-turn,
+      parse-error feedback, replay round-trip. Discharges §W4a.
+- [ ] **W4b — Eval driver.** v0-specific loop on top of W4a — opens
+      a pygriz `Session` per scenario, runs `run_turn` until
+      `final_text` / `step_cap_hit` / `timeout`, calls
+      `verifier.verify`, writes a canonical rollout record
+      (`posttraining-dataset.md` §1 shape). Caps pinned:
+      `step_cap=8`, `max_new_tokens=256`, `temperature=0`,
+      `seed=0`, per-turn `timeout=60s`. Pure-logic tests via
+      `MockLlmProvider` — no LLM, no GPU. Discharges §W4b.
+- [ ] **W5 — Inference provider seam.** `LlmProvider` Protocol +
+      `FunctionGemmaProvider` (HF transformers, the model card's
+      documented path), `AnthropicProvider` (frontier baseline +
+      future teacher), `MockLlmProvider` (deterministic tests),
+      `ReplayLlmProvider` (pre-recorded outputs for re-grading /
+      dataset validation; W4a "Replay mode"). The
+      Candle/llama.cpp/vLLM runtime swap from
+      [`agent-local-llm.md`](agent-local-llm.md) Decision 2 happens
+      behind this seam later. Discharges §W5.
+- [ ] **W6 — Bootstrap run + report.**
+      `mili-llm-bench run --provider functiongemma --scenarios
+      bootstrap.jsonl` produces `config.yaml`+`rollouts.jsonl`+
+      `summary.json`+`report.md` under
+      `data/posttraining/runs/<timestamp>-<provider>-<hash>/`.
+      **The v0 baseline L3 pass-rate is published from this report.**
+      Run the same against `--provider anthropic` for the frontier
+      ceiling. Discharges §W6 and closes the v0 acceptance gate.
+
+### Post-v0 branches (decided after the W6 number is in hand)
+
+The decision tree in
+[`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §"After
+v0". Not yet trackable as checkboxes — which branch we take depends
+on the failure-mode breakdown.
+
+- 🔎 **If L3 already adequate** → declare the
+  [`posttraining-dataset.md`](posttraining-dataset.md) Stage 8
+  pre-experiment passed; post-training is moot for v1; bench
+  becomes a regression test. *Stop.*
+- 🔎 **If L0/L1 mostly green but L3 inadequate** → proceed to
+  [`posttraining-dataset.md`](posttraining-dataset.md) Stages 1
+  (grammar artifact, for `griz_raw`), 5 (teacher rollouts), 6
+  (assemble), 7 (eval); SFT then DPO/GRPO only on measured need.
+- 🔎 **If L0/L1 mostly red** → re-baseline against
+  Qwen2.5-Coder 1.5B/3B per
+  [`agent-local-llm.md`](agent-local-llm.md) Decision 5, behind the
+  same `LlmProvider` seam, before spending teacher tokens.
+- 🔎 **If compound multi-turn fails specifically** → enrich
+  per-tool response shapes (W1) or add the first analysis macro
+  (`query_extreme`), per the open Q in
+  [`agent-local-llm.md`](agent-local-llm.md).
+
+Each branch reuses the v0 plumbing — bench, verifier, schemas,
+scenarios — so none of W1–W6 is throwaway.
 
 ## Immediate next steps (pick up here)
 
