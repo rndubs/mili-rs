@@ -10,7 +10,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use mili_rs::{Database, MeshId, QueryArgs, QueryResult, StateValues, Superclass};
+pub use mili_rs::Superclass;
+use mili_rs::{Database, MeshId, QueryArgs, QueryResult, StateValues};
 
 /// Zero-based local node indices of each hex face, transcribed from
 /// `reference/mili-python/src/mili/miliinternal.py:675-682` — the
@@ -37,16 +38,48 @@ pub const LAYOUT: &str = "MVG1:verts_f32x3+idx_u32+trimat_u32";
 /// M2 blob plus a trailing per-vertex `f32` scalar array.
 pub const LAYOUT_SCALAR: &str = "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32";
 
+/// Volumetric `GeometryRef.layout` (phase-4-m7.md Decision 72): strict
+/// superset of `MVG2` with a per-element edge buffer, a `tri_flags`
+/// column (bit 0 = interior), and opt-in interior triangles. Activated
+/// only when the server has new data to ship (currently the
+/// `include_interior` sentinel — Decision 74); otherwise the M2/M3
+/// layouts stay byte-identical (VB-001).
+pub const LAYOUT_VOL: &str =
+    "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32";
+
+/// Reserved sentinel material id for the `include_interior` viz-state
+/// toggle (phase-4-m7.md Decision 74): a `MaterialVisibility{ material:
+/// u32::MAX }` command rides through `MaterialsState.visible` as a
+/// per-viz boolean, reusing the existing field rather than bumping the
+/// frozen proto.
+pub const INTERIOR_SENTINEL: u32 = u32::MAX;
+
 /// One prepped element class kept for M3 nodal scatter: the element →
 /// corner-node-id rows and the parallel element label list (same row
 /// order as `connectivity_ids` / `labels`).
-struct ElemClass {
-    name: String,
-    n_nodes: usize,
+pub(crate) struct ElemClass {
+    #[allow(dead_code)]
+    pub(crate) name: String,
+    pub(crate) n_nodes: usize,
     /// Flat `[elem * n_nodes]` 0-based node ids.
-    conns: Vec<u32>,
+    pub(crate) conns: Vec<u32>,
     /// Element label per row (`conns.len() / n_nodes` entries).
-    labels: Vec<i32>,
+    pub(crate) labels: Vec<i32>,
+    /// Per-element material id (parallel to `labels`). The last
+    /// column of `connectivity_ids` for this class — captured at
+    /// build time so the M7 volumetric path can re-emit faces with
+    /// the correct `tri_material` without re-querying the database.
+    pub(crate) materials: Vec<u32>,
+    /// Element superclass (phase-4-m7.md Decisions 73–74): looks up
+    /// the per-class edge and face tables for the volumetric emit.
+    pub(crate) superclass: Superclass,
+}
+
+/// Lightweight per-class element-count summary for the M8 clip
+/// dispatch (avoids exposing the full [`ElemClass`] in iteration
+/// contexts).
+pub(crate) struct ClassSummary {
+    pub(crate) elements: usize,
 }
 
 /// State-invariant mesh topology, built once per `load`.
@@ -66,6 +99,124 @@ pub struct MeshTopology {
     tri_material: Vec<u32>,
     /// Per element class, kept for M3 nodal scatter.
     elem_classes: Vec<ElemClass>,
+}
+
+/// Per-`Superclass` element-edge table (phase-4-m7.md Decision 73).
+/// Local-node-index pairs enumerating each element's **true mesh
+/// edges** — Hex = 12, Tet = 6, Quad = 4, Tri = 3, Wedge = 9,
+/// Pyramid = 8. `Tet10` is corner-only (6) for M7; mid-edge nodes
+/// are a follow-up (M7 § "Open questions"). Mirrors the shape of
+/// [`triangulation`]: a fixed table, one per superclass.
+pub(crate) fn element_edges_table(sc: Superclass) -> &'static [[usize; 2]] {
+    match sc {
+        Superclass::Tri => &[[0, 1], [1, 2], [2, 0]],
+        Superclass::Quad => &[[0, 1], [1, 2], [2, 3], [3, 0]],
+        Superclass::Tet | Superclass::Tet10 => &[[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]],
+        Superclass::Pyramid => &[
+            // base quad
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [3, 0],
+            // apex
+            [0, 4],
+            [1, 4],
+            [2, 4],
+            [3, 4],
+        ],
+        Superclass::Wedge => &[
+            // bottom triangle
+            [0, 1],
+            [1, 2],
+            [2, 0],
+            // top triangle
+            [3, 4],
+            [4, 5],
+            [5, 3],
+            // sides
+            [0, 3],
+            [1, 4],
+            [2, 5],
+        ],
+        Superclass::Hex => &[
+            // bottom quad
+            [0, 1],
+            [1, 2],
+            [2, 3],
+            [3, 0],
+            // top quad
+            [4, 5],
+            [5, 6],
+            [6, 7],
+            [7, 4],
+            // vertical edges
+            [0, 4],
+            [1, 5],
+            [2, 6],
+            [3, 7],
+        ],
+        _ => &[],
+    }
+}
+
+/// Per-`Superclass` face list (phase-4-m7.md Decision 74). Each face
+/// is the sequence of local node indices walking the face boundary —
+/// 3 nodes (triangle face) or 4 nodes (quad face). Used to detect
+/// shared faces between elements for interior-triangle emission. The
+/// Hex case matches [`HEX_FACE_NODES`] (the surface-strain face
+/// indexing, phase-4-m5c.md Decision 30).
+pub(crate) fn faces_table(sc: Superclass) -> &'static [&'static [usize]] {
+    match sc {
+        Superclass::Tri => &[&[0, 1, 2]],
+        Superclass::Quad => &[&[0, 1, 2, 3]],
+        Superclass::Tet | Superclass::Tet10 => &[&[0, 2, 1], &[0, 1, 3], &[1, 2, 3], &[2, 0, 3]],
+        Superclass::Pyramid => &[
+            &[0, 3, 2, 1], // base (inward-facing normal)
+            &[0, 1, 4],
+            &[1, 2, 4],
+            &[2, 3, 4],
+            &[3, 0, 4],
+        ],
+        Superclass::Wedge => &[
+            &[0, 1, 2],
+            &[3, 5, 4],
+            &[0, 3, 4, 1],
+            &[1, 4, 5, 2],
+            &[2, 5, 3, 0],
+        ],
+        Superclass::Hex => &[
+            &[1, 2, 6, 5],
+            &[2, 3, 7, 6],
+            &[0, 4, 7, 3],
+            &[1, 5, 4, 0],
+            &[4, 5, 6, 7],
+            &[0, 3, 2, 1],
+        ],
+        _ => &[],
+    }
+}
+
+/// Triangulate a face of `n_face_nodes` (3 or 4) by **position
+/// within the face** — yields `(p0, p1, p2)` triples that index into
+/// the caller's parallel `face_nodes` array (the global node ids of
+/// the face, in face-walk order). Quad → two tris on the (0,1,2) /
+/// (0,2,3) diagonal, matching [`triangulation`] for Quad.
+fn face_tri_positions(n_face_nodes: usize) -> &'static [[usize; 3]] {
+    match n_face_nodes {
+        3 => &[[0, 1, 2]],
+        4 => &[[0, 1, 2], [0, 2, 3]],
+        _ => &[],
+    }
+}
+
+/// Sorted-tuple key for a face used to detect cell-cell shared faces
+/// (phase-4-m7.md Decision 74). A face's identity is the *set* of its
+/// node ids — orientation, element-of-origin, and the splitting
+/// diagonal don't matter for "is this face shared".
+fn face_key(face_nodes: &[u32]) -> Vec<u32> {
+    let mut v: Vec<u32> = face_nodes.to_vec();
+    v.sort_unstable();
+    v
 }
 
 /// Per-`Superclass` corner-node triangulation (phase-4-m2.md
@@ -203,8 +354,10 @@ impl MeshTopology {
                 continue; // connectivity too short for this scheme
             }
             let mut conns: Vec<u32> = Vec::with_capacity((rows.len() / ncols) * n_nodes);
+            let mut elem_materials: Vec<u32> = Vec::with_capacity(rows.len() / ncols);
             for row in rows.chunks_exact(ncols) {
                 let material = row[n_nodes].max(0) as u32;
+                elem_materials.push(material);
                 for &nid in &row[..n_nodes] {
                     conns.push(nid.max(0) as u32);
                 }
@@ -236,6 +389,8 @@ impl MeshTopology {
                     n_nodes,
                     conns,
                     labels,
+                    materials: elem_materials,
+                    superclass: sc,
                 });
             }
         }
@@ -807,19 +962,278 @@ impl MeshTopology {
         (idx, mat)
     }
 
+    /// Per-element edges concatenated as a line-list (phase-4-m7.md
+    /// Decision 73). Each element contributes its
+    /// [`element_edges_table`] entries verbatim (per-element dedup
+    /// only — no global hash pass; two hexes sharing a face draw the
+    /// shared edge twice in identical positions, visually equivalent
+    /// to once). Empty when no class in the corpus has a non-empty
+    /// edge table.
+    fn build_element_edges(&self) -> Vec<u32> {
+        let mut edges: Vec<u32> = Vec::new();
+        for ec in &self.elem_classes {
+            let tbl = element_edges_table(ec.superclass);
+            if tbl.is_empty() {
+                continue;
+            }
+            let elems = ec.conns.len() / ec.n_nodes;
+            for e in 0..elems {
+                let row = &ec.conns[e * ec.n_nodes..(e + 1) * ec.n_nodes];
+                for [a, b] in tbl {
+                    if *a < ec.n_nodes && *b < ec.n_nodes {
+                        let na = row[*a];
+                        let nb = row[*b];
+                        if (na as usize) < self.node_count && (nb as usize) < self.node_count {
+                            edges.push(na);
+                            edges.push(nb);
+                        }
+                    }
+                }
+            }
+        }
+        edges
+    }
+
+    /// Volumetric face emission (phase-4-m7.md Decision 74). Walks
+    /// every element's faces, deduplicating shared faces on the
+    /// sorted-node-tuple key: boundary faces (count == 1) get
+    /// `tri_flags = 0`; interior faces (count >= 2) are emitted
+    /// **once** with `tri_flags = 1` so a translucent renderer can
+    /// draw them without double-counting the boundary. Returns
+    /// (indices, tri_material, tri_flags). The shared face is
+    /// attributed to its **first-encountered** element's material —
+    /// well-defined and stable for the current input order.
+    fn build_volumetric_faces(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        // (count, attribution-material, face_nodes in walk order)
+        let mut by_key: HashMap<Vec<u32>, (usize, u32, Vec<u32>)> = HashMap::new();
+        let mut order: Vec<Vec<u32>> = Vec::new();
+        for ec in &self.elem_classes {
+            let faces = faces_table(ec.superclass);
+            if faces.is_empty() {
+                continue;
+            }
+            let elems = ec.conns.len() / ec.n_nodes;
+            for e in 0..elems {
+                let row = &ec.conns[e * ec.n_nodes..(e + 1) * ec.n_nodes];
+                let mat = ec.materials.get(e).copied().unwrap_or(0);
+                for face in faces {
+                    if face.iter().any(|&li| li >= ec.n_nodes) {
+                        continue;
+                    }
+                    let face_nodes: Vec<u32> = face.iter().map(|&li| row[li]).collect();
+                    if face_nodes.iter().any(|&n| (n as usize) >= self.node_count) {
+                        continue;
+                    }
+                    let key = face_key(&face_nodes);
+                    by_key
+                        .entry(key.clone())
+                        .and_modify(|v| v.0 += 1)
+                        .or_insert_with(|| {
+                            order.push(key);
+                            (1, mat, face_nodes.clone())
+                        });
+                }
+            }
+        }
+        let mut indices: Vec<u32> = Vec::new();
+        let mut tri_material: Vec<u32> = Vec::new();
+        let mut tri_flags: Vec<u32> = Vec::new();
+        for key in &order {
+            let (count, mat, face_nodes) = by_key.remove(key).unwrap();
+            let flag = if count >= 2 { 1u32 } else { 0u32 };
+            for tri in face_tri_positions(face_nodes.len()) {
+                indices.extend_from_slice(&[
+                    face_nodes[tri[0]],
+                    face_nodes[tri[1]],
+                    face_nodes[tri[2]],
+                ]);
+                tri_material.push(mat);
+                tri_flags.push(flag);
+            }
+        }
+        (indices, tri_material, tri_flags)
+    }
+
+    /// Serialize pre-built volumetric buffers into the `MVG3` layout
+    /// (phase-4-m8.md — used by the cut-plane operator after the
+    /// per-element clip has already produced the index/material/edge
+    /// arrays). Scalar interpolation is M9's concern; M8 emits no
+    /// scalar (`flags_mask & 1 == 0`).
+    #[must_use]
+    pub(crate) fn pack_mvg3_buffers(
+        verts: &[f32],
+        indices: &[u32],
+        tri_material: &[u32],
+        tri_flags: &[u32],
+        edges: &[u32],
+        scalar: Option<&[f32]>,
+    ) -> Vec<u8> {
+        let n_verts = (verts.len() / 3) as u64;
+        let n_idx = indices.len() as u64;
+        let n_edges = edges.len() as u64;
+        let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
+        let mut flags_mask: u32 = 2; // tri_flags always present
+        if with_scalar {
+            flags_mask |= 1;
+        }
+        if !edges.is_empty() {
+            flags_mask |= 4;
+        }
+        let scalar_bytes = if with_scalar { n_verts as usize * 4 } else { 0 };
+        let mut buf = Vec::with_capacity(
+            36 + verts.len() * 4
+                + indices.len() * 4
+                + tri_material.len() * 4
+                + tri_flags.len() * 4
+                + edges.len() * 4
+                + scalar_bytes,
+        );
+        buf.extend_from_slice(b"MVG3");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&n_verts.to_le_bytes());
+        buf.extend_from_slice(&n_idx.to_le_bytes());
+        buf.extend_from_slice(&n_edges.to_le_bytes());
+        buf.extend_from_slice(&flags_mask.to_le_bytes());
+        for f in verts {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for i in indices {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        for m in tri_material {
+            buf.extend_from_slice(&m.to_le_bytes());
+        }
+        for f in tri_flags {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for e in edges {
+            buf.extend_from_slice(&e.to_le_bytes());
+        }
+        if with_scalar {
+            for v in scalar.unwrap() {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    /// Encode the current-state volumetric blob (phase-4-m7.md
+    /// Decisions 72–74). Layout: see [`LAYOUT_VOL`].
+    fn encode_mvg3(
+        &self,
+        db: &Database,
+        state: u32,
+        scalar: Option<&[f32]>,
+        materials: &BTreeMap<u32, bool>,
+        include_interior: bool,
+    ) -> (Vec<u8>, u64) {
+        let verts = self.coords_at_state(db, state);
+        let n_verts = (verts.len() / 3) as u64;
+        let (all_idx, all_mat, all_flags) = self.build_volumetric_faces();
+        let edges = self.build_element_edges();
+
+        // Filter triangles by:
+        //   - material visibility (existing M4 filter)
+        //   - interior bit (drop interior tris unless include_interior)
+        let mut indices: Vec<u32> = Vec::with_capacity(all_idx.len());
+        let mut tri_material: Vec<u32> = Vec::with_capacity(all_mat.len());
+        let mut tri_flags: Vec<u32> = Vec::with_capacity(all_flags.len());
+        let n_tri = all_mat.len();
+        for t in 0..n_tri {
+            let f = all_flags[t];
+            let is_interior = (f & 1) == 1;
+            if is_interior && !include_interior {
+                continue;
+            }
+            let mat = all_mat[t];
+            if !Self::material_visible(materials, mat) {
+                continue;
+            }
+            indices.extend_from_slice(&all_idx[t * 3..t * 3 + 3]);
+            tri_material.push(mat);
+            tri_flags.push(f);
+        }
+        let n_idx = indices.len() as u64;
+        let n_edges = edges.len() as u64;
+
+        let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
+        let mut flags_mask: u32 = 0;
+        if with_scalar {
+            flags_mask |= 1;
+        }
+        flags_mask |= 2; // tri_flags column always present in MVG3
+        if !edges.is_empty() {
+            flags_mask |= 4;
+        }
+        if include_interior {
+            flags_mask |= 8;
+        }
+
+        let mut buf = Vec::with_capacity(
+            4 + 4
+                + 8
+                + 8
+                + 8
+                + 4
+                + verts.len() * 4
+                + indices.len() * 4
+                + tri_material.len() * 4
+                + tri_flags.len() * 4
+                + (edges.len() * 4)
+                + if with_scalar { verts.len() / 3 * 4 } else { 0 },
+        );
+        buf.extend_from_slice(b"MVG3");
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&n_verts.to_le_bytes());
+        buf.extend_from_slice(&n_idx.to_le_bytes());
+        buf.extend_from_slice(&n_edges.to_le_bytes());
+        buf.extend_from_slice(&flags_mask.to_le_bytes());
+        for f in &verts {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for i in &indices {
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        for m in &tri_material {
+            buf.extend_from_slice(&m.to_le_bytes());
+        }
+        for f in &tri_flags {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for e in &edges {
+            buf.extend_from_slice(&e.to_le_bytes());
+        }
+        if with_scalar {
+            for v in scalar.unwrap() {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        (buf, n_idx)
+    }
+
     /// Encode the current-state hull, dropping triangles of disabled
     /// materials (phase-4-m4.md Decision 16). `scalar` (per-vertex,
     /// phase-4-m3 Decision 14) yields the `MVG2` layout; `None` is the
     /// M2 `MVG1` bare hull. With no material disabled the bytes are
     /// identical to M2/M3. Returns the blob and the post-filter
     /// `num_indices` for the `GeometryRef`.
+    ///
+    /// The `MVG3` volumetric layout (phase-4-m7.md Decisions 72–74)
+    /// activates iff `materials[u32::MAX] == true` — the reserved
+    /// `include_interior` sentinel. Otherwise the M2/M3/M4 byte-stable
+    /// path is taken verbatim (VB-001).
     pub fn encode(
         &self,
         db: &Database,
         state: u32,
         scalar: Option<&[f32]>,
         materials: &BTreeMap<u32, bool>,
-    ) -> (Vec<u8>, u64) {
+    ) -> (Vec<u8>, &'static str, u64) {
+        let include_interior = matches!(materials.get(&INTERIOR_SENTINEL), Some(true));
+        if include_interior {
+            let (buf, n_idx) = self.encode_mvg3(db, state, scalar, materials, true);
+            return (buf, LAYOUT_VOL, n_idx);
+        }
         let verts = self.coords_at_state(db, state);
         let n_verts = (verts.len() / 3) as u64;
         let (indices, tri_material) = self.visible_triangles(materials);
@@ -850,7 +1264,8 @@ impl MeshTopology {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
         }
-        (buf, n_idx)
+        let layout = if with_scalar { LAYOUT_SCALAR } else { LAYOUT };
+        (buf, layout, n_idx)
     }
 
     pub fn num_vertices(&self) -> u64 {
@@ -859,5 +1274,169 @@ impl MeshTopology {
 
     pub fn mesh_id(&self) -> MeshId {
         self.mesh_id
+    }
+
+    /// Per-class element-count summary (phase-4-m8.md — drives the
+    /// rayon-parallel clip dispatch in [`crate::clip`]).
+    pub(crate) fn elem_class_summary(&self) -> Vec<ClassSummary> {
+        self.elem_classes
+            .iter()
+            .map(|ec| ClassSummary {
+                elements: ec.conns.len() / ec.n_nodes,
+            })
+            .collect()
+    }
+
+    pub(crate) fn elem_class_at(&self, idx: usize) -> &ElemClass {
+        &self.elem_classes[idx]
+    }
+
+    /// Node coordinates at 1-based `state` (phase-4-m8.md — public
+    /// hook for `clip::clip_topology`, which needs the same per-state
+    /// vertex buffer the encoder uses).
+    pub fn coords_at(&self, db: &Database, state: u32) -> Vec<f32> {
+        self.coords_at_state(db, state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Synthesize a `MeshTopology` from a single hand-built element
+    /// class — phase-4-m7.md gating fixture for the volumetric build
+    /// helpers without needing a real `Database` open.
+    fn topo_from_class(
+        name: &str,
+        sc: Superclass,
+        n_nodes: usize,
+        elements: Vec<(Vec<u32>, u32)>,
+        node_count: usize,
+    ) -> MeshTopology {
+        let mut conns = Vec::new();
+        let mut labels = Vec::new();
+        let mut materials = Vec::new();
+        for (i, (row, mat)) in elements.into_iter().enumerate() {
+            assert_eq!(row.len(), n_nodes);
+            conns.extend(row);
+            labels.push((i + 1) as i32);
+            materials.push(mat);
+        }
+        MeshTopology {
+            mesh_id: MeshId(1),
+            node_count,
+            node_labels: (1..=node_count as i32).collect(),
+            ref_coords: vec![0.0; node_count * 3],
+            indices: Vec::new(),
+            tri_material: Vec::new(),
+            elem_classes: vec![ElemClass {
+                name: name.into(),
+                n_nodes,
+                conns,
+                labels,
+                materials,
+                superclass: sc,
+            }],
+        }
+    }
+
+    #[test]
+    fn hex_element_edge_table_has_12_unique_edges() {
+        let tbl = element_edges_table(Superclass::Hex);
+        assert_eq!(tbl.len(), 12, "Hex has 12 mesh edges (no face diagonals)");
+        let mut keys: Vec<(usize, usize)> = tbl
+            .iter()
+            .map(|p| (p[0].min(p[1]), p[0].max(p[1])))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), 12, "table must enumerate unique edges");
+        for (a, b) in &keys {
+            assert!(*a < 8 && *b < 8, "Hex corner indices in 0..8");
+        }
+    }
+
+    #[test]
+    fn element_edge_counts_match_decision_73() {
+        assert_eq!(element_edges_table(Superclass::Tri).len(), 3);
+        assert_eq!(element_edges_table(Superclass::Quad).len(), 4);
+        assert_eq!(element_edges_table(Superclass::Tet).len(), 6);
+        assert_eq!(element_edges_table(Superclass::Tet10).len(), 6);
+        assert_eq!(element_edges_table(Superclass::Pyramid).len(), 8);
+        assert_eq!(element_edges_table(Superclass::Wedge).len(), 9);
+        assert_eq!(element_edges_table(Superclass::Hex).len(), 12);
+    }
+
+    #[test]
+    fn single_hex_emits_exactly_12_element_edges_no_face_diagonals() {
+        // Unit cube nodes 0..8 in canonical hex order.
+        let topo = topo_from_class(
+            "brick",
+            Superclass::Hex,
+            8,
+            vec![(vec![0, 1, 2, 3, 4, 5, 6, 7], 1)],
+            8,
+        );
+        let edges = topo.build_element_edges();
+        assert_eq!(edges.len(), 12 * 2, "12 edges in line-list form");
+        // VB-005: none of the 6 face diagonals (the index buffer
+        // would still contain them, but the dedicated edge buffer
+        // must not).
+        let diagonals: [(u32, u32); 6] = [(0, 2), (1, 3), (4, 6), (5, 7), (0, 5), (1, 4)];
+        for pair in edges.chunks_exact(2) {
+            let key = (pair[0].min(pair[1]), pair[0].max(pair[1]));
+            for d in &diagonals {
+                let dk = (d.0.min(d.1), d.0.max(d.1));
+                assert_ne!(key, dk, "VB-005: face diagonal leaked into edges");
+            }
+        }
+    }
+
+    #[test]
+    fn two_hex_cube_volumetric_dedup_marks_one_interior_face() {
+        // Two unit hexes glued on the +x face (so they share 4 nodes
+        // and 1 quad face). 12 unique nodes total.
+        // Left hex: nodes 0..7 (x ∈ [0,1]); Right hex shares x=1
+        // face with the left's nodes [1,2,6,5].
+        // Right hex node layout: [1, 8, 9, 2, 5, 10, 11, 6] (right
+        // shifted by one unit in x; canonical hex order).
+        let topo = topo_from_class(
+            "brick",
+            Superclass::Hex,
+            8,
+            vec![
+                (vec![0, 1, 2, 3, 4, 5, 6, 7], 1),
+                (vec![1, 8, 9, 2, 5, 10, 11, 6], 1),
+            ],
+            12,
+        );
+        let (indices, _mat, flags) = topo.build_volumetric_faces();
+        // 6 faces/hex × 2 hexes = 12, dedup the shared face → 11
+        // faces. 10 quad boundary + 1 quad interior; each quad = 2
+        // tris. Total tris = 22; boundary = 20; interior = 2.
+        assert_eq!(indices.len() / 3, 22, "11 quad faces × 2 tris");
+        let interior: usize = flags.iter().filter(|f| **f & 1 == 1).count();
+        let boundary: usize = flags.iter().filter(|f| **f & 1 == 0).count();
+        assert_eq!(interior, 2, "shared face → one quad → two interior tris");
+        assert_eq!(boundary, 20, "10 outward quads × 2 tris");
+    }
+
+    #[test]
+    fn two_hex_cube_element_edges_doubled_on_shared_corners() {
+        // Same fixture: two unit hexes. Per-element edge dedup only
+        // (Decision 73): two hexes contribute 12 edges each → 24
+        // line-list pairs.
+        let topo = topo_from_class(
+            "brick",
+            Superclass::Hex,
+            8,
+            vec![
+                (vec![0, 1, 2, 3, 4, 5, 6, 7], 1),
+                (vec![1, 8, 9, 2, 5, 10, 11, 6], 1),
+            ],
+            12,
+        );
+        let edges = topo.build_element_edges();
+        assert_eq!(edges.len(), 2 * 12 * 2);
     }
 }

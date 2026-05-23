@@ -23,6 +23,19 @@ pub struct Mesh {
     /// `None` for a bare `MVG1` hull. Drives the colormap +
     /// legend (`phase-5-m3.md` Decision 47).
     pub scalars: Option<Vec<f32>>,
+    /// Server-supplied per-element edge buffer (`MVG3`, line-list
+    /// pairs into [`Mesh::positions`]; `phase-4-m7.md` Decision 73).
+    /// `None` for `MVG1`/`MVG2` — the renderer falls back to
+    /// [`Mesh::edge_indices`] (extraction from triangles, which over-
+    /// emits hex face diagonals; VB-005). When present, the wireframe
+    /// pass should prefer this buffer (Phase 5 M7 Decision 82).
+    pub element_edges: Option<Vec<u32>>,
+    /// Optional per-triangle `MVG3` flag column (`tri_flags`); bit 0 =
+    /// interior face. Parallel to `indices.len() / 3`. `None` for
+    /// `MVG1`/`MVG2`. Lets a translucent renderer distinguish
+    /// boundary from cell-cell shared faces (`phase-4-m7.md`
+    /// Decision 74).
+    pub tri_flags: Option<Vec<u32>>,
 }
 
 /// A client-side pick hit against the cached hull. The frozen proto's
@@ -69,28 +82,38 @@ fn le_f32(b: &[u8], off: usize) -> f32 {
     f32::from_le_bytes(b[off..off + 4].try_into().unwrap())
 }
 
-/// Decode an `MVG1`/`MVG2` blob (`phase-4-m2.md` Decision 11). The
-/// optional `MVG2` trailing per-vertex scalar is kept in
-/// [`Mesh::scalars`] (`phase-5-m3.md` Decision 47).
+/// Decode an `MVG1`/`MVG2`/`MVG3` blob. The optional `MVG2` trailing
+/// per-vertex scalar is kept in [`Mesh::scalars`] (`phase-5-m3.md`
+/// Decision 47). The `MVG3` (`phase-4-m7.md` Decisions 72–74) adds an
+/// optional per-element edge buffer ([`Mesh::element_edges`]) and a
+/// per-triangle flag column ([`Mesh::tri_flags`]).
 ///
 /// # Errors
 /// Returns [`DecodeError`] if the magic is unknown or the buffer is
 /// truncated relative to its self-described counts.
 pub fn decode_mvg(blob: &[u8]) -> Result<Mesh, DecodeError> {
+    if blob.len() < 4 {
+        return Err(DecodeError("blob shorter than the magic".into()));
+    }
+    let magic = &blob[0..4];
+    if matches!(magic, b"MVG1" | b"MVG2") {
+        return decode_mvg_legacy(blob);
+    }
+    if magic == b"MVG3" {
+        return decode_mvg3(blob);
+    }
+    Err(DecodeError(format!(
+        "unknown magic {:?} (expected MVG1/MVG2/MVG3)",
+        String::from_utf8_lossy(magic)
+    )))
+}
+
+fn decode_mvg_legacy(blob: &[u8]) -> Result<Mesh, DecodeError> {
     if blob.len() < 24 {
         return Err(DecodeError("blob shorter than the 24-byte header".into()));
     }
     let magic = &blob[0..4];
-    let with_scalar = match magic {
-        b"MVG1" => false,
-        b"MVG2" => true,
-        _ => {
-            return Err(DecodeError(format!(
-                "unknown magic {:?} (expected MVG1/MVG2)",
-                String::from_utf8_lossy(magic)
-            )))
-        }
-    };
+    let with_scalar = matches!(magic, b"MVG2");
     let dims = le_u32(blob, 4);
     if dims != 3 {
         return Err(DecodeError(format!("expected dims=3, got {dims}")));
@@ -129,8 +152,6 @@ pub fn decode_mvg(blob: &[u8]) -> Result<Mesh, DecodeError> {
     for i in 0..n_idx {
         indices.push(le_u32(blob, idx_off + i * 4));
     }
-    // trimat is the per-triangle material — not consumed by the M3
-    // renderer (material visibility is server-side, M4).
     let scalars = if with_scalar {
         let scalar_off = idx_off + idx_bytes + trimat_bytes;
         let mut s = Vec::with_capacity(n_verts);
@@ -148,6 +169,121 @@ pub fn decode_mvg(blob: &[u8]) -> Result<Mesh, DecodeError> {
         normals,
         indices,
         scalars,
+        element_edges: None,
+        tri_flags: None,
+    })
+}
+
+/// `MVG3` header layout (`phase-4-m7.md` § "Blob layout"):
+///
+/// ```text
+/// magic(4) dims(4) n_verts(8) n_idx(8) n_edges(8) flags_mask(4)
+/// verts indices tri_material [tri_flags] [edges] [scalar]
+/// ```
+fn decode_mvg3(blob: &[u8]) -> Result<Mesh, DecodeError> {
+    const HEADER: usize = 36;
+    if blob.len() < HEADER {
+        return Err(DecodeError(format!(
+            "MVG3 blob shorter than the {HEADER}-byte header"
+        )));
+    }
+    let dims = le_u32(blob, 4);
+    if dims != 3 {
+        return Err(DecodeError(format!("MVG3 expected dims=3, got {dims}")));
+    }
+    let n_verts = le_u64(blob, 8) as usize;
+    let n_idx = le_u64(blob, 16) as usize;
+    let n_edges = le_u64(blob, 24) as usize;
+    let flags_mask = le_u32(blob, 32);
+    if !n_idx.is_multiple_of(3) {
+        return Err(DecodeError(format!(
+            "MVG3 index count {n_idx} is not a triangle list"
+        )));
+    }
+    if !n_edges.is_multiple_of(2) {
+        return Err(DecodeError(format!(
+            "MVG3 edge count {n_edges} is not a line list"
+        )));
+    }
+    let has_scalar = flags_mask & 1 != 0;
+    let has_tri_flags = flags_mask & 2 != 0;
+    let has_edges = flags_mask & 4 != 0;
+
+    let n_tri = n_idx / 3;
+    let verts_bytes = n_verts * 3 * 4;
+    let idx_bytes = n_idx * 4;
+    let trimat_bytes = n_tri * 4;
+    let triflag_bytes = if has_tri_flags { n_tri * 4 } else { 0 };
+    let edges_bytes = if has_edges { n_edges * 4 } else { 0 };
+    let scalar_bytes = if has_scalar { n_verts * 4 } else { 0 };
+    let need = HEADER
+        + verts_bytes
+        + idx_bytes
+        + trimat_bytes
+        + triflag_bytes
+        + edges_bytes
+        + scalar_bytes;
+    if blob.len() < need {
+        return Err(DecodeError(format!(
+            "MVG3 blob is {} bytes, layout needs {need}",
+            blob.len()
+        )));
+    }
+
+    let mut positions = Vec::with_capacity(n_verts);
+    for v in 0..n_verts {
+        let off = HEADER + v * 12;
+        positions.push([
+            le_f32(blob, off),
+            le_f32(blob, off + 4),
+            le_f32(blob, off + 8),
+        ]);
+    }
+    let idx_off = HEADER + verts_bytes;
+    let mut indices = Vec::with_capacity(n_idx);
+    for i in 0..n_idx {
+        indices.push(le_u32(blob, idx_off + i * 4));
+    }
+    // tri_material is filtered server-side already (M4); skipped here.
+    let mut off = idx_off + idx_bytes + trimat_bytes;
+    let tri_flags = if has_tri_flags {
+        let mut tf = Vec::with_capacity(n_tri);
+        for t in 0..n_tri {
+            tf.push(le_u32(blob, off + t * 4));
+        }
+        off += triflag_bytes;
+        Some(tf)
+    } else {
+        None
+    };
+    let element_edges = if has_edges {
+        let mut e = Vec::with_capacity(n_edges);
+        for i in 0..n_edges {
+            e.push(le_u32(blob, off + i * 4));
+        }
+        off += edges_bytes;
+        Some(e)
+    } else {
+        None
+    };
+    let scalars = if has_scalar {
+        let mut s = Vec::with_capacity(n_verts);
+        for v in 0..n_verts {
+            s.push(le_f32(blob, off + v * 4));
+        }
+        Some(s)
+    } else {
+        None
+    };
+
+    let normals = compute_normals(&positions, &indices);
+    Ok(Mesh {
+        positions,
+        normals,
+        indices,
+        scalars,
+        element_edges,
+        tri_flags,
     })
 }
 
@@ -183,6 +319,8 @@ impl Mesh {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             indices: vec![0, 1, 2],
             scalars: None,
+            element_edges: None,
+            tri_flags: None,
         }
     }
 

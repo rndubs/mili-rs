@@ -294,42 +294,65 @@ expanded by `scripting.md` / `client.md`. None started.
       `crates/mili-viz-server/tests/m6_transport.rs`
       `remote_transport_grpc_and_flight_over_tcp`; M1's six + M2 +
       M3 + M4 + M5 + M5b tests unchanged and green.
-- [ ] **M7 — volumetric geometry contract (`MVG3`).** 🟡 **Planned.**
+- [x] **M7 — volumetric geometry contract (`MVG3`).** ✅ **Landed.**
       `MVG3` is a strict superset of `MVG2` ridden through the
       free-form `GeometryRef.layout` tag (zero `.proto` change),
       adds a per-superclass element-edge buffer (fixes the
-      hex-face-diagonal wireframe artifact, VB-005), a `tri_flags`
-      column (bit 0 = interior), and an opt-in interior-triangle
-      emit toggled via a reserved `MaterialVisibility{ material:
-      u32::MAX }` sentinel. **Supersedes
-      [`phase-4-m2.md`](phase-4-m2.md) Decision 11 additively** —
-      `MVG1`/`MVG2` decoders stay live, the M2/M3/M4 + Phase 5
-      composite gates stay byte-stable. Scope/decisions:
-      [`phase-4-m7.md`](phase-4-m7.md) (72–74). Gating test
-      `crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`.
-- [ ] **M8 — cut-plane operator.** 🟡 **Planned.** Wires the
-      frozen `Cmd::Cutplane` arm (`crates/mili-viz-server/src/lib.rs:528`
-      stub since [`phase-4-m1.md`](phase-4-m1.md) Δ1). Closed
-      clipped hull (kept-side outward boundary ∪ tessellated cap),
-      per-superclass marching tables (Hex/Tet/Wedge/Pyramid),
-      `rayon` parallel-per-element, session-state that composes
-      with `show`/state-step/material toggles, cap triangles
-      tagged with a reserved sentinel (`tri_material == u32::MAX -
-      1`). No `.proto` change. Scope/decisions:
+      hex-face-diagonal wireframe artifact, VB-005 — Decision 73's
+      Hex/Tet/Quad/Tri/Wedge/Pyramid tables), a `tri_flags` column
+      (bit 0 = interior), and an opt-in interior-triangle emit
+      toggled via a reserved `MaterialVisibility{ material:
+      u32::MAX }` sentinel (Decision 74). Encoder activates `MVG3`
+      only when `materials[u32::MAX] == true`; otherwise the
+      M2/M3/M4 path stays byte-identical (VB-001 — verified by the
+      gating test's "revert restores byte-identical blob" leg).
+      Client `Mesh` gains `element_edges`/`tri_flags`. Scope/
+      decisions: [`phase-4-m7.md`](phase-4-m7.md) (72–74). Gating
+      test
+      `crates/mili-viz-server/tests/m7_mvg3.rs::volumetric_geometry_contract`
+      (skip-on-absent end-to-end) + five in-module unit tests on
+      the volumetric build helpers (always-on: 12-edge Hex,
+      multi-superclass table counts, two-hex interior dedup).
+- [x] **M8 — cut-plane operator.** ✅ **Landed.** Wires the
+      previously stubbed `Cmd::Cutplane` arm: a new
+      `crates/mili-viz-server/src/clip.rs` module runs a
+      per-element Sutherland–Hodgman clip in a `rayon` parallel
+      pass against the cached `MeshTopology`, emits a closed
+      clipped hull (kept-side faces ∪ fan-triangulated cap),
+      and packs the result through the existing `MVG3` carrier
+      (`MeshTopology::pack_mvg3_buffers`). Cap triangles ride
+      `tri_material == u32::MAX - 1` (Decision 75 sentinel).
+      Session-level state (`Session.cut`) composes with
+      `show`/state-step/material toggles (Decision 77); a cut
+      with an all-zero normal clears it and restores the
+      byte-identical M2/M3 path (verified by the gating test).
+      No `.proto` change. Scope/decisions:
       [`phase-4-m8.md`](phase-4-m8.md) (75–77). Gating test
       `crates/mili-viz-server/tests/m8_cutplane.rs::cutplane_operator`
-      (skip-on-absent against `bar71.pltA`).
-- [ ] **M9 — slice operator.** 🟡 **Planned.** Cap-only sister to
-      M8. Adds the **second** post-M1 proto change: an additive
-      `optional bool slice_only = 8;` on `CutPlane` (proto3
-      default `false` → byte-compatible with M8-only deploys; the
-      `Hello`-handshake major bump covers the version step).
-      Server reuses the M8 marching-tables; scalar interpolation
-      is linear along straddled element-edges; cap triangles
-      tagged `tri_material == u32::MAX - 2`. Composes with cut
+      (skip-on-absent against `basic1.pltA` — `bar71.pltA` is not
+      in the fixture tree; `basic1` carries 238 hex bricks
+      driving the same code paths) + three always-on unit tests
+      on `clip_element` (straddle/all-keep/all-drop cases on a
+      unit hex).
+- [x] **M9 — slice operator.** ✅ **Landed.** Cap-only sister to
+      M8. Adds the **second** post-M1 proto change (the additive
+      `optional bool slice_only = 8;` on `CutPlane`, Decision 78);
+      proto3 default `false` keeps an M8-only client byte-compatible.
+      Server reuses the M8 per-element clip module with a `ClipMode`
+      arm — `Slice` skips the kept-side polygons + element-edges,
+      keeps the cap (tagged `tri_material == u32::MAX - 2`,
+      Decision 80). Scalar interpolation is linear along the
+      straddled element-edges (Decision 79); cap centroids are the
+      mean of their polygon's resolved scalars. Cut + slice
+      compose into one `MVG3` blob via a new `append_clip` helper
       (independent session-state fields). Scope/decisions:
       [`phase-4-m9.md`](phase-4-m9.md) (78–80). Gating test
-      `crates/mili-viz-server/tests/m9_slice.rs::slice_operator`.
+      `crates/mili-viz-server/tests/m9_slice.rs::slice_operator`
+      (skip-on-absent against `basic1.pltA`) + three additional
+      always-on `clip` unit tests (Slice mode drops kept hull on
+      straddle, returns None on all-keep, scalar lerps to 5 at
+      0.5 along a 0→10 edge). **`mili_viz.proto` is again frozen
+      from here forward unless a comparable bar is met.**
 
 ## Phase 5 — `mili-viz` client (IN PROGRESS — M1–M4 + MVP polish ✅ landed)
 

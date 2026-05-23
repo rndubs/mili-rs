@@ -221,6 +221,10 @@ message CutPlane {
   double ox = 1; double oy = 2; double oz = 3; // origin
   double nx = 4; double ny = 5; double nz = 6; // normal
   bool relative = 7;           // cutrpln vs cutpln
+  // phase-4-m9.md Decision 78: when true, emit only the
+  // plane-mesh intersection ("slice"), no kept-side boundary.
+  // Proto3 default false → byte-compatible with M8-only clients.
+  optional bool slice_only = 8;
 }
 
 message Colormap { string name = 1; }          // "cool", "jet", ...

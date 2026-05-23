@@ -22,9 +22,8 @@ Conventions:
 
 ## VB-005 — `Edges`/`Wireframe` mode draws hex face diagonals as if they were element edges
 
-- **Status:** known-gap (fix planned in
-  [`phase-4-m7.md`](phase-4-m7.md) Decision 73 +
-  [`phase-5-m7.md`](phase-5-m7.md) Decision 82)
+- **Status:** server-fixed (`MVG3` element-edge buffer landed;
+  client wiring is [`phase-5-m7.md`](phase-5-m7.md) Decision 82)
 - **Reported:** 2026-05-23 (maintainer feedback, `bar71.pltA` —
   Hex corpus — under the release binary's `Edges` mode looked
   "like tet elements")
@@ -59,7 +58,11 @@ Conventions:
   hex-emits-exactly-12-edges assertion) and the `phase-5-m7.md`
   gating test (`crates/mili-viz-client/tests/m7_render_modes.rs`,
   decoder + prefer-element-edges branch).
-- **Commit:** `—` (in flight against the planned milestones)
+- **Commit:** server side landed on `claude/friendly-edison-WZnrq`
+  (phase-4-m7; in-module unit tests pin the per-superclass edge
+  tables — Hex = 12 unique edges, no face diagonals). Client wiring
+  to prefer `Mesh::element_edges` over the extractor is
+  [`phase-5-m7.md`](phase-5-m7.md).
 
 ---
 

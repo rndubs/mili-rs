@@ -33,6 +33,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
+mod clip;
 mod flight;
 mod geometry;
 mod raw;
@@ -96,6 +97,15 @@ struct Session {
     // the M1 stub `LoadedState`, leaving these `None`).
     db: Option<Database>,
     topo: Option<MeshTopology>,
+    // M8 cut-plane operator (phase-4-m8.md Decision 77): a session-
+    // level plane that composes with every subsequent `show` / step /
+    // material toggle. Cleared by a `cutpln` with a zero-length
+    // normal (the doc's "clear" sentinel).
+    cut: Option<clip::Plane>,
+    // M9 slice operator (phase-4-m9.md Decision 80): a *second*
+    // session-level plane, independent of `cut`. Both compose into
+    // one MVG3 blob.
+    slice: Option<clip::Plane>,
     // In-process geometry store keyed by the frozen
     // `GeometryRef.flight_ticket` (phase-4-m2.md Decision 10). M6
     // swaps this for an Arrow-Flight `DoGet` over TCP.
@@ -137,22 +147,62 @@ impl Session {
         let topo = self.topo.as_ref()?;
         let db = self.db.as_ref()?;
         let scalar = topo.vertex_scalar(db, svar, self.state);
+        let (min, max) = scalar.as_ref().map_or((0.0, 0.0), |(_, lo, hi)| (*lo, *hi));
         let materials = &self.materials;
-        let ((blob, num_indices), layout, min, max) = match &scalar {
-            Some((s, lo, hi)) => (
-                topo.encode(db, self.state, Some(s), materials),
-                geometry::LAYOUT_SCALAR,
-                *lo,
-                *hi,
-            ),
-            None => (
-                topo.encode(db, self.state, None, materials),
-                geometry::LAYOUT,
-                0.0,
-                0.0,
-            ),
+        let (blob, layout, num_indices, num_vertices) = if self.cut.is_some()
+            || self.slice.is_some()
+        {
+            // M8/M9: cut/slice operators (phase-4-m8.md, phase-4-m9.md).
+            // Per-vertex scalar at existing nodes feeds linear edge
+            // blends along the straddled edges (Decision 79).
+            let coords = topo.coords_at(db, self.state);
+            let base_n_verts = coords.len() / 3;
+            let scalar_in: Option<Vec<f32>> = scalar.as_ref().map(|(s, _, _)| s.clone());
+            let scalar_ref: Option<&[f32]> = scalar_in.as_deref();
+
+            // Always start from a Cut pass (kept hull + cut cap) when
+            // a cut is active; otherwise an empty hull from a Slice
+            // pass.
+            let cb = if let Some(plane) = &self.cut {
+                clip::clip_topology(topo, &coords, scalar_ref, plane, clip::ClipMode::Cut)
+            } else {
+                // No cut plane → start from an empty buffer with the
+                // base coords/scalar.
+                clip::ClipBuffers {
+                    verts: coords.clone(),
+                    indices: Vec::new(),
+                    tri_material: Vec::new(),
+                    tri_flags: Vec::new(),
+                    edges: Vec::new(),
+                    scalar: scalar_in.clone(),
+                }
+            };
+            let cb = if let Some(plane) = &self.slice {
+                let slice_buf =
+                    clip::clip_topology(topo, &coords, scalar_ref, plane, clip::ClipMode::Slice);
+                clip::append_clip(cb, slice_buf, base_n_verts)
+            } else {
+                cb
+            };
+
+            let nv = (cb.verts.len() / 3) as u64;
+            let n_idx = cb.indices.len() as u64;
+            let buf = geometry::MeshTopology::pack_mvg3_buffers(
+                &cb.verts,
+                &cb.indices,
+                &cb.tri_material,
+                &cb.tri_flags,
+                &cb.edges,
+                cb.scalar.as_deref(),
+            );
+            (buf, geometry::LAYOUT_VOL, n_idx, nv)
+        } else {
+            let (blob, layout, num_indices) = match &scalar {
+                Some((s, _, _)) => topo.encode(db, self.state, Some(s), materials),
+                None => topo.encode(db, self.state, None, materials),
+            };
+            (blob, layout, num_indices, topo.num_vertices())
         };
-        let num_vertices = topo.num_vertices();
         self.geom_seq += 1;
         let ticket = format!("geom:{}", self.geom_seq).into_bytes();
         self.geom.insert(ticket.clone(), blob);
@@ -525,10 +575,47 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
             s.result = Some(r.clone());
             (D::DeltaResult, P::Result(r))
         }
-        Cmd::Colormap(_) | Cmd::Legend(_) | Cmd::Cutplane(_) | Cmd::Render(_) => {
-            // Recolor / rescale / cut / offscreen-render of the
-            // *current* result. The visual effect is M3+/M6; M1
-            // re-broadcasts the (geometry-stubbed) result state.
+        Cmd::Cutplane(cp) => {
+            // M8/M9 cut-plane + slice operators (phase-4-m8.md,
+            // phase-4-m9.md). `slice_only=true` lands the plane in
+            // `Session.slice`; `slice_only=false` lands it in
+            // `Session.cut`. The two compose (Decision 80). A
+            // zero-length normal clears whichever bucket the call
+            // addresses.
+            let slice_only = cp.slice_only.unwrap_or(false);
+            let new_plane = clip::Plane::from_proto(&cp);
+            if slice_only {
+                s.slice = new_plane;
+            } else {
+                s.cut = new_plane;
+            }
+            // Preserve the existing result (result/component/min/max
+            // stay byte-stable across cut on/off — phase-4-m8.md
+            // Decision 75); only the geometry blob changes.
+            let prior = s.result.clone().unwrap_or_default();
+            let svar = if prior.component.is_empty() {
+                prior.result.clone()
+            } else {
+                prior.component.clone()
+            };
+            let (geometry, min, max) = match s.geometry_ref(&svar) {
+                Some((g, lo, hi)) => (Some(g), lo, hi),
+                None => (None, prior.min, prior.max),
+            };
+            let r = pb::ResultState {
+                result: prior.result,
+                component: prior.component,
+                min,
+                max,
+                geometry,
+            };
+            s.result = Some(r.clone());
+            (D::DeltaResult, P::Result(r))
+        }
+        Cmd::Colormap(_) | Cmd::Legend(_) | Cmd::Render(_) => {
+            // Recolor / rescale / offscreen-render of the *current*
+            // result. The visual effect is M3+/M6; M1 re-broadcasts
+            // the (geometry-stubbed) result state.
             let r = s.result.clone().unwrap_or_default();
             (D::DeltaResult, P::Result(r))
         }
