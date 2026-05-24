@@ -50,8 +50,8 @@ from .providers.replay import ReplayLlmProvider
 from .providers.base import ProviderOutput
 from .scenarios import Scenario, load_scenarios
 
-# The four-element closed set the operator sees.
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "functiongemma", "anthropic")
+# The five-element closed set the operator sees.
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "functiongemma", "anthropic", "llamacpp")
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +175,15 @@ def build_factories(
         provider = AnthropicProvider(model=chosen_model)
         provider_factory = lambda _s: provider  # noqa: E731
         model_id = chosen_model
+    elif provider_name == "llamacpp":
+        from .providers.llamacpp import (  # lazy
+            DEFAULT_MODEL_ID as LLAMACPP_DEFAULT_ID,
+            LlamaCppProvider,
+        )
+        # One provider per run — the server stays alive across scenarios.
+        provider = LlamaCppProvider()
+        provider_factory = lambda _s: provider  # noqa: E731
+        model_id = LLAMACPP_DEFAULT_ID
     else:
         # Unreachable — guarded by the SUPPORTED_PROVIDERS check above.
         raise ValueError(f"unsupported provider {provider_name!r}")

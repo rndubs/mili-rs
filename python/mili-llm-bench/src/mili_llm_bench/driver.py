@@ -418,8 +418,12 @@ def run_eval(
     }
 
     results: list[ScenarioRunResult] = []
+    from tqdm import tqdm
+    import sys
+
     with rollouts_path.open("w") as rollouts_file:
-        for scenario in scenarios:
+        pbar = tqdm(scenarios, desc="Running scenarios", unit="scenario")
+        for scenario in pbar:
             provider = provider_factory(scenario)
             sr = run_one_scenario(
                 provider=provider,
@@ -439,6 +443,14 @@ def run_eval(
                 config=config,
                 provider_meta=dict(provider_meta_template),
             )
+            rollouts_file.flush()  # Ensure output is written immediately
+
+            # Update progress with scenario result
+            l3_count = sum(1 for r in results if r.verifier_result.max_tier == 3)
+            pbar.set_postfix({
+                "last": f"{scenario.id}:{sr.verifier_result.failure_mode}",
+                "L3": f"{l3_count}/{len(results)}"
+            })
 
     summary = write_summary(summary_path, results, config)
     return summary

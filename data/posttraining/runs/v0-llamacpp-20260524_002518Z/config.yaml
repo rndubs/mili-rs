@@ -1,0 +1,12 @@
+bench_version: 0.0.0
+max_new_tokens: 512
+model_id: ggml-org/functiongemma-270m-it-GGUF:BF16
+per_turn_timeout_s: 120.0
+provider: llamacpp
+run_timestamp: 1779582319.150285
+scenarios_sha256: 216a54d0cd36a47c1785527bd1ba7e8b07617d5933efb7ba06dd9d3b2260eb45
+seed: 0
+step_cap: 8
+system_prompt_sha256: 1697d2f0444adbf5d145522a6634824ea6fa7c59719ede167c54f91d4cce24e9
+temperature: 0.0
+tools_sha256: 88dd8781585974f05560f4e89030125b9d3756d41d31adfc010a833b7e4e39df

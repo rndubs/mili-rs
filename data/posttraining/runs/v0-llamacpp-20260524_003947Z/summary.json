@@ -1,0 +1,38 @@
+{
+  "total": 50,
+  "by_max_tier": {
+    "0": 32,
+    "1": 0,
+    "2": 18,
+    "3": 0
+  },
+  "by_failure_mode": {
+    "parse_error": 32,
+    "unknown_tool": 0,
+    "schema_mismatch": 0,
+    "dispatch_error": 0,
+    "nonexistent_material": 0,
+    "nonexistent_class": 0,
+    "nonexistent_result": 0,
+    "state_out_of_range": 0,
+    "wrong_final_state": 0,
+    "wrong_selection": 0,
+    "wrong_result": 0,
+    "wrong_range": 0,
+    "wrong_materials": 0,
+    "step_cap_hit": 18,
+    "token_cap_hit": 0,
+    "timeout": 0
+  },
+  "l3_pass_rate": 0.0,
+  "mean_turns_to_completion": 3.52,
+  "total_wall_ms": 4980388,
+  "config": {
+    "step_cap": 8,
+    "max_new_tokens": 512,
+    "temperature": 0.0,
+    "seed": 0,
+    "per_turn_timeout_s": 120.0,
+    "system_prompt_sha256": "1697d2f0444adbf5"
+  }
+}

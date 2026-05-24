@@ -25,6 +25,7 @@ dependencies = [
   "jsonschema>=4.20",
   "protobuf>=4.25",
   "pyyaml>=6.0",
+  "tqdm>=4.66",
 ]
 
 [project.optional-dependencies]
@@ -52,6 +53,13 @@ functiongemma = [
 anthropic = [
   "anthropic>=0.40",
 ]
+# Optional — needed only by `mili_llm_bench.providers.llamacpp`. The
+# runtime requirement is that `llama-server` is on $PATH (from
+# https://github.com/ggml-org/llama.cpp). The Python extra is empty
+# (no package deps), but requests is needed for HTTP calls.
+llamacpp = [
+  "requests>=2.31",
+]
 
 [project.scripts]
 mili-llm-bench = "mili_llm_bench.cli:main"
@@ -62,3 +70,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.uv.sources]
+pygriz = { workspace = true }
