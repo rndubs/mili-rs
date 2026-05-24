@@ -38,10 +38,12 @@ mod clip;
 mod flight;
 mod geometry;
 mod raw;
+mod llamacpp_agent;
 pub use agent::{
     encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, MockAgent, TurnSnapshot,
     AGENT_MOCK_ORIGIN,
 };
+pub use llamacpp_agent::LlamaCppAgent;
 pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
 pub use raw::{parse_line, parse_raw, to_raw};

@@ -22,6 +22,9 @@ rayon = "1.10"
 # without standing up a server-side wgpu offscreen renderer (deferred).
 # default-features=false keeps the dep slim (PNG + JPEG codecs only).
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# LlamaCppAgent integration (Phase 6+ — FunctionGemma on localhost:8080)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
 
 [dev-dependencies]
 mili-viz-proto = { path = "../mili-viz-proto" }
