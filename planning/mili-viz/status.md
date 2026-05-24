@@ -931,7 +931,7 @@ Each row flips to ✅ when its gating test lands.
       no-pygriz laptop. **The v0 acceptance gate is closed; the L4
       decision tree (baseline.md §"After v0") becomes the next
       trackable surface.**
-- [x] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** ✅ **V0 BASELINE COMPLETE.**
+- [x] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** 🔧 **INTEGRATION ISSUES IDENTIFIED & FIXED.**
       Implements `LlamaCppProvider` (approach a2: raw-completion + manual parsing)
       backing `llama-server` (llama.cpp); pins BF16 full-precision quantization;
       lazy-health-check + per-provider instance (keeps server alive across scenarios);
@@ -939,24 +939,27 @@ Each row flips to ✅ when its gating test lands.
       lazy imports, factory builder, provider response normalization, CLI --help. Full
       infrastructure documented in `planning/mili-viz/baseline-setup-guide.md`.
       
-      **v0 baseline root cause identified and fixed:** The `_format_tool_declaration()` 
-      method was constructing tool definitions with a complex nested format that didn't 
-      match FunctionGemma's expectations. Fixed to generate the correct parameter format
-      per model card. Also fixed `pyproject.toml` and converted `python/` to uv workspace
-      for proper pygriz dependency resolution.
+      **Initial v0 baseline (pre-fix) showed 0% L3 rate with zero tool calls** — appeared
+      to be model capability issue. Deep research identified **integration failures**, not 
+      model limitations (deep-research-report-3.md):
       
-      **v0 baseline results (50 scenarios, d3samp6/cylinder, all intents):**
-      - **L3 pass rate: 0% (0/50)**
-      - **Parse errors: 0% ✅** — format fix validated
-      - **Tool calls generated: ZERO** — `tool_calls_flat: []` in all 50 scenarios
-      - **Failure mode:** All 50 scenarios hit `step_cap_hit` (8-turn limit)
-      - **Raw fallback usage:** 0% — model not using `griz_raw` either
+      1. **No stop sequences** — model continuing past tool-call handoff into response phase
+      2. **Wrong trigger phrase** — not activating FunctionGemma's tool-calling logic
+      3. **No multi-turn support** — prompt builder dropped tool response history, breaking 
+         the official cycle (tool call → tool response → final answer)
+      4. **Overly strict parser** — failed on partial/alternate format tool calls
       
-      **Interpretation:** Infrastructure is working correctly (no parse errors, dispatcher 
-      runs and responds). Issue is **model capability**: FunctionGemma-270M-it does not 
-      generate tool calls when provided with typed tool declarations, even though format 
-      is correct. Per decision tree (baseline.md §"After v0"): L0≈0% + L3≈0% → post-training 
-      needed (SFT/DPO/GRPO) to teach the model to call tools. Memory: [[functiongemma-v0-baseline]].
+      **Fixes deployed** (commit ad1cfb9):
+      - Added explicit stop sequences: `<start_function_response>` and `<end_of_turn>`
+      - Corrected developer trigger to: "You are a model that can do function calling with 
+        the following functions"
+      - Implemented full conversation serialization including assistant tool_calls and tool 
+        response messages
+      - Upgraded parser to be tolerant: accepts both fully closed and bare format, 
+        escape-aware argument parsing
+      
+      **Expected outcome:** Model should now generate tool calls naturally. Ready for 
+      re-baseline. Memory: [[functiongemma-v0-baseline]].
 
 ### Post-v0 branches (v0 baseline complete, decision tree active)
 
