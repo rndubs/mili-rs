@@ -31,10 +31,20 @@ doesn't match any closed-set pattern.
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from ..scenarios import Scenario
+from ..scenarios import Scenario, default_bootstrap_path
+
+# Set MILI_DISPATCH_LOG=1 to print every dispatch call (name, arguments,
+# response) to stderr. Goes through `print` (not logging) so it shows up
+# without needing the caller to configure log levels — the root logger
+# defaults to WARNING and silently ate our INFO lines on the first try.
+_DISPATCH_LOG = os.environ.get("MILI_DISPATCH_LOG", "").lower() in ("1", "true", "yes")
 
 # ``pygriz`` is intentionally imported lazily — at adapter-construction
 # time, not at module-import time — so importing this module from
@@ -280,14 +290,26 @@ class PygrizDispatcher:
 
     def dispatch(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
-            return self._dispatch_inner(name, arguments)
+            response = self._dispatch_inner(name, arguments)
         except Exception as exc:
             msg = str(exc)
-            return {
+            response = {
                 "ok": False,
                 "error": msg,
                 "error_kind": _classify(msg),
             }
+        if _DISPATCH_LOG:
+            try:
+                args_json = json.dumps(arguments, default=str)
+                resp_json = json.dumps(response, default=str)
+            except Exception:
+                args_json, resp_json = repr(arguments), repr(response)
+            print(
+                f"[dispatch] {name} args={args_json} resp={resp_json}",
+                file=sys.stderr,
+                flush=True,
+            )
+        return response
 
     def _dispatch_inner(
         self, name: str, arguments: dict[str, Any]
@@ -295,7 +317,13 @@ class PygrizDispatcher:
         s = self.session
 
         if name == "load":
-            result = s.open(arguments["root"])
+            # Resolve the bare fixture name to the absolute .A path the
+            # mili-viz-server's ``Database::open`` actually opens.
+            # Without this, a model-emitted ``load(root="d3samp6")``
+            # would replace the factory-preloaded real fixture with the
+            # empty M1 stub (see ``_resolve_fixture``).
+            resolved = _resolve_fixture(arguments["root"])
+            result = s.open(resolved)
             return _proj_load(s, arguments, result)
 
         if name == "close":
@@ -427,6 +455,60 @@ class PygrizDispatcher:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Bench fixture resolver — bare names → absolute paths to the .A file.
+#
+# The scenarios in ``data/posttraining/eval/bootstrap.jsonl`` carry bare
+# fixture names (``"d3samp6"`` / ``"cylinder"``); mili-viz-server's
+# ``Database::open`` takes an absolute path to the .A file and silently
+# falls back to an empty M1 stub on lookup failure
+# (``crates/mili-viz-server/src/lib.rs:698``). The bench used to pass the
+# bare name straight through, so the entire eval ran against the stub —
+# ``num_states: 0`` in every response, ``step NEXT``/``LAST`` never
+# advanced, and L3 grades on multi-state postconditions were noise.
+#
+# This resolver maps known bench fixtures to their checked-in serial-form
+# .A files and raises if a name is unknown — loud failure beats silent
+# stub fallback.
+# ---------------------------------------------------------------------------
+
+# Repo-relative paths (relative to repo root, the parent of ``crates/``).
+# ``cylinder`` uses the xmilics single-file ``.plt_cA`` variant —
+# ``Database::open`` is serial-only (no ``DatabaseSet`` support in
+# mili-viz-server), so a parallel-only fixture is unusable here.
+_FIXTURE_PATHS: dict[str, tuple[str, ...]] = {
+    "d3samp6": ("reference", "mili-python", "tests", "data", "v3", "serial_t", "d3samp6.pltA"),
+    "cylinder": ("reference", "mili", "test", "xmilics", "cylinder", "cylinder.plt_cA"),
+}
+
+
+def _repo_root() -> Path:
+    # ``default_bootstrap_path()`` already walks upward to the repo root
+    # via the ``crates/mili-viz-proto`` sentinel; piggyback on it instead
+    # of duplicating the search. The returned bootstrap path is
+    # ``<repo>/data/posttraining/eval/bootstrap.jsonl`` → four ``parents``
+    # up.
+    return default_bootstrap_path().parents[3]
+
+
+def _resolve_fixture(name: str) -> str:
+    rel = _FIXTURE_PATHS.get(name)
+    if rel is None:
+        raise ValueError(
+            f"unknown bench fixture {name!r}; expected one of "
+            f"{sorted(_FIXTURE_PATHS)}. Add the name and its repo-relative "
+            f"path to _FIXTURE_PATHS in dispatchers/pygriz.py."
+        )
+    path = _repo_root().joinpath(*rel)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"bench fixture {name!r} resolved to {path} but the file is "
+            f"absent. Check the relevant submodule is checked out "
+            f"(see scripts/setup-parity.sh)."
+        )
+    return str(path)
+
+
 def pygriz_dispatcher_factory(
     session_factory: Callable[[], Any] | None = None,
 ) -> Callable[[Scenario], "PygrizDispatcher"]:
@@ -438,6 +520,12 @@ def pygriz_dispatcher_factory(
     opens the scenario's fixture, and hands a ``PygrizDispatcher``
     back. ``session_factory`` defaults to ``griz.launch()`` — pass an
     override for tests or to drive a remote server.
+
+    The scenario carries a bare fixture name; the factory resolves it
+    to an absolute .A path via ``_resolve_fixture`` before calling
+    ``session.open`` so mili-viz-server's ``Database::open`` actually
+    finds the corpus instead of silently falling back to the empty M1
+    stub.
 
     Teardown story (load-bearing — a 50-scenario eval leaks one session
     per scenario without explicit teardown and OOMs on a long run, per
@@ -455,9 +543,10 @@ def pygriz_dispatcher_factory(
         session_factory = _default_factory
 
     def factory(scenario: Scenario) -> "PygrizDispatcher":
+        resolved = _resolve_fixture(scenario.fixture)
         session = session_factory()  # type: ignore[misc]
         try:
-            session.open(scenario.fixture)
+            session.open(resolved)
         except Exception:
             try:
                 session.close()

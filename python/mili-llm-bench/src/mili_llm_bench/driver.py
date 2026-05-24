@@ -181,7 +181,8 @@ def run_one_scenario(
 
         turns: list[TurnResult] = []
         start = time.monotonic()
-        completed_with_final_text = False
+        terminated_cleanly = False
+        postcondition = scenario.postcondition.to_json()
 
         for step_index in range(config.step_cap):
             turn = harness.run_turn(
@@ -199,14 +200,21 @@ def run_one_scenario(
             turns.append(turn)
 
             if turn.kind == "final_text":
-                completed_with_final_text = True
+                terminated_cleanly = True
                 break
             if turn.kind == "error" and turn.error_kind == "timeout":
                 _append_stop(messages, "timeout")
                 break
-            # tool_calls turn — keep looping.
+            # tool_calls turn — keep looping unless the postcondition
+            # is already met. Weak open-weight models often emit
+            # repeat-the-call-N-times trajectories and never produce a
+            # final_text; this auto-terminate keeps the harness from
+            # converting a correct first call into a step_cap_hit.
+            if verifier.verify(messages, postcondition).max_tier == 3:
+                terminated_cleanly = True
+                break
 
-        if not completed_with_final_text and not any(
+        if not terminated_cleanly and not any(
             t.kind == "error" and t.error_kind == "timeout" for t in turns
         ):
             # Loop exhausted ``step_cap`` without ``final_text``.

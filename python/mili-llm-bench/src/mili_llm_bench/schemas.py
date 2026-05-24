@@ -53,27 +53,113 @@ TYPED_COMMAND_TOOLS: list[tuple[str, str, str]] = [
 # Commands intentionally NOT in v0:
 EXCLUDED_COMMANDS: set[str] = {"raw", "render"}
 
-# Short, model-facing descriptions. The proto comments are too verbose
-# for prompts; these are tight by design.
+# Short, model-facing descriptions. Each one bakes in a termination cue
+# because the dominant failure mode is the model issuing extra tool calls
+# after the request is already satisfied. Keep them tight — they ride
+# along with every turn's tool spec and Gemma-270M's context is small.
 TOOL_DESCRIPTIONS: dict[str, str] = {
-    "load": "Load a Mili database by root path (e.g. 'd3samp6').",
-    "close": "Close the currently loaded database.",
-    "set_state": "Jump to a specific 1-based state index.",
-    "step": "Step the state cursor: NEXT, PREV, FIRST, or LAST.",
-    "select": "Add elements/nodes of one class to the selection by range string.",
-    "clrsel": "Clear the selection for one class (empty class clears all).",
-    "show": "Color the mesh by a result (primal svar or derived family).",
-    "view": "Manipulate the camera (rotate / translate / scale / zoom / set / reset).",
-    "iso": "Toggle isosurfaces for a result with explicit levels or a count.",
-    "contour": "Draw scalar contour lines for a result with a given count.",
-    "material": "Enable or disable a material (whole-class when material is omitted).",
-    "cutplane": "Set or clear the cut-plane (origin + normal; relative or absolute).",
-    "colormap": "Pick a named colormap (e.g. 'cool', 'jet').",
-    "legend": "Set the legend's min/max range (omit a bound to autoscale that end).",
-    "named_view": "Save, restore, or list named camera views.",
-    "query": "Query result values for a class/labels/states subset.",
-    "snapshot": "Read the current session state (state, selection, result, camera).",
-    "griz_raw": "Escape hatch: run one raw griz/grizinit line (Layer-0).",
+    "load": (
+        "Load a Mili database by root path (e.g. 'd3samp6'). "
+        "Single-call action: when the response returns ok:true (with num_states), "
+        "the database is loaded — reply with one short confirmation and STOP. "
+        "Do not call load again to verify."
+    ),
+    "close": (
+        "Close the currently loaded database. Takes no arguments. "
+        "Single-call action: when the response returns ok:true, the database is closed — "
+        "reply with one short confirmation and STOP. "
+        "Only use when the user explicitly asks to close/unload/reset."
+    ),
+    "set_state": (
+        "Jump to a specific 1-based state index. "
+        "Single-call action: when the response returns ok:true with action_complete:true, "
+        "the state is set — reply with one short confirmation and STOP. "
+        "Do not call again with the same state."
+    ),
+    "step": (
+        "Step the state cursor: NEXT, PREV, FIRST, or LAST. "
+        "Single-call action: when the response returns ok:true, the step is done — "
+        "reply with one short confirmation and STOP."
+    ),
+    "select": (
+        "Add elements/nodes of one class to the selection by range string "
+        "(e.g. class_name=\"brick\", range=\"1-10\"). "
+        "When the response returns ok:true and no further selections were requested, "
+        "reply with one short confirmation and STOP."
+    ),
+    "clrsel": (
+        "Clear element selection. Pass class_name=\"<class>\" to clear one class, "
+        "or omit class_name (or pass empty string) to clear all. "
+        "Single-call action: when the response returns ok:true, the selection is cleared — "
+        "reply with one short confirmation and STOP."
+    ),
+    "show": (
+        "Color the mesh by a result (primal svar or derived family), e.g. result=\"vx\". "
+        "Single-call action: when the response returns ok:true, the result is displayed — "
+        "reply with one short confirmation and STOP. Do not follow up with extra view tweaks "
+        "unless the user explicitly asked for them."
+    ),
+    "view": (
+        "Manipulate the camera. Pass exactly ONE of: rotate, translate, scale, zoom, set, reset. "
+        "Example for reset: {\"reset\": true}. "
+        "Single-call action: when the response returns ok:true, the camera is updated — "
+        "reply with one short confirmation and STOP."
+    ),
+    "iso": (
+        "Toggle isosurfaces for a result with explicit levels or a count "
+        "(e.g. result=\"sx\", on=true, count=5). "
+        "Single-call action: when the response returns ok:true, the isosurfaces are set — "
+        "reply with one short confirmation and STOP."
+    ),
+    "contour": (
+        "Draw scalar contour lines for a result with a given count "
+        "(e.g. result=\"vx\", count=10). "
+        "Single-call action: when the response returns ok:true, the contours are drawn — "
+        "reply with one short confirmation and STOP."
+    ),
+    "material": (
+        "Enable or disable a material. Pass enable:bool with either material:<int> "
+        "or class_name:<str> (omit material to act on the whole class). "
+        "When the response returns ok:true and no further material changes were requested, "
+        "reply with one short confirmation and STOP."
+    ),
+    "cutplane": (
+        "Set or clear the cut-plane (origin ox/oy/oz + normal nx/ny/nz; relative or absolute). "
+        "Single-call action: when the response returns ok:true, the cut-plane is applied — "
+        "reply with one short confirmation and STOP."
+    ),
+    "colormap": (
+        "Pick a named colormap (e.g. name=\"jet\", \"cool\", \"hot\", \"gray\"). "
+        "Single-call action: when the response returns ok:true, the colormap is set — "
+        "reply with one short confirmation and STOP. Do not call again with a different name."
+    ),
+    "legend": (
+        "Set the legend's min/max range (omit a bound to autoscale that end). "
+        "Single-call action: when the response returns ok:true, the legend is updated — "
+        "reply with one short confirmation and STOP."
+    ),
+    "named_view": (
+        "Save, restore, or list named camera views. "
+        "Example: {\"op\": \"RESTORE\", \"name\": \"side\"}. "
+        "Single-call action: when the response returns ok:true, the view operation is done — "
+        "reply with one short confirmation and STOP."
+    ),
+    "query": (
+        "Read result values for a class/labels/states subset. "
+        "Single-call action: the response returns the values directly in `table` — "
+        "use them in your final reply to the user, then STOP. Do not call again to re-query."
+    ),
+    "snapshot": (
+        "Read the current session state (state, selection, result, camera). Takes no arguments. "
+        "Single-call action: the response is the current snapshot — use it in your final reply "
+        "to the user, then STOP. Do not call again to verify."
+    ),
+    "griz_raw": (
+        "Escape hatch: run one raw griz/grizinit line (Layer-0). "
+        "Use ONLY when no typed tool fits; prefer typed tools for everything else. "
+        "Single-call action: when the response returns ok:true, the command ran — "
+        "reply with one short confirmation and STOP."
+    ),
 }
 
 # Output schemas — the W1 projection table from baseline.md. The W4a

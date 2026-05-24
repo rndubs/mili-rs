@@ -11,10 +11,14 @@ use std::pin::Pin;
 use mili_viz_proto::v1 as pb;
 use serde_json::{json, Value};
 
-use crate::agent::{AgentBackend, AgentTurnCtx, ran_summary};
+use crate::agent::{AgentBackend, AgentTurnCtx, DispatchOutcome, ran_summary};
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:8080";
-const MAX_STEPS: usize = 8;
+/// Cap on multi-turn iterations within one user turn. Kept tight because
+/// FunctionGemma-270M tends to spam tool calls past the point the task is
+/// done; combined with repeat-detection (see `run_turn`) it bounds the
+/// blast radius if the model never returns final text.
+const MAX_STEPS: usize = 4;
 
 // Embed tools.json and system prompt at compile time
 const TOOLS_JSON: &str = include_str!("../../../data/posttraining/grammar/tools.json");
@@ -97,6 +101,13 @@ impl AgentBackend for LlamaCppAgent {
                 tool_name: None,
             }];
 
+            // Track a window of recent tool-call signatures so we can
+            // break the loop on ANY repeat (not just adjacent ones).
+            // Small models oscillate A-B-A-B against minimal synthesized
+            // responses; window-based cycle detection catches that.
+            let mut signature_window: Vec<String> = Vec::new();
+            const SIGNATURE_WINDOW_SIZE: usize = 4;
+
             // Multi-turn loop (up to MAX_STEPS)
             for step in 0..MAX_STEPS {
                 if ctx.cancelled() {
@@ -117,6 +128,19 @@ impl AgentBackend for LlamaCppAgent {
 
                 // Try to parse tool calls from response
                 if let Some(tool_calls) = parse_tool_calls(&response) {
+                    // Cycle-detection: break if this batch of calls
+                    // matches anything in the recent window. Has to run
+                    // before dispatch so we don't re-fire SetState/Step.
+                    let signature = call_signature(&tool_calls);
+                    if signature_window.contains(&signature) {
+                        ctx.emit_token("(stopped: detected repeated tool call pattern)");
+                        return;
+                    }
+                    signature_window.push(signature);
+                    if signature_window.len() > SIGNATURE_WINDOW_SIZE {
+                        signature_window.remove(0);
+                    }
+
                     ctx.emit_status(pb::AgentStatusKind::AgentRunning, "");
 
                     let mut assistant_msg = Message {
@@ -129,21 +153,47 @@ impl AgentBackend for LlamaCppAgent {
                     let mut tool_responses: Vec<Message> = vec![];
 
                     for (i, tc) in tool_calls.iter().enumerate() {
-                        let call_id = format!("{}-call-{}", ctx.turn_id, i);
+                        // Include `step` (loop iteration) in the call_id so
+                        // the UI's de-duplication on call_id doesn't drop
+                        // calls made across iterations of the loop.
+                        let call_id = format!("{}-step{}-call-{}", ctx.turn_id, step, i);
                         ctx.emit_tool_begin(&call_id, ran_summary(&tc.name), "");
 
-                        // Map tool call to griz command + synthesize tool response.
-                        // tool_ok=false for unmapped tools so the model knows to retry / give up
-                        // rather than thinking the call succeeded.
-                        let (cmd, result_json, tool_ok) = tool_to_cmd(&tc.name, &tc.arguments);
+                        // Map tool call to griz command. Unmapped tools
+                        // (view/iso/contour/etc.) return None here.
+                        let cmd = tool_to_cmd(&tc.name, &tc.arguments);
+                        let cmd_known = cmd.is_some();
 
-                        let seq = if let Some(c) = cmd {
-                            ctx.dispatch(c)
+                        let (seq, result_json) = if let Some(c) = cmd {
+                            // Real dispatch — inspect outcome to build the
+                            // tool response the model sees next turn.
+                            let outcome = ctx.dispatch(c);
+                            let response = outcome_to_response(&tc.name, &tc.arguments, &outcome);
+                            (outcome.seq, response)
                         } else {
-                            0
+                            // Unknown tool — model gets unknown_tool error
+                            // so it stops thinking the call succeeded.
+                            (
+                                0,
+                                json!({
+                                    "ok": false,
+                                    "error": format!("tool '{}' is not implemented in this agent", tc.name),
+                                    "error_kind": "unknown_tool"
+                                }),
+                            )
                         };
 
-                        let result_summary = if tool_ok { "ok" } else { "tool not implemented" };
+                        let tool_ok = result_json
+                            .get("ok")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let result_summary = if tool_ok {
+                            "ok"
+                        } else if cmd_known {
+                            "failed"
+                        } else {
+                            "tool not implemented"
+                        };
                         ctx.emit_tool_end(&call_id, tool_ok, result_summary, seq);
 
                         // Add to assistant message for history
@@ -579,12 +629,35 @@ fn format_tool_declaration(tool: &Tool) -> String {
 // Tool to command mapping
 // ──────────────────────────────────────────────────────────────────────
 
-/// Map a tool name + arguments to a griz `pb::command::Cmd` and synthesize
-/// the tool response the model will see next turn. The third element is
-/// `true` iff we actually mapped the tool to a command — when `false`, the
-/// model should treat the call as a failure rather than retrying.
-fn tool_to_cmd(name: &str, args: &Value) -> (Option<pb::command::Cmd>, Value, bool) {
-    let cmd = match name {
+/// Build a stable string from a batch of tool calls so the loop can spot
+/// when the model is fixated on the same tool. Uses TOOL NAMES ONLY
+/// (no args), because small models commonly oscillate between different
+/// arg combos for the same tool (`show {result: "x"}` then `show {result: ""}`)
+/// trying to "fix" what looks fine to them. Matching on names alone catches
+/// that pattern *before* the second dispatch lands.
+///
+/// Trade-off: legitimate "disable material 2 and material 3" requests
+/// will also trip the detector. Acceptable for a small-model demo
+/// milestone — the user can chain requests if they want multiple same-tool
+/// calls.
+fn call_signature(calls: &[ParsedToolCall]) -> String {
+    let mut buf = String::new();
+    for c in calls {
+        buf.push_str(&c.name);
+        buf.push(';');
+    }
+    buf
+}
+
+/// Map a tool name + arguments to a griz `pb::command::Cmd`. Returns
+/// `None` for tools we don't have a mapping for (view/iso/contour/etc.) —
+/// the caller surfaces those as `unknown_tool` errors to the model so it
+/// can give up instead of retrying.
+///
+/// Tool responses are built separately by `outcome_to_response` after
+/// dispatch, using the real structured payload `apply()` produced.
+fn tool_to_cmd(name: &str, args: &Value) -> Option<pb::command::Cmd> {
+    match name {
         "load" => Some(pb::command::Cmd::Load(pb::Load {
             root: args
                 .get("root")
@@ -689,46 +762,96 @@ fn tool_to_cmd(name: &str, args: &Value) -> (Option<pb::command::Cmd>, Value, bo
         )),
         // Unimplemented complex tools (view, iso, contour, legend, cutplane, query, snapshot)
         _ => None,
-    };
+    }
+}
 
-    let tool_ok = cmd.is_some();
-
-    let result = if !tool_ok {
-        // Unknown/unmapped tool: tell the model so it can recover
-        // (matches the Python harness's `unknown_tool` error_kind).
-        json!({
-            "ok": false,
-            "error": format!("tool '{name}' is not implemented in this agent"),
-            "error_kind": "unknown_tool"
-        })
-    } else {
-        match name {
-            "set_state" => {
-                let state = args
-                    .get("state")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(1) as u32;
+/// Build the tool response the model will see next turn, using the REAL
+/// structured payload from `apply()`. This is the load-bearing change
+/// over the previous synthesized responses: we can now tell the model
+/// `ok=false` when (e.g.) `show` got dispatched but didn't bind to a
+/// real result, instead of always saying `ok=true` and leaving the
+/// model to wonder why nothing changed.
+fn outcome_to_response(name: &str, args: &Value, outcome: &DispatchOutcome) -> Value {
+    use pb::state_delta::Payload;
+    match &outcome.payload {
+        Payload::Loaded(loaded) => {
+            // Empty db = open failed silently. Surface that.
+            let ok = !loaded.db.is_empty() || loaded.num_states > 0;
+            if ok {
                 json!({
                     "ok": true,
                     "action_complete": true,
-                    "state": state,
-                    "requested_state": state
+                    "num_states": loaded.num_states,
+                    "classes": loaded.class_names,
+                })
+            } else {
+                json!({
+                    "ok": false,
+                    "error": "load failed: no database opened",
+                    "error_kind": "dispatch_error"
                 })
             }
-            "load" => json!({
+        }
+        Payload::Result(r) => {
+            // `geometry: None` = the requested result svar didn't
+            // resolve. This is what catches `show prin_stress1` typos.
+            if r.geometry.is_some() {
+                json!({
+                    "ok": true,
+                    "action_complete": true,
+                    "result": r.result,
+                    "component": r.component,
+                    "range": [r.min, r.max],
+                })
+            } else {
+                let requested = args
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<unknown>");
+                json!({
+                    "ok": false,
+                    "error": format!("'{requested}' is not a recognized result on this database"),
+                    "error_kind": "nonexistent_result"
+                })
+            }
+        }
+        Payload::State(state) => {
+            // For set_state: compare actual vs requested so the model
+            // can detect out-of-range clamping.
+            let requested = args.get("state").and_then(|v| v.as_u64()).map(|v| v as u32);
+            match (name, requested) {
+                ("set_state", Some(req)) => json!({
+                    "ok": *state == req,
+                    "action_complete": *state == req,
+                    "state": state,
+                    "requested_state": req,
+                }),
+                _ => json!({
+                    "ok": true,
+                    "action_complete": true,
+                    "state": state,
+                }),
+            }
+        }
+        Payload::Selection(sel) => json!({
+            "ok": true,
+            "action_complete": true,
+            "selection": sel.by_class,
+        }),
+        Payload::Materials(m) => {
+            let hidden: Vec<u32> = m.visible.iter().filter_map(|(k, v)| if !v { Some(*k) } else { None }).collect();
+            json!({
                 "ok": true,
                 "action_complete": true,
-                "num_states": 1,
-                "classes": []
-            }),
-            _ => json!({
-                "ok": true,
-                "action_complete": true
-            }),
+                "hidden_materials": hidden,
+            })
         }
-    };
-
-    (cmd, result, tool_ok)
+        Payload::Camera(_) | Payload::Isosurface(_) | Payload::Snapshot(_)
+        | Payload::Closed(_) | Payload::Agent(_) => json!({
+            "ok": true,
+            "action_complete": true,
+        }),
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -817,33 +940,23 @@ mod tests {
         assert_eq!(coerce_value("hello"), Value::String("hello".to_string()));
     }
 
-    // ── tool_to_cmd mapping ──────────────────────────────────────────
+    // ── tool_to_cmd mapping (just produces the Cmd) ──────────────────
 
     #[test]
     fn tool_to_cmd_maps_load() {
-        let args = json!({"root": "cylinder"});
-        let (cmd, _result, ok) = tool_to_cmd("load", &args);
-        assert!(ok);
+        let cmd = tool_to_cmd("load", &json!({"root": "cylinder"}));
         assert!(matches!(cmd, Some(pb::command::Cmd::Load(pb::Load { ref root })) if root == "cylinder"));
     }
 
     #[test]
     fn tool_to_cmd_maps_set_state_with_integer() {
-        let args = json!({"state": 5});
-        let (cmd, result, ok) = tool_to_cmd("set_state", &args);
-        assert!(ok);
+        let cmd = tool_to_cmd("set_state", &json!({"state": 5}));
         assert!(matches!(cmd, Some(pb::command::Cmd::SetState(pb::SetState { state: 5 }))));
-        // Synthesized response should echo the requested state so the
-        // model's "compare state vs requested_state" check passes.
-        assert_eq!(result["state"], 5);
-        assert_eq!(result["requested_state"], 5);
     }
 
     #[test]
     fn tool_to_cmd_maps_material_with_optional_id() {
-        let args = json!({"enable": false, "material": 2});
-        let (cmd, _result, ok) = tool_to_cmd("material", &args);
-        assert!(ok);
+        let cmd = tool_to_cmd("material", &json!({"enable": false, "material": 2}));
         let Some(pb::command::Cmd::Material(m)) = cmd else { panic!("expected Material") };
         assert!(!m.enable);
         assert_eq!(m.material, Some(2));
@@ -857,23 +970,17 @@ mod tests {
             ("first", pb::step::Dir::First),
             ("last", pb::step::Dir::Last),
         ] {
-            let args = json!({"dir": input});
-            let (cmd, _, _) = tool_to_cmd("step", &args);
+            let cmd = tool_to_cmd("step", &json!({"dir": input}));
             let Some(pb::command::Cmd::Step(s)) = cmd else { panic!("expected Step") };
             assert_eq!(s.dir, expected as i32, "dir={input}");
         }
     }
 
-    // ── Bug #2 — unmapped tools return tool_ok=false ─────────────────
-
     #[test]
-    fn unknown_tool_reports_failure_to_the_model() {
-        let (cmd, result, ok) = tool_to_cmd("query", &json!({}));
-        assert!(cmd.is_none(), "query is unmapped");
-        assert!(!ok, "tool_ok must be false so caller emits ok=false");
-        assert_eq!(result["ok"], false);
-        assert_eq!(result["error_kind"], "unknown_tool");
-        assert!(result["error"].as_str().unwrap().contains("query"));
+    fn tool_to_cmd_returns_none_for_unknown() {
+        assert!(tool_to_cmd("query", &json!({})).is_none());
+        assert!(tool_to_cmd("snapshot", &json!({})).is_none());
+        assert!(tool_to_cmd("view", &json!({})).is_none());
     }
 
     // ── Bug #1 — prompt builder uses tool_name, not tool_use_id ──────
@@ -929,6 +1036,187 @@ mod tests {
         let prompt = build_functiongemma_prompt(&messages, &[]);
         assert!(prompt.contains("<start_function_call>call:set_state"));
         assert!(prompt.contains("<end_function_call>"));
+    }
+
+    // ── outcome_to_response — REAL dispatch results, not synth ───────
+
+    fn make_outcome(payload: pb::state_delta::Payload) -> DispatchOutcome {
+        DispatchOutcome { seq: 1, payload }
+    }
+
+    #[test]
+    fn show_with_unresolved_geometry_returns_failure() {
+        // The bug this whole architectural change exists to fix:
+        // `show prin_stress1` (typo, or no DB loaded) dispatches but
+        // produces a ResultState with geometry=None. The model used to
+        // see {"ok":true} and think it worked. Now it sees the truth.
+        let outcome = make_outcome(pb::state_delta::Payload::Result(pb::ResultState {
+            result: "princ_stress1".into(),
+            component: String::new(),
+            min: 0.0,
+            max: 0.0,
+            geometry: None,
+        }));
+        let response = outcome_to_response(
+            "show",
+            &json!({"result": "princ_stress1"}),
+            &outcome,
+        );
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error_kind"], "nonexistent_result");
+        assert!(
+            response["error"].as_str().unwrap().contains("princ_stress1"),
+            "error should name the offending result: {response}"
+        );
+    }
+
+    #[test]
+    fn show_with_real_geometry_returns_success_and_range() {
+        let outcome = make_outcome(pb::state_delta::Payload::Result(pb::ResultState {
+            result: "prin_stress1".into(),
+            component: String::new(),
+            min: -2.5,
+            max: 3.0,
+            geometry: Some(pb::GeometryRef {
+                flight_ticket: vec![],
+                layout: String::new(),
+                num_vertices: 0,
+                num_indices: 0,
+            }),
+        }));
+        let response = outcome_to_response("show", &json!({"result": "prin_stress1"}), &outcome);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["result"], "prin_stress1");
+        assert_eq!(response["range"][0], -2.5);
+        assert_eq!(response["range"][1], 3.0);
+    }
+
+    #[test]
+    fn set_state_clamped_out_of_range_reports_failure() {
+        // User asked for state 999; griz clamped to 81 (last state).
+        // The model should know it didn't get what it asked for.
+        let outcome = make_outcome(pb::state_delta::Payload::State(81));
+        let response = outcome_to_response("set_state", &json!({"state": 999}), &outcome);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["state"], 81);
+        assert_eq!(response["requested_state"], 999);
+    }
+
+    #[test]
+    fn set_state_exact_match_reports_success() {
+        let outcome = make_outcome(pb::state_delta::Payload::State(5));
+        let response = outcome_to_response("set_state", &json!({"state": 5}), &outcome);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["state"], 5);
+    }
+
+    #[test]
+    fn load_empty_db_reports_failure() {
+        let outcome = make_outcome(pb::state_delta::Payload::Loaded(pb::LoadedState {
+            db: String::new(),
+            num_states: 0,
+            state_times: vec![],
+            class_names: vec![],
+        }));
+        let response = outcome_to_response("load", &json!({"root": "nonexistent"}), &outcome);
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error_kind"], "dispatch_error");
+    }
+
+    #[test]
+    fn load_success_carries_real_num_states_and_classes() {
+        // The previous synth response always said num_states=1. Now
+        // the model sees the real value, which matters for "step to
+        // last state" kinds of plans.
+        let outcome = make_outcome(pb::state_delta::Payload::Loaded(pb::LoadedState {
+            db: "bar71".into(),
+            num_states: 81,
+            state_times: vec![],
+            class_names: vec!["brick".into(), "shell".into()],
+        }));
+        let response = outcome_to_response("load", &json!({"root": "bar71"}), &outcome);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["num_states"], 81);
+        assert_eq!(response["classes"][0], "brick");
+    }
+
+    // ── Fix #3 — repeat-detection signature ─────────────────────────
+
+    #[test]
+    fn call_signature_is_stable_across_identical_calls() {
+        let a = vec![ParsedToolCall {
+            name: "step".to_string(),
+            arguments: json!({"dir": "next"}),
+        }];
+        let b = vec![ParsedToolCall {
+            name: "step".to_string(),
+            arguments: json!({"dir": "next"}),
+        }];
+        assert_eq!(call_signature(&a), call_signature(&b));
+    }
+
+    #[test]
+    fn call_signature_matches_same_tool_regardless_of_args() {
+        // Same tool with different args still matches — this is the
+        // load-bearing behavior: it catches the show-on/show-off
+        // oscillation BEFORE the second dispatch lands. If args were
+        // part of the signature, the second dispatch would slip through
+        // and the colormap would get toggled off again.
+        let a = vec![ParsedToolCall {
+            name: "show".to_string(),
+            arguments: json!({"result": "prin_stress1"}),
+        }];
+        let b = vec![ParsedToolCall {
+            name: "show".to_string(),
+            arguments: json!({"result": ""}),
+        }];
+        assert_eq!(call_signature(&a), call_signature(&b));
+    }
+
+    #[test]
+    fn call_signature_differs_when_tool_name_changes() {
+        let a = vec![ParsedToolCall {
+            name: "step".to_string(),
+            arguments: json!({}),
+        }];
+        let b = vec![ParsedToolCall {
+            name: "set_state".to_string(),
+            arguments: json!({}),
+        }];
+        assert_ne!(call_signature(&a), call_signature(&b));
+    }
+
+    #[test]
+    fn signature_window_catches_second_show_call_before_dispatch() {
+        // The real-world scenario the user hit: model calls
+        // show {result: "prin_stress1"} (iter 1), then calls
+        // show {result: ""} (iter 2). With name-only signatures,
+        // iter 2's signature MUST match iter 1's so the loop
+        // stops BEFORE iter 2 dispatches (which would clear the
+        // colormap the user just asked for).
+        let iter1 = call_signature(&[ParsedToolCall {
+            name: "show".to_string(),
+            arguments: json!({"result": "prin_stress1"}),
+        }]);
+        let iter2 = call_signature(&[ParsedToolCall {
+            name: "show".to_string(),
+            arguments: json!({"result": ""}),
+        }]);
+        let window = [iter1.clone()];
+        assert!(
+            window.contains(&iter2),
+            "iter2 signature must be in [iter1] window so dispatch is skipped"
+        );
+    }
+
+    // ── Fix #4 — MAX_STEPS guardrail ─────────────────────────────────
+
+    #[test]
+    fn max_steps_is_bounded_for_small_model_safety() {
+        // Tight cap matches what FunctionGemma-270M can plausibly need
+        // for the demo scenarios; combined with repeat-detection it
+        // keeps a runaway agent from rampaging through analysis states.
+        assert!(MAX_STEPS <= 4, "MAX_STEPS={MAX_STEPS} — should stay small");
     }
 
     // ── tools.json compiles in cleanly ────────────────────────────────

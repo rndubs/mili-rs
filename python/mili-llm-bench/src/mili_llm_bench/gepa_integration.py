@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import driver, scenarios
-from .dispatchers.pygriz import PygrizDispatcher
+from .dispatchers.pygriz import PygrizDispatcher, pygriz_dispatcher_factory
 from .harness import Registry
 from .providers.base import LlmProvider
 
@@ -69,16 +69,44 @@ def artifact_to_eval_config(artifact: str | dict) -> driver.EvalConfig:
     )
 
 
-def artifact_tools(artifact: str | dict) -> list[dict[str, Any]] | None:
-    """Extract tool definitions from artifact if present.
+# Prefix that marks a multi-field-candidate key as a tool-description
+# override. GEPA's dict-shaped candidates are dict[str, str], so the only
+# way to carry per-tool overrides is to namespace them in the key. Keep the
+# prefix short — it appears in every reflection prompt rendered to the LM.
+_TOOL_DESC_PREFIX = "tool:"
 
-    Returns:
-        List of tool dicts (each with name, description, input_schema,
-        output_schema) if artifact is a dict with 'tools' key; None otherwise.
+
+def artifact_tools(artifact: str | dict) -> list[dict[str, Any]] | None:
+    """Extract tool description overrides from artifact if present.
+
+    Supports two artifact shapes:
+
+    1. Legacy bundle: ``{"tools": [{name, description, input_schema, ...}, ...]}``.
+       Returned as-is; ``apply_artifact_tools`` merges onto the registry.
+
+    2. Multi-field candidate (GEPA dict[str, str]):
+       ``{"system_prompt": "...", "tool:<name>": "<description>", ...}``.
+       Each ``tool:<name>`` key contributes a partial override (description
+       only); input/output schemas come from the registry — see
+       ``apply_artifact_tools`` which preserves any field the override
+       doesn't set.
+
+    Returns ``None`` if neither shape is present (artifact is a plain
+    system-prompt string, or a dict with no tool fields).
     """
-    if isinstance(artifact, dict) and "tools" in artifact:
+    if not isinstance(artifact, dict):
+        return None
+
+    if "tools" in artifact:
         return artifact["tools"]
-    return None
+
+    overrides: list[dict[str, Any]] = []
+    for key, value in artifact.items():
+        if key.startswith(_TOOL_DESC_PREFIX) and isinstance(value, str):
+            overrides.append(
+                {"name": key[len(_TOOL_DESC_PREFIX) :], "description": value}
+            )
+    return overrides or None
 
 
 def apply_artifact_tools(registry: Registry, tools: list[dict[str, Any]]) -> Registry:
@@ -116,6 +144,47 @@ def apply_artifact_tools(registry: Registry, tools: list[dict[str, Any]]) -> Reg
     return Registry(tools=updated_tools)
 
 
+def _candidate_to_artifact(
+    candidate: str | dict[str, str],
+    baseline_tools: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Convert GEPA's returned candidate into the legacy serialization shape.
+
+    GEPA hands back whatever was passed as `seed_candidate` — a string for
+    single-field optimization, a `dict[str, str]` for multi-field. The
+    on-disk format (best_artifact.json, best_tools.json) is always the
+    legacy bundle, so this normalizes both shapes to that.
+
+    For dict candidates, `tool:<name>` keys override descriptions on the
+    matching baseline tool; input/output schemas are preserved verbatim
+    from `baseline_tools` (they were never in the candidate).
+    """
+    if isinstance(candidate, str):
+        return {
+            "system_prompt": candidate,
+            "step_cap": 8,
+            "tools": baseline_tools,
+        }
+
+    desc_overrides: dict[str, str] = {
+        key[len(_TOOL_DESC_PREFIX) :]: value
+        for key, value in candidate.items()
+        if key.startswith(_TOOL_DESC_PREFIX) and isinstance(value, str)
+    }
+    final_tools: list[dict[str, Any]] = []
+    for tool in baseline_tools:
+        merged = tool.copy()
+        if merged["name"] in desc_overrides:
+            merged["description"] = desc_overrides[merged["name"]]
+        final_tools.append(merged)
+
+    return {
+        "system_prompt": candidate.get("system_prompt", driver._DEFAULT_SYSTEM_PROMPT),
+        "step_cap": 8,
+        "tools": final_tools,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Phase 2: Evaluator function
 # ---------------------------------------------------------------------------
@@ -132,6 +201,56 @@ class EvaluationResult:
     failure_modes: dict[str, int]
     num_scenarios: int
     wall_s: float
+
+
+def evaluate_single_scenario(
+    artifact: str | dict,
+    scenario: scenarios.Scenario,
+    *,
+    provider_factory: Callable[[], LlmProvider],
+    dispatcher_factory: Callable[[scenarios.Scenario], Any],
+    registry: Registry,
+    tools: list[dict[str, Any]],
+) -> tuple[float, dict[str, Any]]:
+    """Per-scenario evaluator for GEPA's dataset mode.
+
+    GEPA's `optimize_anything(..., valset=<scenarios>)` calls the
+    evaluator as `evaluator(candidate, scenario)` and aggregates the
+    returned scores itself. Returning `(score, side_info)` puts the
+    failure_mode and instruction in front of the reflection LM as
+    actionable feedback — without this, reflection gets only a scalar
+    and can't reason about *which* scenarios are failing or *how*.
+    """
+    config = artifact_to_eval_config(artifact)
+
+    artifact_tools_list = artifact_tools(artifact)
+    if artifact_tools_list:
+        eval_registry = apply_artifact_tools(registry, artifact_tools_list)
+        eval_tools = _load_tools_for_registry(eval_registry)
+    else:
+        eval_registry = registry
+        eval_tools = tools
+
+    result = driver.run_one_scenario(
+        provider=provider_factory(),
+        dispatcher_factory=dispatcher_factory,
+        scenario=scenario,
+        tools=eval_tools,
+        config=config,
+        registry=eval_registry,
+    )
+
+    tier = result.verifier_result.max_tier
+    score = tier / 3.0
+    side_info = {
+        "scenario_id": scenario.id,
+        "fixture": scenario.fixture,
+        "intent_id": scenario.intent_id,
+        "instruction": scenario.instruction,
+        "max_tier": tier,
+        "failure_mode": result.verifier_result.failure_mode,
+    }
+    return score, side_info
 
 
 def evaluate_artifact(
@@ -340,8 +459,13 @@ def run_gepa_optimization(config: GepaRunConfig) -> dict[str, Any]:
     else:
         raise ValueError(f"Unknown provider: {config.provider_name}")
 
-    # Set up dispatcher factory
-    dispatcher_factory = PygrizDispatcher
+    # Set up dispatcher factory. `PygrizDispatcher` is a @dataclass with a
+    # single `session` field — handing the class itself to the driver causes
+    # `dispatcher_factory(scenario)` to assign the Scenario as the session,
+    # and every tool call then raises AttributeError → caught as
+    # dispatch_error. The factory below opens a real griz session and
+    # pre-loads `scenario.fixture` before the model runs.
+    dispatcher_factory = pygriz_dispatcher_factory()
 
     # Load registry and tools
     registry = Registry.load_from_artifact()
@@ -350,13 +474,23 @@ def run_gepa_optimization(config: GepaRunConfig) -> dict[str, Any]:
     # Build evaluator closure
     wall_s_tracker: dict[str, float] = {}
 
-    def evaluator(artifact: str | dict) -> float:
-        """GEPA calls this for each proposed artifact."""
-        return evaluate_artifact(
+    def evaluator(artifact: str | dict, example: scenarios.Scenario) -> tuple[float, dict[str, Any]]:
+        """GEPA calls this once per (candidate, example) pair when a
+        dataset is provided. The parameter name MUST be `example` — GEPA's
+        optimize_anything adapter (`optimize_anything.py:~932`) filters
+        kwargs by inspecting the evaluator's signature and forwards
+        `example=<data_inst>` from its `dataset`/`valset`. Naming it
+        anything else (e.g. `scenario`) drops the kwarg and raises
+        `missing 1 required positional argument`.
+
+        Returning (score, side_info) gives the reflection LM per-scenario
+        failure data — that's what `<side_info>` in the default reflection
+        template renders."""
+        return evaluate_single_scenario(
             artifact,
+            example,
             provider_factory=provider_factory,
             dispatcher_factory=dispatcher_factory,
-            scenarios_list=scenarios_list,
             registry=registry,
             tools=tools,
         )
@@ -388,6 +522,24 @@ def run_gepa_optimization(config: GepaRunConfig) -> dict[str, Any]:
         seed_tools = tools
         logger.info("No previous GEPA run found; using baseline tools")
 
+    # GEPA's `optimize_anything` accepts a dict[str, str] as a multi-field
+    # candidate (see `Candidate` type). We expose one field per tool's
+    # description plus the system prompt — the reflection LM proposes new
+    # text for each field independently, while cross-transfer across
+    # scenarios happens via the dataset axis.
+    #
+    # Only top-level `description` strings are editable. Schemas
+    # (input_schema/output_schema) are not in the candidate because a
+    # malformed JSON proposal would break dispatch on every scenario.
+    # `step_cap` likewise stays constant (GEPA fields are strings, not ints).
+    seed_candidate: dict[str, str] = {"system_prompt": driver._DEFAULT_SYSTEM_PROMPT}
+    for tool in seed_tools:
+        seed_candidate[f"{_TOOL_DESC_PREFIX}{tool['name']}"] = tool.get(
+            "description", ""
+        )
+
+    # Legacy bundle kept for on-disk serialization (best_artifact.json,
+    # best_tools.json) and for `evaluate_artifact_detailed` at run end.
     seed_artifact: dict[str, Any] = {
         "system_prompt": driver._DEFAULT_SYSTEM_PROMPT,
         "step_cap": 8,
@@ -444,10 +596,21 @@ clarifying tool semantics and decision-making in the prompt."""
     engine_config = EngineConfig(
         display_progress_bar=True,
         max_candidate_proposals=config.max_iterations,
+        # Single-threaded keeps llama-server (one local process, one
+        # request at a time) from being trampled by parallel evaluators.
+        parallel=False,
     )
 
+    # `reflection_minibatch_size` is the number of scenarios GEPA shows
+    # the reflection LM per round. Without it (None default), GEPA either
+    # sends one example at a time or the entire set — neither gives the
+    # proposer useful failure-mode breadth. 10 of 50 is a reasonable
+    # compromise: enough variety for pattern-finding, small enough that
+    # the reflection prompt stays under the engine's context budget.
+    reflection_minibatch_size = min(10, len(scenarios_list))
     reflection_config = ReflectionConfig(
         reflection_lm=config.gepa_engine,
+        reflection_minibatch_size=reflection_minibatch_size,
     )
 
     gepa_config = GEPAConfig(
@@ -455,31 +618,31 @@ clarifying tool semantics and decision-making in the prompt."""
         reflection=reflection_config,
     )
 
-    # GEPA's reflective mutation expects the seed_candidate to be a string
-    # (the instruction/system_prompt), not a dict. Pass the system prompt
-    # directly; step_cap and tools are constant during optimization.
+    # Pass scenarios as `dataset` so GEPA enters multi-task mode and calls
+    # `evaluator(candidate, scenario)` per scenario, then aggregates. Without
+    # this it stays in single-task mode, calling `evaluator(candidate)` once
+    # and treating the returned scalar as the whole signal — that's how the
+    # progress bar ends up reading "1 / 1 examples" on a 50-scenario set.
+    # `valset` defaults to dataset, which is what we want with only 50
+    # scenarios (no train/val split yet).
     gepa_result = optimize_anything(
-        seed_candidate=seed_artifact["system_prompt"],
+        seed_candidate=seed_candidate,
         evaluator=evaluator,
+        dataset=scenarios_list,
         objective=objective,
         background=background,
         config=gepa_config,
     )
 
     # Extract best result with detailed metrics
-    best_artifact = gepa_result.best_candidate
-    if not best_artifact:
+    best_candidate = gepa_result.best_candidate
+    if not best_candidate:
         logger.warning("GEPA did not find a better candidate; using baseline")
-        best_artifact = driver._DEFAULT_SYSTEM_PROMPT
+        best_candidate = seed_candidate
 
-    # GEPA returns the system_prompt string; wrap it back into a dict with
-    # step_cap and tools for consistent serialization and seeding future runs.
-    if isinstance(best_artifact, str):
-        best_artifact = {
-            "system_prompt": best_artifact,
-            "step_cap": 8,
-            "tools": seed_tools,
-        }
+    # Convert GEPA's returned candidate (str or dict[str, str]) into the
+    # legacy serialization shape (system_prompt + step_cap + tools list).
+    best_artifact = _candidate_to_artifact(best_candidate, seed_tools)
 
     best_result = evaluate_artifact_detailed(
         best_artifact,

@@ -108,6 +108,8 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
             ProviderOutput(
                 tool_calls=[{"name": "load", "arguments": {"root": scenario.fixture}}]
             ),
+            # The final_text slot is intentionally never consumed — the
+            # driver auto-terminates as soon as the postcondition is met.
             ProviderOutput(final_text="loaded."),
         ]
     )
@@ -124,9 +126,11 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
     assert result.verifier_result.max_tier == 3
     assert result.verifier_result.failure_mode is None
     assert result.verifier_result.reward == 1.0
-    # Exactly one tool_calls turn + one final_text turn.
+    # One productive tool_calls turn satisfies the postcondition; the
+    # driver auto-terminates without waiting for a final_text turn.
     kinds = [t.kind for t in result.turns]
-    assert kinds == ["tool_calls", "final_text"]
+    assert kinds == ["tool_calls"]
+    assert provider.calls_made == 1
     assert result.wall_ms_total >= 0
     # No driver-level stop on a clean run.
     assert not any(
@@ -142,6 +146,52 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
         "role": "user",
         "content": scenario.instruction,
     }
+
+
+# ---------------------------------------------------------------------------
+# 1b. Auto-terminate — a "looping" model that never emits final_text
+#     still completes cleanly once the postcondition is satisfied.
+# ---------------------------------------------------------------------------
+
+
+def test_run_one_scenario_auto_terminates_when_postcondition_met() -> None:
+    """Weak open-weight models often emit repeat-the-call trajectories
+    and never produce final_text. The driver auto-terminates the loop
+    when the verifier grades the rollout L3 mid-loop, so a correct
+    first call is not converted into a ``step_cap_hit``."""
+    scenario = _scenario_by_id("bs-001")
+    # Script repeats the (postcondition-satisfying) `load` call forever
+    # and never emits final_text — exactly the FunctionGemma loop
+    # pathology, but with a productive first call.
+    provider = MockLlmProvider(
+        [
+            ProviderOutput(
+                tool_calls=[{"name": "load", "arguments": {"root": scenario.fixture}}]
+            )
+            for _ in range(8)
+        ]
+    )
+    config = EvalConfig(step_cap=8)
+    result = run_one_scenario(
+        provider=provider,
+        dispatcher_factory=_loader_dispatcher,
+        scenario=scenario,
+        tools=_TOOLS_LIST,
+        config=config,
+        registry=_REGISTRY,
+    )
+    assert result.verifier_result.max_tier == 3
+    assert result.verifier_result.failure_mode is None
+    # Exactly one tool_calls turn — the second iteration's L3 check
+    # would have caught it too, but the first turn already satisfies
+    # the postcondition.
+    assert len(result.turns) == 1
+    # No driver-level stop on the clean auto-terminate path.
+    assert not any(
+        m.get("role") == "system" and str(m.get("content", "")).startswith("stop:")
+        for m in result.messages
+    )
+    assert provider.calls_made == 1
 
 
 # ---------------------------------------------------------------------------

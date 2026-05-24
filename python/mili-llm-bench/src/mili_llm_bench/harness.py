@@ -38,10 +38,13 @@ exactly the bug the enum-identity test catches.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
+
+logger = logging.getLogger(__name__)
 
 import jsonschema
 
@@ -408,7 +411,10 @@ def run_turn(
     except Exception:
         # A clean LlmProvider should not raise; this is the safety
         # belt. Fold into the closed taxonomy so the verifier still
-        # sees a closed-set label.
+        # sees a closed-set label. Log with exc_info so a silently
+        # broken provider (auth, model name, network) is visible —
+        # without this, an entire run can look like step_cap_hit×N.
+        logger.exception("provider.generate raised at step %d", step_index)
         return TurnResult(
             kind="error",
             error_kind="dispatch_error",

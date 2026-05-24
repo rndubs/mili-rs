@@ -62,6 +62,23 @@ def _import_anthropic() -> Any:
 # ---------------------------------------------------------------------------
 
 
+_ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS = ("oneOf", "allOf", "anyOf")
+
+
+def _strip_top_level_combinators(schema: dict[str, Any]) -> dict[str, Any]:
+    """Drop top-level ``oneOf``/``allOf``/``anyOf`` from a JSON schema.
+
+    The Anthropic tool API rejects these at the schema root (the `view`
+    tool uses a top-level ``oneOf`` to enforce "exactly one of rotate /
+    translate / … / reset"). The constraint is still enforced bench-side
+    by jsonschema during dispatch, so dropping it for the wire payload
+    only loosens what Anthropic *validates*, not what we *execute*.
+    """
+    if not any(k in schema for k in _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS):
+        return schema
+    return {k: v for k, v in schema.items() if k not in _ANTHROPIC_UNSUPPORTED_SCHEMA_KEYS}
+
+
 def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Our W1 tools.json shape ``{name, description, input_schema, ...}``
     → Anthropic's tool shape ``{name, description, input_schema}``.
@@ -76,7 +93,7 @@ def _convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "name": t["name"],
                 "description": t.get("description", ""),
-                "input_schema": t["input_schema"],
+                "input_schema": _strip_top_level_combinators(t["input_schema"]),
             }
         )
     if out:

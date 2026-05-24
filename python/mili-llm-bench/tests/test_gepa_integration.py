@@ -17,7 +17,10 @@ import pytest
 from mili_llm_bench import driver, scenarios
 from mili_llm_bench.harness import FakeDispatcher, Registry
 from mili_llm_bench.gepa_integration import (
+    _candidate_to_artifact,
+    apply_artifact_tools,
     artifact_to_eval_config,
+    artifact_tools,
     evaluate_artifact,
     evaluate_artifact_detailed,
 )
@@ -84,6 +87,129 @@ class TestArtifactToEvalConfig:
         assert config.step_cap == 10
         assert config.max_new_tokens == 256  # default
         assert config.temperature == 0.0  # default
+
+
+# ---------------------------------------------------------------------------
+# Test artifact_tools — multi-field candidate shape (tool:<name> keys)
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactToolsMultiField:
+    """Verify the multi-field candidate shape GEPA hands back when
+    `seed_candidate` is a dict[str, str] with `tool:<name>` keys.
+
+    The reflection LM proposes new text per field; the harness has to
+    rebuild a tool-list shape that `apply_artifact_tools` accepts, while
+    preserving input/output schemas that were never in the candidate."""
+
+    def test_string_artifact_returns_none(self) -> None:
+        assert artifact_tools("just a system prompt") is None
+
+    def test_dict_without_tool_keys_returns_none(self) -> None:
+        assert artifact_tools({"system_prompt": "..."}) is None
+
+    def test_legacy_tools_list_passes_through(self) -> None:
+        tools = [{"name": "load", "description": "open db"}]
+        assert artifact_tools({"tools": tools}) == tools
+
+    def test_tool_prefix_keys_become_description_overrides(self) -> None:
+        artifact = {
+            "system_prompt": "...",
+            "tool:load": "open a database by basename",
+            "tool:show": "color the mesh by a result field",
+        }
+        out = artifact_tools(artifact)
+        assert out is not None
+        by_name = {t["name"]: t for t in out}
+        assert by_name["load"]["description"] == "open a database by basename"
+        assert by_name["show"]["description"] == "color the mesh by a result field"
+        # Schemas are intentionally absent — apply_artifact_tools fills
+        # them from the registry.
+        assert "input_schema" not in by_name["load"]
+
+    def test_apply_artifact_tools_preserves_schema_on_description_only_override(
+        self,
+    ) -> None:
+        registry = Registry(
+            tools={
+                "load": {
+                    "name": "load",
+                    "description": "baseline desc",
+                    "input_schema": {"type": "object", "properties": {"root": {"type": "string"}}},
+                    "output_schema": {"type": "object"},
+                }
+            }
+        )
+        overrides = artifact_tools(
+            {"tool:load": "edited description from reflection"}
+        )
+        assert overrides is not None
+        merged = apply_artifact_tools(registry, overrides)
+        assert merged.tools["load"]["description"] == "edited description from reflection"
+        # input_schema must survive untouched — a wiped schema would break dispatch.
+        assert merged.tools["load"]["input_schema"]["properties"]["root"]["type"] == "string"
+
+
+# ---------------------------------------------------------------------------
+# Test _candidate_to_artifact — GEPA-shape → serialization-shape conversion
+# ---------------------------------------------------------------------------
+
+
+class TestCandidateToArtifact:
+    """End-to-run normalization: GEPA returns whatever shape we seeded
+    (str or dict[str, str]). The on-disk best_artifact.json / best_tools.json
+    format is always the legacy bundle — this is the converter."""
+
+    def _baseline_tools(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "load",
+                "description": "baseline load",
+                "input_schema": {"type": "object", "properties": {"root": {"type": "string"}}},
+                "output_schema": {"type": "object"},
+            },
+            {
+                "name": "show",
+                "description": "baseline show",
+                "input_schema": {"type": "object", "properties": {"result": {"type": "string"}}},
+                "output_schema": {"type": "object"},
+            },
+        ]
+
+    def test_string_candidate_wraps_with_baseline_tools(self) -> None:
+        out = _candidate_to_artifact("new prompt", self._baseline_tools())
+        assert out["system_prompt"] == "new prompt"
+        assert out["step_cap"] == 8
+        assert out["tools"] == self._baseline_tools()
+
+    def test_dict_candidate_applies_description_overrides(self) -> None:
+        candidate = {
+            "system_prompt": "new prompt",
+            "tool:load": "edited load",
+            "tool:show": "edited show",
+        }
+        out = _candidate_to_artifact(candidate, self._baseline_tools())
+        by_name = {t["name"]: t for t in out["tools"]}
+        assert by_name["load"]["description"] == "edited load"
+        assert by_name["show"]["description"] == "edited show"
+        # Schemas preserved.
+        assert by_name["load"]["input_schema"]["properties"]["root"]["type"] == "string"
+
+    def test_dict_candidate_with_partial_overrides_keeps_baseline_for_rest(self) -> None:
+        """If GEPA only edits some tool descriptions, the others stay at baseline."""
+        candidate = {"system_prompt": "p", "tool:load": "only load edited"}
+        out = _candidate_to_artifact(candidate, self._baseline_tools())
+        by_name = {t["name"]: t for t in out["tools"]}
+        assert by_name["load"]["description"] == "only load edited"
+        assert by_name["show"]["description"] == "baseline show"
+
+    def test_dict_candidate_does_not_mutate_baseline(self) -> None:
+        baseline = self._baseline_tools()
+        candidate = {"tool:load": "edited"}
+        _candidate_to_artifact(candidate, baseline)
+        # The original baseline list is unchanged — important because the
+        # same list object is reused for every candidate evaluation.
+        assert baseline[0]["description"] == "baseline load"
 
 
 # ---------------------------------------------------------------------------
