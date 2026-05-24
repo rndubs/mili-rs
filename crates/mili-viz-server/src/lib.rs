@@ -37,15 +37,15 @@ mod agent;
 mod clip;
 mod flight;
 mod geometry;
-mod raw;
 mod llamacpp_agent;
+mod raw;
 pub use agent::{
-    encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, DispatchOutcome,
-    MockAgent, TurnSnapshot, AGENT_MOCK_ORIGIN,
+    encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, DispatchOutcome, MockAgent,
+    TurnSnapshot, AGENT_MOCK_ORIGIN,
 };
-pub use llamacpp_agent::LlamaCppAgent;
 pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
+pub use llamacpp_agent::LlamaCppAgent;
 pub use raw::{parse_line, parse_raw, to_raw};
 
 /// Conventional Flight ticket for the result catalog

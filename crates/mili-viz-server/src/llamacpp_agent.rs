@@ -11,7 +11,7 @@ use std::pin::Pin;
 use mili_viz_proto::v1 as pb;
 use serde_json::{json, Value};
 
-use crate::agent::{AgentBackend, AgentTurnCtx, DispatchOutcome, ran_summary};
+use crate::agent::{ran_summary, AgentBackend, AgentTurnCtx, DispatchOutcome};
 
 const DEFAULT_SERVER_URL: &str = "http://localhost:8080";
 /// Cap on multi-turn iterations within one user turn. Kept tight because
@@ -392,8 +392,8 @@ fn parse_json_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
 }
 
 fn parse_single_json_tool_call(json_str: &str) -> Result<ParsedToolCall, String> {
-    let obj: Value = serde_json::from_str(json_str)
-        .map_err(|e| format!("Failed to parse JSON: {e}"))?;
+    let obj: Value =
+        serde_json::from_str(json_str).map_err(|e| format!("Failed to parse JSON: {e}"))?;
 
     let name = obj
         .get("name")
@@ -537,7 +537,8 @@ fn build_functiongemma_prompt(messages: &[Message], tools: &[Tool]) -> String {
 
     // Developer turn with tool declarations
     prompt.push_str("<start_of_turn>developer\n");
-    prompt.push_str("You are a model that can do function calling with the following functions\n\n");
+    prompt
+        .push_str("You are a model that can do function calling with the following functions\n\n");
 
     for tool in tools {
         prompt.push_str(&format_tool_declaration(tool));
@@ -610,10 +611,7 @@ fn format_tool_declaration(tool: &Tool) -> String {
                         .get("type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("string");
-                    decl.push_str(&format!(
-                        "{param_name}:<escape>{}<escape>",
-                        param_type
-                    ));
+                    decl.push_str(&format!("{param_name}:<escape>{}<escape>", param_type));
                     first = false;
                 }
                 decl.push('}');
@@ -679,18 +677,11 @@ fn tool_to_cmd(name: &str, args: &Value) -> Option<pb::command::Cmd> {
             opts: HashMap::new(),
         })),
         "set_state" => {
-            let state = args
-                .get("state")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1) as u32;
+            let state = args.get("state").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
             Some(pb::command::Cmd::SetState(pb::SetState { state }))
         }
         "step" => {
-            let dir = match args
-                .get("dir")
-                .and_then(|v| v.as_str())
-                .unwrap_or("next")
-            {
+            let dir = match args.get("dir").and_then(|v| v.as_str()).unwrap_or("next") {
                 "prev" | "PREV" => pb::step::Dir::Prev as i32,
                 "first" | "FIRST" => pb::step::Dir::First as i32,
                 "last" | "LAST" => pb::step::Dir::Last as i32,
@@ -705,7 +696,10 @@ fn tool_to_cmd(name: &str, args: &Value) -> Option<pb::command::Cmd> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            material: args.get("material").and_then(|v| v.as_u64()).map(|m| m as u32),
+            material: args
+                .get("material")
+                .and_then(|v| v.as_u64())
+                .map(|m| m as u32),
         })),
         "select" => Some(pb::command::Cmd::Select(pb::Select {
             class_name: args
@@ -734,11 +728,7 @@ fn tool_to_cmd(name: &str, args: &Value) -> Option<pb::command::Cmd> {
                 .to_string(),
         })),
         "named_view" => {
-            let op = match args
-                .get("op")
-                .and_then(|v| v.as_str())
-                .unwrap_or("RESTORE")
-            {
+            let op = match args.get("op").and_then(|v| v.as_str()).unwrap_or("RESTORE") {
                 "SAVE" => pb::named_view::Op::Save as i32,
                 "LIST" => pb::named_view::Op::List as i32,
                 _ => pb::named_view::Op::Restore as i32,
@@ -754,8 +744,7 @@ fn tool_to_cmd(name: &str, args: &Value) -> Option<pb::command::Cmd> {
         }
         "close" => Some(pb::command::Cmd::Close(pb::Close {})),
         "griz_raw" => Some(pb::command::Cmd::Raw(
-            args
-                .get("line")
+            args.get("line")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
@@ -839,15 +828,22 @@ fn outcome_to_response(name: &str, args: &Value, outcome: &DispatchOutcome) -> V
             "selection": sel.by_class,
         }),
         Payload::Materials(m) => {
-            let hidden: Vec<u32> = m.visible.iter().filter_map(|(k, v)| if !v { Some(*k) } else { None }).collect();
+            let hidden: Vec<u32> = m
+                .visible
+                .iter()
+                .filter_map(|(k, v)| if !v { Some(*k) } else { None })
+                .collect();
             json!({
                 "ok": true,
                 "action_complete": true,
                 "hidden_materials": hidden,
             })
         }
-        Payload::Camera(_) | Payload::Isosurface(_) | Payload::Snapshot(_)
-        | Payload::Closed(_) | Payload::Agent(_) => json!({
+        Payload::Camera(_)
+        | Payload::Isosurface(_)
+        | Payload::Snapshot(_)
+        | Payload::Closed(_)
+        | Payload::Agent(_) => json!({
             "ok": true,
             "action_complete": true,
         }),
@@ -900,7 +896,8 @@ mod tests {
     fn functiongemma_text_parser_coerces_int_args() {
         // Without coercion, `state` arrived as the string "5" and
         // `as_u64()` defaulted to 1 — set_state always jumped to state 1.
-        let text = "<start_function_call>call:set_state{state:<escape>5<escape>}<end_function_call>";
+        let text =
+            "<start_function_call>call:set_state{state:<escape>5<escape>}<end_function_call>";
         let calls = parse_tool_calls(text).expect("one call");
         assert_eq!(calls[0].name, "set_state");
         assert_eq!(calls[0].arguments["state"].as_u64(), Some(5));
@@ -916,7 +913,8 @@ mod tests {
 
     #[test]
     fn functiongemma_text_parser_keeps_strings_as_strings() {
-        let text = "<start_function_call>call:load{root:<escape>cylinder<escape>}<end_function_call>";
+        let text =
+            "<start_function_call>call:load{root:<escape>cylinder<escape>}<end_function_call>";
         let calls = parse_tool_calls(text).expect("one call");
         assert_eq!(calls[0].arguments["root"].as_str(), Some("cylinder"));
     }
@@ -945,19 +943,26 @@ mod tests {
     #[test]
     fn tool_to_cmd_maps_load() {
         let cmd = tool_to_cmd("load", &json!({"root": "cylinder"}));
-        assert!(matches!(cmd, Some(pb::command::Cmd::Load(pb::Load { ref root })) if root == "cylinder"));
+        assert!(
+            matches!(cmd, Some(pb::command::Cmd::Load(pb::Load { ref root })) if root == "cylinder")
+        );
     }
 
     #[test]
     fn tool_to_cmd_maps_set_state_with_integer() {
         let cmd = tool_to_cmd("set_state", &json!({"state": 5}));
-        assert!(matches!(cmd, Some(pb::command::Cmd::SetState(pb::SetState { state: 5 }))));
+        assert!(matches!(
+            cmd,
+            Some(pb::command::Cmd::SetState(pb::SetState { state: 5 }))
+        ));
     }
 
     #[test]
     fn tool_to_cmd_maps_material_with_optional_id() {
         let cmd = tool_to_cmd("material", &json!({"enable": false, "material": 2}));
-        let Some(pb::command::Cmd::Material(m)) = cmd else { panic!("expected Material") };
+        let Some(pb::command::Cmd::Material(m)) = cmd else {
+            panic!("expected Material")
+        };
         assert!(!m.enable);
         assert_eq!(m.material, Some(2));
     }
@@ -971,7 +976,9 @@ mod tests {
             ("last", pb::step::Dir::Last),
         ] {
             let cmd = tool_to_cmd("step", &json!({"dir": input}));
-            let Some(pb::command::Cmd::Step(s)) = cmd else { panic!("expected Step") };
+            let Some(pb::command::Cmd::Step(s)) = cmd else {
+                panic!("expected Step")
+            };
             assert_eq!(s.dir, expected as i32, "dir={input}");
         }
     }
@@ -1057,15 +1064,14 @@ mod tests {
             max: 0.0,
             geometry: None,
         }));
-        let response = outcome_to_response(
-            "show",
-            &json!({"result": "princ_stress1"}),
-            &outcome,
-        );
+        let response = outcome_to_response("show", &json!({"result": "princ_stress1"}), &outcome);
         assert_eq!(response["ok"], false);
         assert_eq!(response["error_kind"], "nonexistent_result");
         assert!(
-            response["error"].as_str().unwrap().contains("princ_stress1"),
+            response["error"]
+                .as_str()
+                .unwrap()
+                .contains("princ_stress1"),
             "error should name the offending result: {response}"
         );
     }
