@@ -455,8 +455,11 @@ clarifying tool semantics and decision-making in the prompt."""
         reflection=reflection_config,
     )
 
+    # GEPA's reflective mutation expects the seed_candidate to be a string
+    # (the instruction/system_prompt), not a dict. Pass the system prompt
+    # directly; step_cap and tools are constant during optimization.
     gepa_result = optimize_anything(
-        seed_candidate=seed_artifact,
+        seed_candidate=seed_artifact["system_prompt"],
         evaluator=evaluator,
         objective=objective,
         background=background,
@@ -468,6 +471,15 @@ clarifying tool semantics and decision-making in the prompt."""
     if not best_artifact:
         logger.warning("GEPA did not find a better candidate; using baseline")
         best_artifact = driver._DEFAULT_SYSTEM_PROMPT
+
+    # GEPA returns the system_prompt string; wrap it back into a dict with
+    # step_cap and tools for consistent serialization and seeding future runs.
+    if isinstance(best_artifact, str):
+        best_artifact = {
+            "system_prompt": best_artifact,
+            "step_cap": 8,
+            "tools": seed_tools,
+        }
 
     best_result = evaluate_artifact_detailed(
         best_artifact,

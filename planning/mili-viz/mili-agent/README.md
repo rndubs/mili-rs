@@ -51,6 +51,7 @@ Results in `data/posttraining/gepa-runs/`. Check `best_result.json` for metrics.
 
 ## Related
 
+- **`python/mili-llm-bench/src/mili_llm_bench/gepa_integration.py`** — GEPA optimization loop implementation
 - **CLAUDE.md** — Project setup and parity test instructions
 - **`reference/baseline-setup-guide.md`** — Step-by-step environment setup
 - **`reference/functiongemma-debug-report.md`** — Tool-calling failure analysis
