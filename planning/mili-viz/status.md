@@ -931,27 +931,37 @@ Each row flips to ✅ when its gating test lands.
       no-pygriz laptop. **The v0 acceptance gate is closed; the L4
       decision tree (baseline.md §"After v0") becomes the next
       trackable surface.**
-- [ ] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** 🏗️ **In progress.**
+- [ ] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** 🔧 **DEBUGGING REQUIRED.**
       Implements `LlamaCppProvider` (approach a2: raw-completion + manual parsing)
-      backing `llama-server` (llama.cpp); pins BF16 full-precision quantization
-      for the v0 baseline number; lazy-health-check + per-provider instance
-      (keeps server alive across scenarios); writes `config.yaml`+`rollouts.jsonl`+
-      `report.md` under a versioned run directory. CLI integrates into
-      `SUPPORTED_PROVIDERS` + `build_factories`. Unit tests cover lazy imports,
-      factory builder, provider response normalization, and the CLI --help.
-      Gating: **one v0 baseline number published** (50 scenarios, up to 8 turns,
-      120s per-turn timeout on CPU) in `planning/mili-viz/agent-local-llm-baseline-results.md`
-      + the failure-mode breakdown required by baseline.md §"After v0" §4 to pick
-      the next branch (L3 adequate, L0/L1 mostly green, mid-range, or L0/L1 mostly red).
-      Discharges the promised "actual v0 number with a real local LLM" — not the
-      mock baseline. Expected PR size: ~500 LOC (provider + integration + tests).
+      backing `llama-server` (llama.cpp); pins BF16 full-precision quantization;
+      lazy-health-check + per-provider instance (keeps server alive across scenarios);
+      CLI integrates into `SUPPORTED_PROVIDERS` + `build_factories`. Unit tests cover
+      lazy imports, factory builder, provider response normalization, CLI --help.
+      
+      **v0 baseline result: 0% L3 pass-rate (0/50 scenarios).** The model generates
+      malformed tool calls that cannot be parsed:
+      ```
+      <start_function_call>call:load
+      <start_function_call><start_function_response>
+      [repeating corruption...
+      ```
+      This is **not** a provider bug. The issue is a mismatch between the FunctionGemma
+      prompt format we constructed (reverse-engineered from the model card) and what the
+      model actually outputs. Detailed debugging report at
+      `planning/mili-viz/functiongemma-debug-report.md` and
+      `planning/mili-viz/functiongemma-debug-prompts.md`.
+      
+      **Next: Debug the prompt format.** The model is outputting `<start_function_response>`
+      tags (which should only come from the system) and entering loops. Either the prompt
+      structure is wrong, or the model card documentation is incomplete. See debug
+      documents for hypothesis list and test commands.
 
-### Post-v0 branches (decided after the PR-6 number is in hand)
+### Post-v0 branches (pending PR-6 debugging fix)
 
 The decision tree in
 [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §"After
-v0". Not yet trackable as checkboxes — which branch we take depends
-on the failure-mode breakdown.
+v0". Pending: PR-6 debug to fix the FunctionGemma tool-calling issue
+and get a valid v0 baseline number.
 
 - 🔎 **If L3 already adequate** → declare the
   [`posttraining-dataset.md`](posttraining-dataset.md) Stage 8

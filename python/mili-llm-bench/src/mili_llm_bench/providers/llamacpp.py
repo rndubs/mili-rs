@@ -247,46 +247,34 @@ class LlamaCppProvider:
         return "".join(prompt_parts)
 
     def _format_tool_declaration(self, tool: dict[str, Any]) -> str:
-        """Format a single tool for the <start_function_declaration> block."""
-        parts = ["<start_function_declaration>\n"]
-        parts.append(f"declaration:{tool.get('name', '')}\n")
+        """Format a single tool for the <start_function_declaration> block.
 
-        # Description
+        FunctionGemma expects the format:
+        <start_function_declaration>declaration:toolname{
+        description:<escape>desc<escape>,
+        parameters:{param1:<escape>type1<escape>,param2:<escape>type2<escape>}
+        }<end_function_declaration>
+        """
+        name = tool.get('name', '')
         desc = tool.get("description", "")
-        parts.append(f"{{description:<escape>{desc}<escape>\n")
 
-        # Parameters
+        parts = [f"<start_function_declaration>declaration:{name}{{\n"]
+        parts.append(f"description:<escape>{desc}<escape>")
+
+        # Format parameters as simple key:type pairs
         input_schema = tool.get("input_schema", {})
-        if input_schema:
-            properties = input_schema.get("properties", {})
-            required = input_schema.get("required", [])
+        properties = input_schema.get("properties", {})
 
-            if properties:
-                parts.append(",parameters:{\n")
-                parts.append("properties:{ ")
+        if properties:
+            parts.append(",\nparameters:{")
+            param_parts = []
+            for param_name, param_schema in properties.items():
+                param_type = param_schema.get("type", "string")
+                param_parts.append(f"{param_name}:<escape>{param_type}<escape>")
+            parts.append(",".join(param_parts))
+            parts.append("}")
 
-                prop_parts = []
-                for prop_name, prop_schema in properties.items():
-                    prop_type = prop_schema.get("type", "string").upper()
-                    prop_desc = prop_schema.get("description", "")
-                    prop_parts.append(
-                        f"{prop_name}:{{description:<escape>{prop_desc}<escape>,type:<escape>{prop_type}<escape>}}"
-                    )
-                parts.append(", ".join(prop_parts))
-                parts.append(" }")
-
-                if required:
-                    parts.append(",\n")
-                    parts.append("required:[")
-                    parts.append(
-                        ",".join(f"<escape>{r}<escape>" for r in required)
-                    )
-                    parts.append("]\n")
-
-                parts.append("}\n")
-
-        parts.append("}\n")
-        parts.append("<end_function_declaration>")
+        parts.append("\n}<end_function_declaration>\n")
         return "".join(parts)
 
     def _convert_to_openai_tool(self, tool: dict[str, Any]) -> dict[str, Any]:

@@ -35,7 +35,7 @@ dev = [
 # always-on harness tests run with FakeDispatcher and do NOT require
 # this extra.
 pygriz = [
-  "pygriz",
+  "pygriz @ file:///Users/rwhit/Workspace/mili-rs/python/pygriz",
 ]
 # Optional — needed only by `mili_llm_bench.providers.functiongemma`.
 # `accelerate` is the documented runtime for FunctionGemma-270M-it per
