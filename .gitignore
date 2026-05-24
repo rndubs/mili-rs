@@ -31,3 +31,5 @@ python/**/src/griz/_proto/
 #.idea/
 
 data/posttraining/
+!data/posttraining/baselines/
+!data/posttraining/baselines/**
