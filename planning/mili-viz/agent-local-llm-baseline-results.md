@@ -44,6 +44,18 @@ After fixing these issues: **28% of scenarios now generating tool calls** (L1-L2
 | **parse_error** | 7 | 14% | Some tools not triggered (`load`, `material`, `show-primal`) |
 | **dispatch_error** | 1 | 2% | Tool execution failed |
 
+### After Type Coercion (v0-llamacpp-type-coercion)
+**Major improvement:** 80% of schema_mismatch fixed via automatic type coercion!
+
+| Mode | Count | % | Change |
+|------|-------|---|---|
+| **step_cap_hit** | 22 | 44% | ↔️ unchanged |
+| **dispatch_error** | 17 | 34% | ↑ +16 (from schema_mismatch) |
+| **parse_error** | 7 | 14% | ↔️ unchanged |
+| **schema_mismatch** | 4 | 8% | ↓ -16 (16/20 fixed) |
+
+**Key insight:** Type coercion converted 16 scenarios from "type mismatch" to "semantic validation", exposing argument-level errors (e.g., invalid material IDs, out-of-range state values) that were previously masked. This is **good progress** — the model's arguments are now structurally correct.
+
 ### By Intent (Parse Errors)
 - `load`: 2 failures
 - `material`: 2 failures  
