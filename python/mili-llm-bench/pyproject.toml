@@ -52,6 +52,13 @@ functiongemma = [
 anthropic = [
   "anthropic>=0.40",
 ]
+# Optional — needed only by `mili_llm_bench.providers.llamacpp`. The
+# runtime requirement is that `llama-server` is on $PATH (from
+# https://github.com/ggml-org/llama.cpp). The Python extra is empty
+# (no package deps), but requests is needed for HTTP calls.
+llamacpp = [
+  "requests>=2.31",
+]
 
 [project.scripts]
 mili-llm-bench = "mili_llm_bench.cli:main"
