@@ -181,6 +181,22 @@ Sources: `Src/viewer.c usage_text[]` (terse NL ↔ command pairs),
 - Each intent declares its **postcondition kind** (see Stage 4) so
   scenarios are checkable by construction, not retrofitted.
 
+**Two sources of truth, intersected.** `reference/griz/Src/interpret.c`
+documents what griz *can do* — the full ~318-keyword vocabulary plus
+prose from `usage_text[]` and the manual. The model can't actually
+execute any of those directly; what it can call is enumerated in
+`data/posttraining/grammar/tools.json` (~16 typed tools, derived from
+`crates/mili-viz-proto/proto/mili_viz.proto` via
+`mili-llm-bench derive-schemas` — source is `TOOL_DESCRIPTIONS` in
+`python/mili-llm-bench/src/mili_llm_bench/schemas.py`). Each tool
+entry carries `{name, description, input_schema, output_schema}` and
+is the **executable surface**. The v1 intent catalog is the filtered
+intersection: only intents whose canonical command maps to a name in
+`tools.json` ship in the v1 corpus. Griz commands without a typed-tool
+counterpart wait for `griz_raw` fallback coverage or future proto
+extension — they are *vocabulary* the model must understand for
+breadth, not behavior we can teach it to reliably perform.
+
 ### Stage 3 — Scenario synthesis over fixtures (no dependency)
 
 Fixtures (`reference/mili/test/xmilics/`): `bar1`, `bar5`, `basic2`,
@@ -249,17 +265,37 @@ Post-condition kinds (closed set, declared by the intent):
 The only interface-dependent stage.
 
 - For each scenario, teacher (Claude API, or strong local 7–14B)
-  proposes K candidate command sequences at temperature, under
-  grammar-constrained decoding where the teacher supports it.
+  proposes **K=3 candidate command sequences** at temperature.
+  Grammar-constrained decoding applies only to local teachers that
+  support GBNF (vLLM, llama.cpp); Claude uses its native tool-use
+  API, so GBNF is a no-op there.
 - Each candidate is run through the **full L0–L3 verifier with the
   real `GrizSession`**. All candidates (pass and fail) are written as
   canonical rollout records — failures are not discarded; they are
   the negative half of the preference/RL projection.
 - `reset()` between candidates keeps rollouts cheap and independent.
-- **Budget gate before bulk run:** cost ≈ scenarios × paraphrases ×
-  K × teacher token price. Estimate and cap *before* the full sweep;
-  run a 200-scenario pilot first, inspect tier distribution, then
-  decide volume (open Q, `agent-local-llm-posttraining.md` §5).
+- **Pilot first, full sweep second.** Run 50 scenarios × ~3
+  paraphrases × K=3 ≈ 450 calls as the pilot. Inspect tier
+  distribution and cost; only then commit to the ~200-scenario full
+  sweep (~1800 calls). Hard budget cap: $50 for pilot, $200 for full
+  sweep — re-plan (smaller K, cheaper teacher, fewer paraphrases) if
+  the pilot extrapolates over those.
+- **Claude → FG canonical conversion** (no information loss; both are
+  JSON tool-call envelopes). Pin in the teacher rollout writer:
+  - Anthropic `{"type": "tool_use", "id": "...", "name": "<n>",
+    "input": {...}}` →
+    FG `{"type": "function", "function": {"name": "<n>",
+    "arguments": {...}}}`. Drop Anthropic's per-call `id` (FG doesn't
+    use it; if a future RL pass needs call-IDs, regenerate them on
+    re-projection rather than baking Anthropic's into the corpus).
+  - Anthropic `{"role": "tool_result", "tool_use_id": "...", "content": "..."}` →
+    FG `{"role": "tool", "name": "<resolved-from-prior-tool_use>",
+    "content": "<stringified content>"}`. Resolve the name by
+    matching `tool_use_id` to the preceding `tool_use` block in the
+    same message stream.
+  - Pin a round-trip unit test asserting that a fixed Anthropic
+    transcript → FG → re-rendered prompt matches the FG inference
+    prompt byte-for-byte.
 
 ### Stage 6 — Dataset assembly, dedup, splits (no dependency)
 
@@ -271,11 +307,76 @@ The only interface-dependent stage.
   row. Held-out eval = whole `(intent, fixture)` cells never seen in
   train, so eval measures generalization, not memorization. Reserve
   ≥1 fixture (candidate: `shell_mat2` or `bar5`) entirely for eval.
-- Balance: cap records per `(intent, fixture)` so high-yield easy
-  intents don't swamp the compositional tail.
+- **Balance + per-intent floor.** Cap records per `(intent, fixture)`
+  so high-yield easy intents don't swamp the compositional tail, **and
+  enforce a ≥40-row-per-intent floor** for the v1 SFT split. The four
+  0%-L3 intents at floor (`material`, `select`, `clrsel`,
+  `view-reset`) are the cheapest source of lift; if rejection sampling
+  on `max_tier>=3` leaves any intent below 40 rows, oversample —
+  re-roll the teacher with fresh paraphrases or temperature for that
+  intent until the floor is met. Failing to enforce this is how you
+  get a model that improves on what was already easy and leaves the
+  zero-rate intents at zero.
+- **Tools-array format conversion.** Records emitted to
+  `sft/*.jsonl` carry `tools` in the FunctionGemma /
+  OpenAI shape `{"type": "function", "function": {"name",
+  "description", "parameters"}}`, **not** the W1
+  `{name, description, input_schema, output_schema}` shape stored in
+  `data/posttraining/grammar/tools.json`. Reuse the existing
+  conversion in `providers/llamacpp.py::_convert_to_openai_tool`
+  (lift to a shared helper in `mili_llm_bench.tool_format` so train
+  and inference call the same function and can't drift). The
+  `output_schema` field is dropped — FunctionGemma's training format
+  has no slot for it.
 - Emit `sft/{train,val}.jsonl`, `pref/{train,val}.jsonl`,
   `eval/heldout.jsonl`, plus a `dataset_card.md` (counts, tier
-  distribution, fixture/intent coverage matrix, known gaps).
+  distribution, fixture/intent coverage matrix, per-intent row counts
+  vs. floor, known gaps).
+
+### Stage 6.5 — Dataset smoke test (Claude validation; no dependency once Stage 5 lands)
+
+**Catch data bugs before they look like model bugs.** Before kicking
+off SFT, run a strong teacher (Claude) over the full assembled
+scenario set as a data-quality gate. The verifier from Stage 4 grades
+each scenario; the *failures* are the signal — they point at *data*
+problems, not model problems:
+
+* `wrong_*` failures (`wrong_final_state`, `wrong_result`,
+  `wrong_selection`, `wrong_materials`, `wrong_range`): the
+  scenario's postcondition or its grounded fixture facts disagree
+  with what the canonical command actually produces. Either the
+  postcondition was synthesized from a stale fixture fact, or the
+  prose paraphrase changed the intent in a way the postcondition no
+  longer captures.
+* `dispatch_error` failures with a real teacher: the canonical
+  command path isn't wired through the typed-tool surface (e.g.,
+  missing pygriz method, missing dispatcher arm) — fix the
+  dispatcher or drop the intent from the v1 spine.
+* `wrong_result` / `wrong_*` clustered by paraphrase variant:
+  the paraphrase introduced ambiguity ("color the mesh" vs. "color
+  the mesh by stress" — only the second has a grounded
+  postcondition). Tighten the paraphrase template or drop the
+  ambiguous variant.
+* Persistent `step_cap_hit` against Claude: the scenario requires
+  more steps than `step_cap` permits, or the intent decomposition
+  is wrong. Re-author or split.
+
+**Gate threshold.** The v0 bootstrap ceiling under Claude is 92% L3
+(see §5 below). A synthesized corpus should clear **≥85% L3 under
+Claude with native tool-use** before SFT consumes it. (No GBNF
+qualifier — Claude doesn't support grammar-constrained decoding;
+the gate is a data-quality check, not a decoding-format check.)
+Below 85%, the data is broken in a way SFT will faithfully *learn*
+— the rejection-sampling SFT filter (`max_tier >= 3`) will throw out
+the salvageable rollouts and over-fit to whatever bad-postcondition
+artifact remains.
+
+Output: a triage file `dataset_card.smoke.md` listing
+`(scenario_id, failure_mode, observed, expected, claude_calls)` rows
+for the failures. Hand-fix or drop bad scenarios; re-run until the
+gate clears. The runner is the same harness as Stage 4/7 with a
+different consumer — no new code beyond a `scripts/smoke-dataset.py`
+wrapper.
 
 ### Stage 7 — Eval harness (no dependency; same code as Stage 4)
 
@@ -323,14 +424,104 @@ Python oracle this depends on.
 | **Now** (no interface) | 1, 2, 3, 4 (vs. Mock), 6, 7 scaffolding | none |
 | **Now** | Stage 8 pre-experiment harness wiring | none |
 | **Interface lands** | swap Mock → real `GrizSession` adapter; run Stage 5 pilot (200 scenarios) | `load/execute/query/snapshot/reset` in-process |
-| **After pilot + budget OK** | full Stage 5 sweep → Stage 6 assemble → Stage 7 eval → Stage 8 gate | teacher API budget |
+| **After pilot + budget OK** | full Stage 5 sweep → Stage 6 assemble → **Stage 6.5 Claude data smoke test** → Stage 7 eval → Stage 8 gate | teacher API budget |
 
 Because stages 1–4/6–7 are interface-independent and verifier-swap is
 a one-line adapter change, "hit the ground running" means: the only
 work remaining when the interface arrives is the adapter + the
 (already-scripted) teacher sweep.
 
-## 5. Open questions (carried, not resolved here)
+## 5. Baseline numbers (pinned, 2026-05-24)
+
+Pre-SFT baseline against the 50-scenario bootstrap eval
+(`data/posttraining/eval/bootstrap.jsonl`) under the v0 harness:
+`step_cap=8`, `temperature=0.0`, `max_new_tokens=256`,
+`per_turn_timeout_s=120`,
+`system_prompt_sha256=9f36d0deb5e98a89`. Real fixtures (the bench
+fixture resolver maps the bare name → absolute `.A` path with loud
+failure on miss; runs prior to **2026-05-24** ran against an empty
+M1 stub corpus and are not comparable). Auto-terminate is on (driver
+breaks the loop as soon as the verifier grades L3).
+
+| Run | Provider | Model | L3 | step intent | mean turns | Notes |
+|---|---|---|---|---|---|---|
+| **v4 pre-GEPA floor** | llamacpp | functiongemma-270m-it-GGUF:BF16 | **32%** (16/50) | 17% (1/6) | 5.00 | pre-promotion `tools.json` (`tools_sha256=cdda3677…`) — historical |
+| **v5 floor** (current default) | llamacpp | functiongemma-270m-it-GGUF:BF16 | **40%** (20/50) | — | — | post-promotion `tools.json` (`tools_sha256=27ffbd0e…`) — reproduces GEPA |
+| **v4 ceiling** | anthropic | claude-sonnet-4-5 | **92%** (46/50) | 100% (6/6) | 1.18 | pre-promotion tools (re-measure planned) |
+
+**Tools.json promotion (2026-05-24).** 100 GEPA iterations (Claude Opus
+as proposer, medium reflection) found that the system prompt didn't
+need changes — every prompt variant lost to the baseline — but the
+tool descriptions for the four hardest intents (`clrsel`, `colormap`,
+`material`, `query`) benefited from structured
+Args/Usage-rules/Examples blocks with explicit instruction → arguments
+mappings. Those four rewrites are now promoted into
+`schemas.py:TOOL_DESCRIPTIONS` and `data/posttraining/grammar/tools.json`
+(re-derived; `tools_sha256` bumped from `cdda3677…` →
+`27ffbd0e…`). The other 14 descriptions are byte-identical to the
+pre-GEPA defaults. A canonical re-run of FunctionGemma with the
+promoted tools reproduces L3 0.40 (`v5-llamacpp-promoted-tools`),
+confirming the promotion is faithful.
+
+**What the v5 floor still doesn't fix.** Failure-mode shift v4→v5:
+`step_cap_hit` 28→21, `schema_mismatch` 3→4, `parse_error` 2→3 —
+the lift came from tightening cases where the model picked the
+right tool with confused args. Intents where the model picks the
+*wrong* tool entirely (`material`/`select`/`view-reset` at 0% L3)
+are unmoved. The 52-point gap to the Claude ceiling is what SFT/RL
+must close — GEPA can't teach intent→tool mapping at 270M scale.
+
+**Re-baselining note.** The Claude ceiling (92%) was measured on the
+pre-promotion tools — it should re-measure essentially identical
+(Claude doesn't need the GEPA scaffolding), but the run is cheap and
+worth doing when the next eval cycle kicks off, just for a clean
+matched-tools comparison.
+
+Artifact lineage:
+* GEPA optimization run: `data/posttraining/gepa-runs/gepa-run-20260524-135543/`
+* v5 reproduction (promoted tools, default config): `data/posttraining/runs/v5-llamacpp-promoted-tools/`
+
+Per-intent (FunctionGemma v4): load 83%, set-state 83%, colormap
+75%, show-derived 25%, show-primal/step 17%,
+material/select/clrsel/view-reset/compound 0%.
+
+Per-intent (Claude v4): load/set-state/select/colormap/material/
+show-primal/step/view-reset all 100%, clrsel 50%, show-derived 75%,
+compound 0%. The 4 residual Claude failures are real (not stub
+artifacts): 2× `clrsel` `dispatch_error` (missing
+`selection.clear_all()` in pygriz), 2× `wrong_result` (Claude
+doesn't know "effective stress" → `eff_stress` symbol — a
+domain-vocab gap addressable in the tool description).
+
+Artifacts:
+* floor: `data/posttraining/runs/v4-llamacpp-realfixtures-fullresolve/`
+* ceiling: `data/posttraining/runs/v4-anthropic-realfixtures/`
+
+**Success criteria for v1 SFT.** Close at least half the
+FunctionGemma↔Claude gap on the same bootstrap eval (32% → ≥62% L3)
+before committing to a full posttraining cycle. Concretely:
+
+* **Floor regression tripwire:** any SFT'd model that scores below
+  ~40% L3 (the GEPA-without-fine-tune ceiling) is not earning its
+  weight — prompt engineering alone gets you that. Investigate before
+  iterating on hyperparameters; the SFT recipe is likely overfitting
+  to a paraphrase artifact or producing broken termination behavior.
+* **Target after SFT pilot:** ≥62% L3 (half the gap), with
+  per-intent rates ≥50% for the four currently-zero intents
+  (material, select, clrsel, view-reset). The zero-rate intents are
+  the cheapest source of lift; failing to move them means SFT is
+  teaching the wrong thing.
+* **Stretch (post-SFT):** ≥80% L3 before considering DPO/GRPO. If
+  SFT alone closes ≥80% of the gap, DPO is incremental rather than
+  necessary.
+
+These numbers also pin what "Stage 8 pre-experiment gate" means in
+practice — Stage 8's purpose is to confirm there is room for
+post-training to add value. With a 60-point gap between floor and
+ceiling, the answer is yes; this section is what makes that answer
+falsifiable on future re-runs.
+
+## 6. Open questions (carried, not resolved here)
 
 - Grammar robustness: how much of `interpret.c`'s 318-site dispatch
   is mechanically extractable vs. needs hand-seeding (the §5 open Q).

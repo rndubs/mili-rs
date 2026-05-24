@@ -6,7 +6,7 @@ up to ``step_cap`` times, surfaces driver-level stops to the W3
 verifier via the synthetic ``"stop:<reason>"`` ``system`` message
 convention, calls ``verifier.verify``, and emits one canonical rollout
 record per scenario in the
-``planning/mili-viz/posttraining-dataset.md`` §1 shape.
+``planning/mili-viz/mili-agent/posttraining-dataset.md`` §1 shape.
 
 Three load-bearing design pins:
 
@@ -69,13 +69,21 @@ _DEFAULT_SYSTEM_PROMPT = (
     "For state-changing tools (set_state): compare 'requested_state' with 'state' to verify completion.\n"
     "Do not repeat the same tool call with identical arguments if you already received a successful response.\n"
     "Only call a tool again if you need to verify something or if the previous response indicated an error (ok: false).\n\n"
+    "JSON TOOL CALL FORMAT (REQUIRED):\n"
+    "Emit tool calls ONLY as valid JSON objects with 'name' and 'arguments' keys:\n"
+    "{\"name\": \"tool_name\", \"arguments\": {\"param1\": value1, \"param2\": value2}}\n"
+    "Do NOT wrap in markdown, comments, or extra text. Emit only the raw JSON object.\n"
+    "Ensure all argument values match their expected types (strings quoted, numbers unquoted, booleans as true/false).\n\n"
     "KEY TOOL MAPPINGS:\n"
-    "- Load/open a database: use `load` with root parameter (e.g., root='cylinder')\n"
-    "- Display/show/color a result: use `show` with result parameter (e.g., result='vx')\n"
+    "- Load/open a database: use `load` with root parameter (e.g., {\"name\": \"load\", \"arguments\": {\"root\": \"cylinder\"}})\n"
+    "- Display/show/color a result: use `show` with result parameter (e.g., {\"name\": \"show\", \"arguments\": {\"result\": \"vx\"}})\n"
     "- Enable/disable materials: use `material` with enable (true/false) and material/class_name\n"
     "- Select elements: use `select` or `clrsel` (clear selection)\n"
     "- Change states: use `set_state` or `step`\n"
-    "- Adjust view: use `colormap`, `view`, `named_view`, `legend`"
+    "- Adjust view: use `colormap`, `view`, `named_view`, `legend`\n\n"
+    "TASK COMPLETION:\n"
+    "When you have completed ALL sub-tasks in the user's request, emit the final text message and STOP.\n"
+    "Do not call extra verification tools. Do not loop. If no more actions are needed, just send the final message."
 )
 
 
@@ -173,7 +181,8 @@ def run_one_scenario(
 
         turns: list[TurnResult] = []
         start = time.monotonic()
-        completed_with_final_text = False
+        terminated_cleanly = False
+        postcondition = scenario.postcondition.to_json()
 
         for step_index in range(config.step_cap):
             turn = harness.run_turn(
@@ -191,14 +200,21 @@ def run_one_scenario(
             turns.append(turn)
 
             if turn.kind == "final_text":
-                completed_with_final_text = True
+                terminated_cleanly = True
                 break
             if turn.kind == "error" and turn.error_kind == "timeout":
                 _append_stop(messages, "timeout")
                 break
-            # tool_calls turn — keep looping.
+            # tool_calls turn — keep looping unless the postcondition
+            # is already met. Weak open-weight models often emit
+            # repeat-the-call-N-times trajectories and never produce a
+            # final_text; this auto-terminate keeps the harness from
+            # converting a correct first call into a step_cap_hit.
+            if verifier.verify(messages, postcondition).max_tier == 3:
+                terminated_cleanly = True
+                break
 
-        if not completed_with_final_text and not any(
+        if not terminated_cleanly and not any(
             t.kind == "error" and t.error_kind == "timeout" for t in turns
         ):
             # Loop exhausted ``step_cap`` without ``final_text``.

@@ -37,13 +37,15 @@ mod agent;
 mod clip;
 mod flight;
 mod geometry;
+mod llamacpp_agent;
 mod raw;
 pub use agent::{
-    encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, MockAgent, TurnSnapshot,
-    AGENT_MOCK_ORIGIN,
+    encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, DispatchOutcome, MockAgent,
+    TurnSnapshot, AGENT_MOCK_ORIGIN,
 };
 pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
+pub use llamacpp_agent::LlamaCppAgent;
 pub use raw::{parse_line, parse_raw, to_raw};
 
 /// Conventional Flight ticket for the result catalog
@@ -612,7 +614,7 @@ impl VizService {
     /// seq. This is the single internal entry point shared by typed
     /// `Execute`, the `raw` escape hatch, and (at M6) the agent loop,
     /// which is what makes Layer-0 ≡ raw hold by construction.
-    fn dispatch(&self, cmd: pb::command::Cmd, origin: &str) -> u64 {
+    fn dispatch(&self, cmd: pb::command::Cmd, origin: &str) -> agent::DispatchOutcome {
         let mut s = self.inner.session.lock().unwrap();
         s.seq += 1;
         let seq = s.seq;
@@ -621,11 +623,11 @@ impl VizService {
             seq,
             origin_client_id: origin.to_string(),
             kind: kind as i32,
-            payload: Some(payload),
+            payload: Some(payload.clone()),
         };
         // `send` errs only when there are no receivers; that is fine.
         let _ = self.inner.tx.send(delta);
-        seq
+        agent::DispatchOutcome { seq, payload }
     }
 }
 
@@ -1062,7 +1064,7 @@ impl MiliViz for VizService {
 
         let mut last = 0;
         for c in cmds {
-            last = self.dispatch(c, &origin);
+            last = self.dispatch(c, &origin).seq;
         }
         Ok(Response::new(pb::CommandReply {
             ok: true,

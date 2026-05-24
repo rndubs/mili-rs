@@ -32,6 +32,12 @@ dependencies = [
 dev = [
   "pytest",
 ]
+# Optional — needed only by `mili_llm_bench.gepa_integration.run_gepa_optimization()`.
+# The baseline `run` command works without this extra.
+gepa = [
+  "gepa>=0.1.1",
+  "litellm>=1.86.0",
+]
 # Optional — needed only by `mili_llm_bench.dispatchers.pygriz`. The
 # always-on harness tests run with FakeDispatcher and do NOT require
 # this extra.

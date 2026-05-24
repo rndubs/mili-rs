@@ -112,6 +112,46 @@ def test_prompt_caching_is_set_on_system_and_tools() -> None:
     assert "cache_control" not in body["tools"][0]
 
 
+def test_convert_tools_strips_top_level_oneof_allof_anyof() -> None:
+    """Anthropic's tool API rejects ``oneOf``/``allOf``/``anyOf`` at the
+    schema root with a 400 ``invalid_request_error``. The ``view`` tool
+    in our tools.json uses a top-level ``oneOf`` for the "exactly one of
+    rotate/translate/scale/zoom/set/reset" constraint, which the
+    bench-side dispatcher still enforces via jsonschema. The converter
+    must drop these keys on the wire."""
+    tools = [
+        {
+            "name": "view",
+            "description": "camera",
+            "input_schema": {
+                "type": "object",
+                "properties": {"reset": {"type": "boolean"}},
+                "additionalProperties": False,
+                "oneOf": [{"required": ["reset"]}],
+            },
+        },
+        {
+            "name": "load",
+            "description": "load",
+            "input_schema": {
+                "type": "object",
+                "properties": {"root": {"type": "string"}},
+                "allOf": [{"required": ["root"]}],
+                "anyOf": [{"required": ["root"]}],
+            },
+        },
+    ]
+    converted = _convert_tools(tools)
+    for tool in converted:
+        schema = tool["input_schema"]
+        assert "oneOf" not in schema
+        assert "allOf" not in schema
+        assert "anyOf" not in schema
+    # Non-combinator keys survive — the converter is surgical.
+    assert converted[0]["input_schema"]["type"] == "object"
+    assert converted[0]["input_schema"]["properties"] == {"reset": {"type": "boolean"}}
+
+
 def test_anthropic_message_conversion_round_trips_tool_use() -> None:
     """A canonical ``assistant`` tool_calls turn → Anthropic tool_use
     blocks; the matching ``tool`` reply → a user message carrying a

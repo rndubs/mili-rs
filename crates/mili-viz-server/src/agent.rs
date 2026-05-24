@@ -51,10 +51,26 @@ pub trait AgentBackend: Send + Sync + 'static {
 
 /// Allocates the next `StateDelta.seq`.
 pub(crate) type SeqAllocator = Arc<dyn Fn() -> u64 + Send + Sync>;
-/// Dispatches a typed command through `VizService::dispatch`.
-pub(crate) type Dispatcher = Arc<dyn Fn(pb::command::Cmd, &str) -> u64 + Send + Sync>;
+/// Dispatches a typed command through `VizService::dispatch` and carries
+/// the resulting structured payload back, so backends can determine
+/// real success (e.g. `Cmd::Show` returns `Payload::Result` with
+/// `geometry: None` when the requested svar can't be resolved — the
+/// dispatch broadcast still went out, but the user-visible action
+/// failed).
+pub(crate) type Dispatcher = Arc<dyn Fn(pb::command::Cmd, &str) -> DispatchOutcome + Send + Sync>;
 /// Folds an emitted agent event into the running per-turn transcript.
 pub(crate) type EventRecorder = Arc<dyn Fn(&str, &pb::agent_event::Ev) + Send + Sync>;
+
+/// What a `Dispatcher` returns: the broadcast seq (for tool-end
+/// correlation with the `StateDelta` stream) plus the structured
+/// payload `apply()` produced so the backend can inspect real outcome
+/// (e.g. did `show` actually bind to a result, did `set_state` land
+/// where it was asked to, etc.).
+#[derive(Debug, Clone)]
+pub struct DispatchOutcome {
+    pub seq: u64,
+    pub payload: pb::state_delta::Payload,
+}
 
 /// The handle the backend uses to talk to the server. Owns the
 /// broadcast bus, the dispatch closure, the cancel flag, and the
@@ -98,9 +114,12 @@ impl AgentTurnCtx {
     /// `VizService::dispatch` seam (`client.md` §"Design principle"
     /// — every agent action is an ordinary `Command` producing an
     /// ordinary `StateDelta` tagged with the agent's
-    /// `origin_client_id`). Returns the broadcast `StateDelta.seq`
-    /// so the matching `AgentToolEnd` can carry it.
-    pub fn dispatch(&self, cmd: pb::command::Cmd) -> u64 {
+    /// `origin_client_id`). Returns a [`DispatchOutcome`] carrying the
+    /// broadcast `StateDelta.seq` (for `AgentToolEnd` correlation)
+    /// AND the structured payload so the backend can inspect what
+    /// actually happened (e.g. a `Cmd::Show` whose result wasn't
+    /// resolvable returns a `Payload::Result` with `geometry: None`).
+    pub fn dispatch(&self, cmd: pb::command::Cmd) -> DispatchOutcome {
         (self.dispatcher)(cmd, &self.origin_client_id)
     }
 
@@ -223,8 +242,8 @@ impl AgentBackend for MockAgent {
             // the tag + the matching delta_seq round-trip).
             let call_id = format!("{}-call-1", ctx.turn_id);
             ctx.emit_tool_begin(&call_id, "ran: state 1", "state 1");
-            let seq = ctx.dispatch(pb::command::Cmd::SetState(pb::SetState { state: 1 }));
-            ctx.emit_tool_end(&call_id, true, "state=1", seq);
+            let outcome = ctx.dispatch(pb::command::Cmd::SetState(pb::SetState { state: 1 }));
+            ctx.emit_tool_end(&call_id, true, "state=1", outcome.seq);
         })
     }
 }

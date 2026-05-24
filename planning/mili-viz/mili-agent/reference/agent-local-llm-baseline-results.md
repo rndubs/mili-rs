@@ -102,31 +102,109 @@ The integration fixes from deep-research-report-3.md were correct:
 **Commit:** 4ecf41c
 **Status:** Baseline running (v0-llamacpp-enhanced-prompt) - awaiting results
 
+## GEPA Optimization Loop (Phase 2 Upgrade)
+
+### Overview
+GEPA (Grand Ensemble of Prompts Architecture) now optimizes over **three tunable knobs**:
+1. **system_prompt** — Instructions and tool guidance
+2. **step_cap** — Maximum steps before timeout (was fixed at 8)
+3. **tools[]** — Tool definitions (descriptions + schemas)
+
+### Why This Matters
+Previous GEPA runs optimized only the system prompt, but analysis showed:
+- Run 1 (baseline prompt) → 0.2533 score
+- Run 2 (highly optimized prompt) → **0.2533 score** (identical!)
+
+This plateau indicates the real bottlenecks are **architectural**, not prompt-based:
+- **42% dispatch_error** — Tool execution failures (not prompt issue)
+- **40% step_cap_hit** — Model needs more steps (increase step_cap!)
+- **0% L3 pass rate** — Model can't complete end-to-end tasks
+
+By expanding the artifact surface to include step_cap and tool definitions, GEPA can now:
+- **Increase step budget** (8 → 12–16) to allow more exploration
+- **Improve tool descriptions** to guide better tool selection
+- **Refine tool schemas** to reduce dispatch errors
+
+### Continuous Improvement Loop
+
+Output directories are automatically timestamped (`gepa-run-YYYYMMDD-HHMMSS`), enabling automatic discovery of previous runs.
+
+**Run 1 (baseline):**
+```bash
+llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 &
+uv run --directory python/mili-llm-bench mili-llm-bench run-gepa \
+  --scenarios data/posttraining/eval/bootstrap.jsonl \
+  --provider llamacpp \
+  --max-iterations 5 \
+  --out data/posttraining/gepa-runs
+```
+→ Creates `data/posttraining/gepa-runs/gepa-run-20260524-150000/`
+
+**Run 2 (auto-discovers Run 1, seeds from its tools):**
+```bash
+uv run --directory python/mili-llm-bench mili-llm-bench run-gepa \
+  --scenarios data/posttraining/eval/bootstrap.jsonl \
+  --provider llamacpp \
+  --max-iterations 5 \
+  --out data/posttraining/gepa-runs
+```
+→ Creates `data/posttraining/gepa-runs/gepa-run-20260524-160000/`  
+→ **Automatically finds and seeds from Run 1's `best_tools.json`**
+
+**Run 3+ (continue the loop):**
+```bash
+# Same command — each run finds the most recent previous run
+# and seeds from its tools. No manual flag needed.
+uv run --directory python/mili-llm-bench mili-llm-bench run-gepa \
+  --scenarios data/posttraining/eval/bootstrap.jsonl \
+  --provider llamacpp \
+  --max-iterations 5 \
+  --out data/posttraining/gepa-runs
+```
+
+Tool improvements automatically carry forward—**true continuous improvement loop**.
+
+### Key Files
+- **Integration:** `python/mili-llm-bench/src/mili_llm_bench/gepa_integration.py`
+- **CLI:** `python/mili-llm-bench/src/mili_llm_bench/cli.py` (run-gepa command)
+- **Baseline tools:** `data/posttraining/grammar/tools.json`
+
+### Output Structure
+After each GEPA run:
+```
+<output-dir>/
+├── best_artifact.json         # Full optimized artifact
+├── best_score.txt             # Numeric score
+├── best_result.json           # Failure mode breakdown
+├── best_tools.json            # ← Ready to seed next run
+├── best_system_prompt.txt     # ← Reference/review
+├── best_step_cap.txt          # ← Reference/review
+├── history.jsonl              # Per-iteration records
+└── metadata.json
+```
+
+---
+
 ## Next Steps (Priority Order)
 
-### 1. Type Coercion (High Impact, Low Effort)
-**Fix:** Allow string-to-int conversion in schema validation  
-**Benefit:** Resolves 20/50 schema_mismatch failures (40%)  
-**Location:** `python/mili-llm-bench/src/mili_llm_bench/verifier.py`
+### 1. Quick Win: Increase step_cap (Immediate)
+**Action:** Launch GEPA Run 2 with baseline as seed  
+**Expected:** 5–10% improvement just from increasing step budget  
+**Time:** 2–3 hours (5 iterations × ~30 min/scenario)
 
-### 2. Tool Declaration Improvements (Medium Impact, Medium Effort)  
-**Investigate:** Why `load`, `material`, `show-primal` not triggering (7 parse_error)  
-**Options:**
-- Review tool descriptions/parameters
-- Test with simpler prompts
-- Examine model output for these specific intents
+### 2. Tool Description Refinement (Run 2+)
+**Action:** GEPA iteratively improves tool descriptions based on failures  
+**Expected:** Reduce dispatch_error (42%) by clarifying tool semantics  
+**Seed:** Run 1's best_tools.json → Run 2
 
-### 3. Multi-Turn Guidance (Medium Impact, Medium Effort)
-**Issue:** Model loops on same tool (22 step_cap_hit)  
-**Options:**
-- Richer tool response shapes (not just "ok")
-- Better dispatch logic based on response content
-- Or increase step_cap to 16 if loops are valid exploration
+### 3. Switch to Claude (After GEPA Runs Complete)
+**Action:** Baseline with `--provider anthropic` to compare  
+**Expected:** 2–3x improvement (better tool caller, better reasoning)  
+**When:** Once we know FunctionGemma's ceiling
 
-### 4. Model Comparison (After above)
-Once L0/L1/L2 are optimized, consider:
-- Compare against Qwen2.5-Coder for baseline comparison
-- Assess whether FunctionGemma-270M is adequate for the task
+### 4. Model Comparison (Final)
+**Baseline:** FunctionGemma-270M results from GEPA runs  
+**Alternative:** Qwen2.5-Coder or similar (if FunctionGemma plateaus)
 
 ## Run Artifacts
 

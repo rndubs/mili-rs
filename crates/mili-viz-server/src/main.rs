@@ -21,12 +21,36 @@ use std::io::Write as _;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let addr: std::net::SocketAddr = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:50051".to_string())
-        .parse()?;
+    let mut addr_arg = "127.0.0.1:50051".to_string();
+    let mut agent_kind: Option<String> = None;
+    let mut agent_url = "http://localhost:8080".to_string();
 
-    let svc = mili_viz_server::VizService::builder().build();
+    let mut args = std::env::args().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--agent" => {
+                agent_kind = args.next();
+            }
+            "--agent-url" => {
+                agent_url = args.next().unwrap_or_default();
+            }
+            arg if !arg.starts_with("--") => {
+                addr_arg = arg.to_string();
+            }
+            _ => {}
+        }
+    }
+
+    let addr: std::net::SocketAddr = addr_arg.parse()?;
+
+    let svc = if agent_kind.as_deref() == Some("llamacpp") {
+        println!("mili-viz-server: FunctionGemma agent enabled ({agent_url})");
+        mili_viz_server::VizService::builder()
+            .agent_backend(mili_viz_server::LlamaCppAgent::with_url(&agent_url))
+            .build()
+    } else {
+        mili_viz_server::VizService::builder().build()
+    };
     let (local, handle) = mili_viz_server::serve_tcp(svc, addr).await?;
     println!("mili-viz-server (Phase 4 M6): MiliViz + Arrow Flight on tcp://{local}");
 

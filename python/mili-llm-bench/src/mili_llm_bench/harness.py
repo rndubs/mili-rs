@@ -38,16 +38,19 @@ exactly the bug the enum-identity test catches.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+logger = logging.getLogger(__name__)
+
 import jsonschema
 
 from .providers.base import LlmProvider
 from .schemas import default_artifact_path
-from .verifier import FAILURE_MODES
+from .verifier import FAILURE_MODES, _coerce_arguments
 
 # ---------------------------------------------------------------------------
 # Closed taxonomy — one source of truth (the W3 verifier).
@@ -306,8 +309,9 @@ def _dispatch_one(
             _make_tool_message(call_id, name, err),
         )
 
+    coerced_args = _coerce_arguments(arguments, registry.input_schema(name))
     try:
-        jsonschema.validate(instance=arguments, schema=registry.input_schema(name))
+        jsonschema.validate(instance=coerced_args, schema=registry.input_schema(name))
     except jsonschema.ValidationError as exc:
         err = {
             "ok": False,
@@ -328,7 +332,7 @@ def _dispatch_one(
 
     dispatch_start = time.monotonic()
     try:
-        raw = dispatcher.dispatch(name, arguments)
+        raw = dispatcher.dispatch(name, coerced_args)
     except Exception as exc:  # adapter exceptions also tagged.
         raw = {
             "ok": False,
@@ -407,7 +411,10 @@ def run_turn(
     except Exception:
         # A clean LlmProvider should not raise; this is the safety
         # belt. Fold into the closed taxonomy so the verifier still
-        # sees a closed-set label.
+        # sees a closed-set label. Log with exc_info so a silently
+        # broken provider (auth, model name, network) is visible —
+        # without this, an entire run can look like step_cap_hit×N.
+        logger.exception("provider.generate raised at step %d", step_index)
         return TurnResult(
             kind="error",
             error_kind="dispatch_error",
