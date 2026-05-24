@@ -84,6 +84,24 @@ The integration fixes from deep-research-report-3.md were correct:
 - ✅ Multi-turn serialization enabling tool exchange cycles
 - ✅ Tolerant parser handling model output
 
+## Task 2 Refinement: Parse Error Fixes (In Progress)
+
+### Phase 1: Malformed Tool Names (✅ COMPLETE)
+**Issue:** Model outputs pseudo-actions like `material.disable` instead of just `material`
+**Solution:** Made regex pattern tolerant: `(\w+)` → `([\w.-]+)`, extract base name
+**Result:** 7 → 4 parse_errors (3 fixed: bs-019, bs-043, bs-050)
+**Files:** `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`
+**Commit:** 52dc016
+
+### Phase 2: Non-Triggering Tools (⏳ TESTING)
+**Issue:** Model doesn't output any tool calls for `load` and `show` tools
+**Root cause:** Semantic gap - "display velocity" ≠ "Color the mesh by a result"
+**Solution:** Enhanced system prompt with explicit KEY TOOL MAPPINGS
+**Expected:** Should fix remaining 4 parse_errors (bs-016, bs-026, bs-027, bs-040)
+**Files:** `python/mili-llm-bench/src/mili_llm_bench/driver.py`
+**Commit:** 4ecf41c
+**Status:** Baseline running (v0-llamacpp-enhanced-prompt) - awaiting results
+
 ## Next Steps (Priority Order)
 
 ### 1. Type Coercion (High Impact, Low Effort)
