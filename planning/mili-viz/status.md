@@ -931,8 +931,22 @@ Each row flips to ✅ when its gating test lands.
       no-pygriz laptop. **The v0 acceptance gate is closed; the L4
       decision tree (baseline.md §"After v0") becomes the next
       trackable surface.**
+- [ ] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** 🏗️ **In progress.**
+      Implements `LlamaCppProvider` (approach a2: raw-completion + manual parsing)
+      backing `llama-server` (llama.cpp); pins BF16 full-precision quantization
+      for the v0 baseline number; lazy-health-check + per-provider instance
+      (keeps server alive across scenarios); writes `config.yaml`+`rollouts.jsonl`+
+      `report.md` under a versioned run directory. CLI integrates into
+      `SUPPORTED_PROVIDERS` + `build_factories`. Unit tests cover lazy imports,
+      factory builder, provider response normalization, and the CLI --help.
+      Gating: **one v0 baseline number published** (50 scenarios, up to 8 turns,
+      120s per-turn timeout on CPU) in `planning/mili-viz/agent-local-llm-baseline-results.md`
+      + the failure-mode breakdown required by baseline.md §"After v0" §4 to pick
+      the next branch (L3 adequate, L0/L1 mostly green, mid-range, or L0/L1 mostly red).
+      Discharges the promised "actual v0 number with a real local LLM" — not the
+      mock baseline. Expected PR size: ~500 LOC (provider + integration + tests).
 
-### Post-v0 branches (decided after the W6 number is in hand)
+### Post-v0 branches (decided after the PR-6 number is in hand)
 
 The decision tree in
 [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §"After
