@@ -1,6 +1,6 @@
 # v0 Baseline Results — FunctionGemma-270M-it via llama.cpp
 
-**Status:** Run in progress (started 2026-05-24 00:25 UTC)
+**Status:** ⏸️ BLOCKED — tooling issue discovered during smoke test
 
 This document captures the headline L3 pass-rates and failure-mode breakdown
 for the **v0 FunctionGemma local baseline** — the defensible number required by

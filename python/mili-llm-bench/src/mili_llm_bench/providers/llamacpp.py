@@ -33,7 +33,7 @@ import time
 import signal
 
 from .base import ProviderOutput
-from .functiongemma import _parse_tool_call_block
+from .functiongemma import _parse_tool_call_block as _parse_json_tool_calls
 
 DEFAULT_MODEL_ID = "ggml-org/functiongemma-270m-it-GGUF:BF16"
 DEFAULT_GGUF_REPO = "ggml-org/functiongemma-270m-it-GGUF"
@@ -120,9 +120,9 @@ class LlamaCppProvider:
     ) -> ProviderOutput:
         """Generate a response via llama-server's /completion endpoint.
 
-        Uses the raw completion path (a2): apply the chat template manually
-        via /apply-template, send to /completion, parse raw text with
-        _parse_tool_call_block.
+        Uses the raw completion path (a2): manually construct the FunctionGemma
+        prompt (since /apply-template doesn't support tools in llama-server),
+        send to /completion, parse raw text with _parse_tool_call_block.
         """
         requests = _import_requests()
         self._check_binary()
@@ -135,25 +135,9 @@ class LlamaCppProvider:
                 f"  llama-server -hf {DEFAULT_GGUF_REPO}:{DEFAULT_GGUF_QUANT}\n"
             )
 
-        # Apply the chat template to format the messages.
-        template_payload = {
-            "messages": messages,
-        }
-
-        try:
-            template_resp = requests.post(
-                f"{self.server_url}/apply-template",
-                json=template_payload,
-                timeout=30,
-            )
-            template_resp.raise_for_status()
-        except requests.RequestException as exc:
-            raise RuntimeError(
-                f"llama-server template application failed: {exc}"
-            ) from exc
-
-        template_result = template_resp.json()
-        prompt = template_result.get("result", "")
+        # Manually construct FunctionGemma prompt (llama-server /apply-template
+        # doesn't support tools, so we build it ourselves per the model card).
+        prompt = self._build_functiongemma_prompt(messages, tools)
 
         # Hit /completion with the formatted prompt.
         completion_payload = {
@@ -190,7 +174,8 @@ class LlamaCppProvider:
         raw_text = result.get("content", "")
 
         # Parse tool calls from the text.
-        tool_calls = _parse_tool_call_block(raw_text)
+        # Try FunctionGemma text format first (call:name{args}), then JSON format.
+        tool_calls = self._parse_functiongemma_tool_calls(raw_text)
         if tool_calls is not None:
             self._last_tool_call_parsing_approach = "a2-raw-completion"
             return ProviderOutput(
@@ -207,6 +192,103 @@ class LlamaCppProvider:
             raw=raw_text,
         )
 
+    def _build_functiongemma_prompt(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> str:
+        """Build FunctionGemma-format prompt manually (llama-server /apply-template
+        doesn't support tools).
+
+        Format per the model card:
+        <start_of_turn>developer
+        [system message]
+        <start_function_declaration>
+        [tool definitions]
+        <end_function_declaration>
+        <end_of_turn>
+        <start_of_turn>user
+        [user message]
+        <end_of_turn>
+        <start_of_turn>model
+        """
+        prompt_parts = []
+
+        # Extract developer/system message and user messages separately
+        dev_content = None
+        user_messages = []
+
+        for msg in messages:
+            if msg.get("role") in ("developer", "system"):
+                dev_content = msg.get("content", "")
+            elif msg.get("role") == "user":
+                user_messages.append(msg.get("content", ""))
+
+        # Build developer turn with tool declarations
+        prompt_parts.append("<start_of_turn>developer\n")
+        if dev_content:
+            prompt_parts.append(dev_content)
+        else:
+            prompt_parts.append("You are a helpful assistant.")
+
+        # Add tool declarations if present
+        if tools:
+            prompt_parts.append("\n\n")
+            for tool in tools:
+                prompt_parts.append(self._format_tool_declaration(tool))
+
+        prompt_parts.append("\n<end_of_turn>\n")
+
+        # Add user messages
+        for user_content in user_messages:
+            prompt_parts.append(f"<start_of_turn>user\n{user_content}\n<end_of_turn>\n")
+
+        # Prime the model to generate a response
+        prompt_parts.append("<start_of_turn>model\n")
+
+        return "".join(prompt_parts)
+
+    def _format_tool_declaration(self, tool: dict[str, Any]) -> str:
+        """Format a single tool for the <start_function_declaration> block."""
+        parts = ["<start_function_declaration>\n"]
+        parts.append(f"declaration:{tool.get('name', '')}\n")
+
+        # Description
+        desc = tool.get("description", "")
+        parts.append(f"{{description:<escape>{desc}<escape>\n")
+
+        # Parameters
+        input_schema = tool.get("input_schema", {})
+        if input_schema:
+            properties = input_schema.get("properties", {})
+            required = input_schema.get("required", [])
+
+            if properties:
+                parts.append(",parameters:{\n")
+                parts.append("properties:{ ")
+
+                prop_parts = []
+                for prop_name, prop_schema in properties.items():
+                    prop_type = prop_schema.get("type", "string").upper()
+                    prop_desc = prop_schema.get("description", "")
+                    prop_parts.append(
+                        f"{prop_name}:{{description:<escape>{prop_desc}<escape>,type:<escape>{prop_type}<escape>}}"
+                    )
+                parts.append(", ".join(prop_parts))
+                parts.append(" }")
+
+                if required:
+                    parts.append(",\n")
+                    parts.append("required:[")
+                    parts.append(
+                        ",".join(f"<escape>{r}<escape>" for r in required)
+                    )
+                    parts.append("]\n")
+
+                parts.append("}\n")
+
+        parts.append("}\n")
+        parts.append("<end_function_declaration>")
+        return "".join(parts)
+
     def _convert_to_openai_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
         """Convert our tool format to OpenAI format for llama-server.
 
@@ -221,6 +303,43 @@ class LlamaCppProvider:
                 "parameters": tool.get("input_schema", {}),
             },
         }
+
+    def _parse_functiongemma_tool_calls(
+        self, text: str
+    ) -> list[dict[str, Any]] | None:
+        """Parse FunctionGemma text-based tool call format.
+
+        Format: <start_function_call>call:name{arg1:value1,arg2:value2}<end_function_call>
+        Values are wrapped in <escape>...<escape> for special chars.
+        """
+        import re
+
+        # First try JSON format (fallback).
+        # Only return JSON results if they're non-empty (empty list means malformed JSON).
+        json_result = _parse_json_tool_calls(text)
+        if json_result:  # Non-empty list means valid JSON was found
+            return json_result
+
+        # Parse FunctionGemma text format: call:name{key:value,key:value}
+        call_pattern = r"<start_function_call>call:(\w+)\{([^}]*)\}<end_function_call>"
+        matches = re.findall(call_pattern, text)
+
+        if not matches:
+            return None
+
+        calls = []
+        for name, args_str in matches:
+            args = {}
+            if args_str:
+                # Parse key:value pairs, handling <escape>...</escape> wrapped values
+                arg_pattern = r"(\w+):<escape>([^<]*)<escape>"
+                arg_matches = re.findall(arg_pattern, args_str)
+                for arg_name, arg_value in arg_matches:
+                    args[arg_name] = arg_value
+
+            calls.append({"name": name, "arguments": args})
+
+        return calls if calls else None
 
     def _normalize_openai_tool_calls(
         self, tool_calls_raw: Any
