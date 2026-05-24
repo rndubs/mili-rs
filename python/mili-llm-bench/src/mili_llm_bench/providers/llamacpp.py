@@ -140,11 +140,14 @@ class LlamaCppProvider:
         prompt = self._build_functiongemma_prompt(messages, tools)
 
         # Hit /completion with the formatted prompt.
+        # Stop sequences: <start_function_response> (FunctionGemma handoff token per Google docs)
+        # and <end_of_turn> (natural boundary if model doesn't call a tool).
         completion_payload = {
             "prompt": prompt,
             "temperature": temperature,
             "n_predict": max_new_tokens,
             "seed": seed,
+            "stop": ["<start_function_response>", "<end_of_turn>"],
         }
 
         try:
@@ -198,36 +201,24 @@ class LlamaCppProvider:
         """Build FunctionGemma-format prompt manually (llama-server /apply-template
         doesn't support tools).
 
-        Format per the model card:
-        <start_of_turn>developer
-        [system message]
-        <start_function_declaration>
-        [tool definitions]
-        <end_function_declaration>
-        <end_of_turn>
-        <start_of_turn>user
-        [user message]
-        <end_of_turn>
-        <start_of_turn>model
+        Format per the model card and Google's FunctionGemma documentation.
+        Includes full conversation history (assistant tool calls and tool responses)
+        so the model can complete the official loop: tool call → tool response → final answer.
+
+        Key: the developer phrase "You are a model that can do function calling with
+        the following functions" activates the model's function calling logic.
         """
         prompt_parts = []
+        dev_sent_once = False
 
-        # Extract developer/system message and user messages separately
-        dev_content = None
-        user_messages = []
-
-        for msg in messages:
-            if msg.get("role") in ("developer", "system"):
-                dev_content = msg.get("content", "")
-            elif msg.get("role") == "user":
-                user_messages.append(msg.get("content", ""))
-
-        # Build developer turn with tool declarations
+        # Build developer turn with tool declarations (only once, at the start)
         prompt_parts.append("<start_of_turn>developer\n")
-        if dev_content:
-            prompt_parts.append(dev_content)
-        else:
-            prompt_parts.append("You are a helpful assistant.")
+
+        # Use the exact trigger phrase from Google's documentation
+        dev_content = (
+            "You are a model that can do function calling with the following functions"
+        )
+        prompt_parts.append(dev_content)
 
         # Add tool declarations if present
         if tools:
@@ -236,15 +227,74 @@ class LlamaCppProvider:
                 prompt_parts.append(self._format_tool_declaration(tool))
 
         prompt_parts.append("\n<end_of_turn>\n")
+        dev_sent_once = True
 
-        # Add user messages
-        for user_content in user_messages:
-            prompt_parts.append(f"<start_of_turn>user\n{user_content}\n<end_of_turn>\n")
+        # Process messages in order, including assistant/tool history for multi-turn
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
 
-        # Prime the model to generate a response
+            if role in ("developer", "system"):
+                # Skip developer/system after first one (already added above)
+                if not dev_sent_once:
+                    prompt_parts.append("<start_of_turn>developer\n")
+                    prompt_parts.append(content)
+                    prompt_parts.append("\n<end_of_turn>\n")
+                    dev_sent_once = True
+            elif role == "user":
+                prompt_parts.append(f"<start_of_turn>user\n{content}\n<end_of_turn>\n")
+            elif role == "assistant":
+                # Include assistant tool calls and final text in the conversation
+                prompt_parts.append("<start_of_turn>model\n")
+
+                # If there are tool_calls, emit them in FunctionGemma format
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    for tc in tool_calls:
+                        func = tc.get("function", {})
+                        name = func.get("name", "")
+                        args = func.get("arguments", {})
+                        if isinstance(args, str):
+                            import json
+                            try:
+                                args = json.loads(args)
+                            except json.JSONDecodeError:
+                                args = {}
+
+                        # Format: <start_function_call>call:name{key:value,...}<end_function_call>
+                        prompt_parts.append(
+                            self._format_tool_call_for_history(name, args)
+                        )
+
+                # Add final text if present
+                if content:
+                    prompt_parts.append(content)
+
+                prompt_parts.append("\n<end_of_turn>\n")
+            elif role == "tool":
+                # Tool response: append in FunctionGemma format before next model turn
+                tool_name = msg.get("tool_use_id", "").split(":")[-1] or "unknown"
+                prompt_parts.append(
+                    f"<start_function_response>response:{tool_name}{{{content}}}<end_function_response>\n"
+                )
+
+        # Prime the model to generate the next response
         prompt_parts.append("<start_of_turn>model\n")
 
         return "".join(prompt_parts)
+
+    def _format_tool_call_for_history(self, name: str, args: dict[str, Any]) -> str:
+        """Format a tool call for inclusion in conversation history.
+
+        Format: <start_function_call>call:name{key:<escape>value<escape>,...}<end_function_call>
+        """
+        parts = [f"<start_function_call>call:{name}{{"]
+        arg_parts = []
+        for key, value in args.items():
+            arg_parts.append(f"{key}:<escape>{value}<escape>")
+        parts.append(",".join(arg_parts))
+        parts.append("}<end_function_call>")
+        return "".join(parts)
 
     def _format_tool_declaration(self, tool: dict[str, Any]) -> str:
         """Format a single tool for the <start_function_declaration> block.
@@ -297,7 +347,8 @@ class LlamaCppProvider:
     ) -> list[dict[str, Any]] | None:
         """Parse FunctionGemma text-based tool call format.
 
-        Format: <start_function_call>call:name{arg1:value1,arg2:value2}<end_function_call>
+        Tolerant parser per research report: accepts both fully closed and partially
+        open tool calls. Format: <start_function_call>call:name{arg1:value1,...}<end_function_call>
         Values are wrapped in <escape>...<escape> for special chars.
         """
         import re
@@ -308,26 +359,52 @@ class LlamaCppProvider:
         if json_result:  # Non-empty list means valid JSON was found
             return json_result
 
-        # Parse FunctionGemma text format: call:name{key:value,key:value}
-        call_pattern = r"<start_function_call>call:(\w+)\{([^}]*)\}<end_function_call>"
-        matches = re.findall(call_pattern, text)
-
-        if not matches:
-            return None
-
         calls = []
-        for name, args_str in matches:
-            args = {}
-            if args_str:
-                # Parse key:value pairs, handling <escape>...</escape> wrapped values
-                arg_pattern = r"(\w+):<escape>([^<]*)<escape>"
-                arg_matches = re.findall(arg_pattern, args_str)
-                for arg_name, arg_value in arg_matches:
-                    args[arg_name] = arg_value
 
+        # Try fully closed calls first: <start_function_call>call:name{...}<end_function_call>
+        closed_pattern = (
+            r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
+        )
+        closed_matches = re.findall(closed_pattern, text, re.DOTALL)
+        for name, args_str in closed_matches:
+            args = self._parse_function_arguments(args_str)
             calls.append({"name": name, "arguments": args})
 
+        # If no fully closed calls found, try bare format: call:name{...}
+        if not calls:
+            bare_pattern = r"call:(\w+)\{(.*?)\}(?:\s|$|<)"
+            bare_matches = re.findall(bare_pattern, text, re.DOTALL)
+            for name, args_str in bare_matches:
+                args = self._parse_function_arguments(args_str)
+                calls.append({"name": name, "arguments": args})
+
         return calls if calls else None
+
+    def _parse_function_arguments(self, args_str: str) -> dict[str, Any]:
+        """Parse function arguments from escape-wrapped format.
+
+        Handles: key:<escape>value<escape> or key:value (unescaped scalar)
+        Pattern based on Google's FunctionGemma example parser.
+        """
+        import re
+
+        args = {}
+        if not args_str:
+            return args
+
+        # Parse escape-wrapped and scalar values: key:<escape>val<escape> or key:val
+        # Matches: (word):(escaped content or scalar)
+        pattern = r"(\w+):<escape>(.*?)<escape>|(\w+):([^,}<\s]+)"
+        matches = re.findall(pattern, args_str)
+
+        for match in matches:
+            key, escaped_val, scalar_key, scalar_val = match
+            if key and escaped_val is not None:
+                args[key] = escaped_val
+            elif scalar_key and scalar_val:
+                args[scalar_key] = scalar_val
+
+        return args
 
     def _normalize_openai_tool_calls(
         self, tool_calls_raw: Any
