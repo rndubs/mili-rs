@@ -208,6 +208,44 @@ def _detect_driver_stop(messages: list[dict[str, Any]]) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_arguments(
+    arguments: dict[str, Any], schema: dict[str, Any]
+) -> dict[str, Any]:
+    """Attempt to coerce argument types to match the schema (e.g., string to int).
+
+    Returns a new dict with coerced values. If coercion fails, returns original.
+    """
+    coerced = dict(arguments)
+    properties = schema.get("properties", {})
+
+    for key, value in arguments.items():
+        if key not in properties:
+            continue
+        prop_schema = properties[key]
+        expected_type = prop_schema.get("type")
+
+        # String to int coercion
+        if expected_type == "integer" and isinstance(value, str):
+            try:
+                coerced[key] = int(value)
+            except (ValueError, TypeError):
+                pass  # Keep original if coercion fails
+        # String to number coercion
+        elif expected_type == "number" and isinstance(value, str):
+            try:
+                coerced[key] = float(value)
+            except (ValueError, TypeError):
+                pass
+        # String to boolean coercion
+        elif expected_type == "boolean" and isinstance(value, str):
+            if value.lower() in ("true", "1", "yes"):
+                coerced[key] = True
+            elif value.lower() in ("false", "0", "no"):
+                coerced[key] = False
+
+    return coerced
+
+
 def _grade_call(
     call: ExtractedCall, tools: dict[str, dict[str, Any]]
 ) -> tuple[int, str | None]:
@@ -226,8 +264,9 @@ def _grade_call(
             return 0, "schema_mismatch"
     else:
         schema = tools[call.name]["input_schema"]
+        coerced = _coerce_arguments(call.arguments, schema)
         try:
-            jsonschema.validate(instance=call.arguments, schema=schema)
+            jsonschema.validate(instance=coerced, schema=schema)
         except jsonschema.ValidationError:
             return 0, "schema_mismatch"
     # L1 reached.
