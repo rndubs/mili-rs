@@ -218,7 +218,7 @@ impl AgentBackend for LlamaCppAgent {
                     messages.extend(tool_responses);
                 } else {
                     // No tool calls — treat as final text response
-                    for word in response.trim().split_whitespace() {
+                    for word in response.split_whitespace() {
                         if ctx.cancelled() {
                             return;
                         }
@@ -360,7 +360,7 @@ fn parse_json_tool_calls(text: &str) -> Option<Vec<ParsedToolCall>> {
     let mut brace_depth = 0;
     let mut start_idx = None;
 
-    for (i, ch) in text.chars().enumerate() {
+    for (i, ch) in text.char_indices() {
         match ch {
             '{' => {
                 if brace_depth == 0 {
@@ -1222,7 +1222,7 @@ mod tests {
         // Tight cap matches what FunctionGemma-270M can plausibly need
         // for the demo scenarios; combined with repeat-detection it
         // keeps a runaway agent from rampaging through analysis states.
-        assert!(MAX_STEPS <= 4, "MAX_STEPS={MAX_STEPS} — should stay small");
+        const { assert!(MAX_STEPS <= 4, "MAX_STEPS should stay small") };
     }
 
     // ── tools.json compiles in cleanly ────────────────────────────────

@@ -44,10 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: std::net::SocketAddr = addr_arg.parse()?;
 
     let svc = if agent_kind.as_deref() == Some("llamacpp") {
-        println!(
-            "mili-viz-server: FunctionGemma agent enabled ({})",
-            agent_url
-        );
+        println!("mili-viz-server: FunctionGemma agent enabled ({agent_url})");
         mili_viz_server::VizService::builder()
             .agent_backend(mili_viz_server::LlamaCppAgent::with_url(&agent_url))
             .build()
