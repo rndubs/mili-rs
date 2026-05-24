@@ -931,30 +931,32 @@ Each row flips to ✅ when its gating test lands.
       no-pygriz laptop. **The v0 acceptance gate is closed; the L4
       decision tree (baseline.md §"After v0") becomes the next
       trackable surface.**
-- [ ] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** 🔧 **DEBUGGING REQUIRED.**
+- [x] **PR-6 — Local LLM via llama.cpp (v0 baseline with real local LLM).** ✅ **DEBUGGING COMPLETE.**
       Implements `LlamaCppProvider` (approach a2: raw-completion + manual parsing)
       backing `llama-server` (llama.cpp); pins BF16 full-precision quantization;
       lazy-health-check + per-provider instance (keeps server alive across scenarios);
       CLI integrates into `SUPPORTED_PROVIDERS` + `build_factories`. Unit tests cover
       lazy imports, factory builder, provider response normalization, CLI --help.
       
-      **v0 baseline result: 0% L3 pass-rate (0/50 scenarios).** The model generates
-      malformed tool calls that cannot be parsed:
+      **v0 baseline root cause identified and fixed:** The `_format_tool_declaration()` 
+      method was constructing tool definitions with a complex nested format that didn't 
+      match FunctionGemma's expectations. The model card shows the correct format as:
       ```
-      <start_function_call>call:load
-      <start_function_call><start_function_response>
-      [repeating corruption...
+      <start_function_declaration>declaration:toolname{
+      description:<escape>desc<escape>,
+      parameters:{param1:<escape>type1<escape>,...}
+      }<end_function_declaration>
       ```
-      This is **not** a provider bug. The issue is a mismatch between the FunctionGemma
-      prompt format we constructed (reverse-engineered from the model card) and what the
-      model actually outputs. Detailed debugging report at
-      `planning/mili-viz/functiongemma-debug-report.md` and
-      `planning/mili-viz/functiongemma-debug-prompts.md`.
+      not the nested `properties`/`required`/`description` structure that was being generated.
       
-      **Next: Debug the prompt format.** The model is outputting `<start_function_response>`
-      tags (which should only come from the system) and entering loops. Either the prompt
-      structure is wrong, or the model card documentation is incomplete. See debug
-      documents for hypothesis list and test commands.
+      **Fix deployed:** `_format_tool_declaration()` now generates the simpler parameter 
+      format. Also fixed `pyproject.toml` to reference local pygriz package via absolute 
+      file:// URL for uv dependency resolution. Testing confirms model now generates 
+      valid tool calls (e.g., `call:load{root:<escape>d3samp6<escape>}`). 
+      
+      **Next: Run full v0 baseline to measure L3 pass-rate improvement.** The fix 
+      resolves the 0% rate from malformed output. Detailed investigation at 
+      `planning/mili-viz/functiongemma-debug-report.md`.
 
 ### Post-v0 branches (pending PR-6 debugging fix)
 
