@@ -147,7 +147,7 @@
 | [`README.md`](README.md) | Server/client split, crate layout, transport + renderer stack, Phase 4/5 milestone outline | ✅ architecture settled (stale on status/Phase 6 — `status.md` authoritative) |
 | [`scripting.md`](scripting.md) | Scripting = second pure-Python client of `mili-viz-proto`; camera server-authoritative; `attach()` to a running GUI; `grizinit` via `run_script()`. Implementation home: Phase 6 | ✅ resolved |
 | [`client.md`](client.md) | Client wireframe (griz-shaped docks) + AI-first design; server-hosted agent peer with barge-in + provenance journal. Adds `AgentChat`/`DELTA_AGENT`/`Snapshot`/`Interrupt` to M1; introduces Phase 5 M3.5/M6 | ✅ resolved (2026-05-17) |
-| [`agent-local-llm.md`](agent-local-llm.md), [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md), [`posttraining-dataset.md`](posttraining-dataset.md), [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) | Local-LLM agent investigation (model + post-training) + the dataset-construction build plan + the v0 baseline plan (the next concrete milestone). Progress in § "Local LLM agent (exploratory)" below | 🔎 research notes — not yet binding; v0 baseline plan drafted |
+| [`agent-local-llm.md`](agent-local-llm.md), [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md), [`posttraining-dataset.md`](mili-agent/posttraining-dataset.md), [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) | Local-LLM agent investigation (model + post-training) + the dataset-construction build plan + the v0 baseline plan (the next concrete milestone). Progress in § "Local LLM agent (exploratory)" below | 🔎 research notes — not yet binding; v0 baseline plan drafted |
 
 The reference implementation we are porting from is read-only under
 `reference/griz/Src/` (cited by file:path in the docs above).
@@ -670,7 +670,7 @@ parallel of `crates/`). Milestone breakdown + M1 detail:
 > Read in this order:
 > [`agent-local-llm.md`](agent-local-llm.md) →
 > [`agent-local-llm-posttraining.md`](agent-local-llm-posttraining.md) →
-> [`posttraining-dataset.md`](posttraining-dataset.md) →
+> [`posttraining-dataset.md`](mili-agent/posttraining-dataset.md) →
 > [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md).
 
 ### Surface + post-training decisions (pinned in the research docs)
@@ -679,8 +679,8 @@ parallel of `crates/`). Milestone breakdown + M1 detail:
 |---|---|---|---|
 | L0 | **Surface choice — typed `Command` JSON tool calls**, not raw Layer-0 DSL and not free-form pygriz Python; ≈18 tools (15 typed + `query`/`snapshot` + `griz_raw` fallback); pygriz is *humans and the reasoning agent*, not the tiny model's emit target | ✅ pinned | [`agent-local-llm.md`](agent-local-llm.md) § "Surface choice" |
 | L1 | Constrained decoding: per-tool JSON schema as primary; griz GBNF scoped to the `griz_raw` argument only | ✅ pinned | [`agent-local-llm.md`](agent-local-llm.md) Decision 3 |
-| L2 | Verifier tiers refolded onto the typed-tool surface (L0 = tool-call shape; L1 = name + schema; L2 = dispatch ok; L3 = post-condition); **L1 thins, L2 carries more weight** | ✅ pinned | [`posttraining-dataset.md`](posttraining-dataset.md) Stage 4 |
-| L3 | Canonical rollout record updated to FunctionGemma-style `tool_calls`/`tool` messages + `tools` schemas + `tool_calls_flat` (the new dedup key) | ✅ pinned | [`posttraining-dataset.md`](posttraining-dataset.md) §1, Stage 6 |
+| L2 | Verifier tiers refolded onto the typed-tool surface (L0 = tool-call shape; L1 = name + schema; L2 = dispatch ok; L3 = post-condition); **L1 thins, L2 carries more weight** | ✅ pinned | [`posttraining-dataset.md`](mili-agent/posttraining-dataset.md) Stage 4 |
+| L3 | Canonical rollout record updated to FunctionGemma-style `tool_calls`/`tool` messages + `tools` schemas + `tool_calls_flat` (the new dedup key) | ✅ pinned | [`posttraining-dataset.md`](mili-agent/posttraining-dataset.md) §1, Stage 6 |
 | L4 | V0 baseline plan drafted: produce one defensible L3 pass-rate number for stock FunctionGemma-270M-it on a 50-scenario bootstrap eval, no fine-tune, pygriz-driven | ✅ drafted | [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) |
 | L5 | **Harness contract pinned.** Three consumers share one factored harness (eval driver, future teacher rollouts, future server-side `AgentChat`). `run_turn(provider, session, messages, tools, ...) → TurnResult` with closed `error_kind` enum; dispatches N tool calls per turn in order; parse errors fed back as `tool` responses (model self-corrects, option (b)); replay mode ships in v0 (`ReplayLlmProvider`) for verifier regression and dataset validation | ✅ pinned | [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W4a |
 | L6 | **Harness invariants pinned.** Three fields **never** reach the LLM under any code path: `Snapshot.loaded.state_times` (unbounded `repeated double`; replaced by `state_time_range`+`current_time`), `GeometryRef.flight_ticket` (opaque bytes; `GeometryRef` dropped wholesale from projected responses), `Snapshot.agent` (self-echo trap). Enforced by per-field unit tests on a fabricated raw `Snapshot` | ✅ pinned | [`agent-local-llm-baseline.md`](agent-local-llm-baseline.md) §W1 "Harness invariants" |
@@ -986,11 +986,11 @@ V0 baseline is now complete with validated results (0% parse errors, 0% L3 pass 
 model not generating tool calls). Next step: execute post-v0 branch per decision tree.
 
 - 🔎 **If L3 already adequate** → declare the
-  [`posttraining-dataset.md`](posttraining-dataset.md) Stage 8
+  [`posttraining-dataset.md`](mili-agent/posttraining-dataset.md) Stage 8
   pre-experiment passed; post-training is moot for v1; bench
   becomes a regression test. *Stop.*
 - 🔎 **If L0/L1 mostly green but L3 inadequate** → proceed to
-  [`posttraining-dataset.md`](posttraining-dataset.md) Stages 1
+  [`posttraining-dataset.md`](mili-agent/posttraining-dataset.md) Stages 1
   (grammar artifact, for `griz_raw`), 5 (teacher rollouts), 6
   (assemble), 7 (eval); SFT then DPO/GRPO only on measured need.
 - 🔎 **If L0/L1 mostly red** → re-baseline against

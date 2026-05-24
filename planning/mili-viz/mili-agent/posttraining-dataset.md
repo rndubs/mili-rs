@@ -401,10 +401,43 @@ failure on miss; runs prior to **2026-05-24** ran against an empty
 M1 stub corpus and are not comparable). Auto-terminate is on (driver
 breaks the loop as soon as the verifier grades L3).
 
-| Run | Provider | Model | L3 | step intent | mean turns |
-|---|---|---|---|---|---|
-| **v4 floor** | llamacpp | functiongemma-270m-it-GGUF:BF16 | **32%** (16/50) | 17% (1/6) | 5.00 |
-| **v4 ceiling** | anthropic | claude-sonnet-4-5 | **92%** (46/50) | 100% (6/6) | 1.18 |
+| Run | Provider | Model | L3 | step intent | mean turns | Notes |
+|---|---|---|---|---|---|---|
+| **v4 pre-GEPA floor** | llamacpp | functiongemma-270m-it-GGUF:BF16 | **32%** (16/50) | 17% (1/6) | 5.00 | pre-promotion `tools.json` (`tools_sha256=cdda3677…`) — historical |
+| **v5 floor** (current default) | llamacpp | functiongemma-270m-it-GGUF:BF16 | **40%** (20/50) | — | — | post-promotion `tools.json` (`tools_sha256=27ffbd0e…`) — reproduces GEPA |
+| **v4 ceiling** | anthropic | claude-sonnet-4-5 | **92%** (46/50) | 100% (6/6) | 1.18 | pre-promotion tools (re-measure planned) |
+
+**Tools.json promotion (2026-05-24).** 100 GEPA iterations (Claude Opus
+as proposer, medium reflection) found that the system prompt didn't
+need changes — every prompt variant lost to the baseline — but the
+tool descriptions for the four hardest intents (`clrsel`, `colormap`,
+`material`, `query`) benefited from structured
+Args/Usage-rules/Examples blocks with explicit instruction → arguments
+mappings. Those four rewrites are now promoted into
+`schemas.py:TOOL_DESCRIPTIONS` and `data/posttraining/grammar/tools.json`
+(re-derived; `tools_sha256` bumped from `cdda3677…` →
+`27ffbd0e…`). The other 14 descriptions are byte-identical to the
+pre-GEPA defaults. A canonical re-run of FunctionGemma with the
+promoted tools reproduces L3 0.40 (`v5-llamacpp-promoted-tools`),
+confirming the promotion is faithful.
+
+**What the v5 floor still doesn't fix.** Failure-mode shift v4→v5:
+`step_cap_hit` 28→21, `schema_mismatch` 3→4, `parse_error` 2→3 —
+the lift came from tightening cases where the model picked the
+right tool with confused args. Intents where the model picks the
+*wrong* tool entirely (`material`/`select`/`view-reset` at 0% L3)
+are unmoved. The 52-point gap to the Claude ceiling is what SFT/RL
+must close — GEPA can't teach intent→tool mapping at 270M scale.
+
+**Re-baselining note.** The Claude ceiling (92%) was measured on the
+pre-promotion tools — it should re-measure essentially identical
+(Claude doesn't need the GEPA scaffolding), but the run is cheap and
+worth doing when the next eval cycle kicks off, just for a clean
+matched-tools comparison.
+
+Artifact lineage:
+* GEPA optimization run: `data/posttraining/gepa-runs/gepa-run-20260524-135543/`
+* v5 reproduction (promoted tools, default config): `data/posttraining/runs/v5-llamacpp-promoted-tools/`
 
 Per-intent (FunctionGemma v4): load 83%, set-state 83%, colormap
 75%, show-derived 25%, show-primal/step 17%,
@@ -427,8 +460,10 @@ FunctionGemma↔Claude gap on the same bootstrap eval (32% → ≥62% L3)
 before committing to a full posttraining cycle. Concretely:
 
 * **Floor regression tripwire:** any SFT'd model that scores below
-  ~30% L3 has overfit to a paraphrase artifact or broken termination
-  behavior — investigate before iterating on hyperparameters.
+  ~40% L3 (the GEPA-without-fine-tune ceiling) is not earning its
+  weight — prompt engineering alone gets you that. Investigate before
+  iterating on hyperparameters; the SFT recipe is likely overfitting
+  to a paraphrase artifact or producing broken termination behavior.
 * **Target after SFT pilot:** ≥62% L3 (half the gap), with
   per-intent rates ≥50% for the four currently-zero intents
   (material, select, clrsel, view-reset). The zero-rate intents are

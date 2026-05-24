@@ -1,13 +1,28 @@
 # M3 — Post-Training Strategy (Model Training Pipeline)
 
-**Status:** 🧪 Exploratory — Design complete, ready to begin if quick wins plateau.
+> **⚠️ Superseded as the live tracker by [M5](m5-sft-pipeline.md) on 2026-05-24.**
+>
+> This document is preserved for its **design rationale** — the
+> zero-human-label argument, the verifier-as-filter/reward/eval
+> insight, and the original stage breakdown. **For current SFT
+> status, baselines, gates, and active stage**, read
+> [`m5-sft-pipeline.md`](m5-sft-pipeline.md) instead.
+>
+> Numbers in this doc are historical and **wrong by today's standard**:
+> the "2 % L3" baseline reflects the M1 stub-fallback bug (fixed
+> 2026-05-24); the real FunctionGemma floor is **40 % L3** with
+> GEPA-promoted tools, against a **92 % Claude ceiling**.
+
+**Original Status (2026-05-24):** 🧪 Exploratory — Design complete,
+ready to begin if quick wins plateau. *(Outdated: GEPA hit its ceiling,
+quick wins exhausted, SFT is now the active phase.)*
 
 **Date:** 2026-05-24  
 **Summary:** Long-term approach to train a better model via SFT/RL without human labeling. Data pipeline design verified; ready for implementation.
 
 ---
 
-## When to Use This
+## When to Use This *(historical framing — see M5 for current trigger)*
 
 Use post-training when:
 1. Quick wins (step_cap increase, larger model) don't unlock major improvements
@@ -15,7 +30,10 @@ Use post-training when:
 3. You're willing to spend 1–2 weeks on data generation + training
 4. You want a deployable model (not reliant on Claude API)
 
-**Current status:** Conditions 1–2 not yet met. GEPA is still running; we haven't tried step_cap increase or Claude API yet. This document is here for planning purposes.
+**Status as of 2026-05-24 (post-supersession):** Conditions 1–2 are
+both met. GEPA reached its ceiling at 40 % L3 (M2). The active SFT
+pipeline lives in [M5](m5-sft-pipeline.md); this doc remains as the
+original design argument that the M5 plan inherits.
 
 ---
 

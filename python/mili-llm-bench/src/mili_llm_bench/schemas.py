@@ -87,11 +87,31 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "When the response returns ok:true and no further selections were requested, "
         "reply with one short confirmation and STOP."
     ),
+    # clrsel/colormap/material/query were rewritten by GEPA (Run
+    # 2026-05-24, gepa-run-20260524-135543) — these four are the
+    # zero-shot intents that benefited from structured Args/Usage-rules
+    # blocks with explicit instruction → arguments mappings. The other
+    # 14 descriptions are byte-identical to the pre-GEPA defaults.
     "clrsel": (
-        "Clear element selection. Pass class_name=\"<class>\" to clear one class, "
-        "or omit class_name (or pass empty string) to clear all. "
-        "Single-call action: when the response returns ok:true, the selection is cleared — "
-        "reply with one short confirmation and STOP."
+        "Clear an element selection.\n"
+        "\n"
+        "Args:\n"
+        "- class_name (string, optional): Mesh class to clear "
+        "(e.g., \"brick\", \"beam\", \"shell\", \"hex\"). "
+        "Omit or pass \"\" to clear ALL selections across every class.\n"
+        "\n"
+        "Usage rules:\n"
+        "- This is a SINGLE-CALL terminal action. Call it exactly once.\n"
+        "- For \"clear the <class> selection\" → call with "
+        "class_name=\"<class>\" (e.g., \"clear the brick selection\" → "
+        "class_name=\"brick\").\n"
+        "- For \"clear selection\" / \"clear all\" / \"deselect\" with no "
+        "class → call with class_name=\"\" (or omit).\n"
+        "- Do NOT call select, show, or any other tool before or after — "
+        "clearing is the whole task.\n"
+        "- As soon as the response is ok:true, immediately emit one short "
+        "confirmation (e.g., \"Cleared brick selection.\") and STOP. "
+        "Do not retry, do not verify, do not advance state."
     ),
     "show": (
         "Color the mesh by a result (primal svar or derived family), e.g. result=\"vx\". "
@@ -118,10 +138,17 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "reply with one short confirmation and STOP."
     ),
     "material": (
-        "Enable or disable a material. Pass enable:bool with either material:<int> "
-        "or class_name:<str> (omit material to act on the whole class). "
-        "When the response returns ok:true and no further material changes were requested, "
-        "reply with one short confirmation and STOP."
+        "Toggle a material on/off. Required: enable (bool). Target ONE of:\n"
+        "  - material: <int>  (1-based material id, e.g. enable material 2 "
+        "-> {\"enable\": true, \"material\": 2})\n"
+        "  - class_name: <str> (acts on entire element class; omit "
+        "\"material\" field)\n"
+        "Verbs: \"enable/show/on\" -> enable:true; "
+        "\"disable/hide/off\" -> enable:false.\n"
+        "Call this tool exactly ONCE per material request. When the "
+        "response is ok:true, immediately emit one short confirmation "
+        "(e.g. \"Material 2 enabled.\") and STOP — do not call any "
+        "further tools."
     ),
     "cutplane": (
         "Set or clear the cut-plane (origin ox/oy/oz + normal nx/ny/nz; relative or absolute). "
@@ -129,9 +156,24 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "reply with one short confirmation and STOP."
     ),
     "colormap": (
-        "Pick a named colormap (e.g. name=\"jet\", \"cool\", \"hot\", \"gray\"). "
-        "Single-call action: when the response returns ok:true, the colormap is set — "
-        "reply with one short confirmation and STOP. Do not call again with a different name."
+        "Set the visualization colormap. Call EXACTLY ONCE per request.\n"
+        "\n"
+        "Args:\n"
+        "  name (string, required): one of \"jet\", \"cool\", \"hot\", "
+        "\"gray\", \"viridis\", \"plasma\".\n"
+        "\n"
+        "Behavior:\n"
+        "- Single-call terminal action. After the tool returns ok:true, "
+        "the colormap is applied.\n"
+        "- Immediately emit ONE short confirmation sentence (e.g. "
+        "\"Colormap set to jet.\") and STOP.\n"
+        "- Do NOT call colormap again, do NOT call any other tool, "
+        "do NOT retry with a different name.\n"
+        "- If ok:false, report the error in one sentence and STOP "
+        "(do not retry).\n"
+        "\n"
+        "Do NOT use this tool for: resetting views (use named_view), "
+        "legends (use legend), or coloring by a field (use show)."
     ),
     "legend": (
         "Set the legend's min/max range (omit a bound to autoscale that end). "
@@ -145,9 +187,20 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "reply with one short confirmation and STOP."
     ),
     "query": (
-        "Read result values for a class/labels/states subset. "
-        "Single-call action: the response returns the values directly in `table` — "
-        "use them in your final reply to the user, then STOP. Do not call again to re-query."
+        "Read result values for a subset of elements. "
+        "SINGLE-CALL TERMINAL ACTION.\n"
+        "\n"
+        "Required args:\n"
+        "- result: string field name (e.g., \"sx\", \"eff_stress\")\n"
+        "- class_name: element class (e.g., \"brick\", \"shell\")\n"
+        "- labels: list[int] of element labels, or null for all\n"
+        "- states: list[int] of state numbers, or null for current state\n"
+        "\n"
+        "Behavior: The response returns values directly in `table`. "
+        "Use those values in your final natural-language reply to the "
+        "user, then STOP. Do NOT call this tool again for the same "
+        "query. Do NOT chain additional tool calls after receiving the "
+        "table — answer the user immediately."
     ),
     "snapshot": (
         "Read the current session state (state, selection, result, camera). Takes no arguments. "

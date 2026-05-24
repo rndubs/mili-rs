@@ -6,7 +6,7 @@ up to ``step_cap`` times, surfaces driver-level stops to the W3
 verifier via the synthetic ``"stop:<reason>"`` ``system`` message
 convention, calls ``verifier.verify``, and emits one canonical rollout
 record per scenario in the
-``planning/mili-viz/posttraining-dataset.md`` §1 shape.
+``planning/mili-viz/mili-agent/posttraining-dataset.md`` §1 shape.
 
 Three load-bearing design pins:
 

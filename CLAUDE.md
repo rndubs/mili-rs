@@ -36,7 +36,7 @@ must run it themselves before trusting a green run — a bare
 
 `reference/griz` holds the C reference source we cite by path (and the
 source for the post-training grammar/intent corpus —
-`planning/mili-viz/posttraining-dataset.md`). It is now checked out by
+`planning/mili-viz/mili-agent/posttraining-dataset.md`). It is now checked out by
 `scripts/setup-parity.sh`.
 
 **Never `git submodule update --init --recursive` (or a bare

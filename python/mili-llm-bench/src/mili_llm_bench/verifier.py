@@ -18,7 +18,7 @@ L3            post-condition met                        same
 ============  ========================================  ========================================
 
 ``griz_raw``'s L1 grammar check is a future Stage-1 deliverable
-(``planning/mili-viz/posttraining-dataset.md`` Stage 1); for v0 the
+(``planning/mili-viz/mili-agent/posttraining-dataset.md`` Stage 1); for v0 the
 check degenerates to "``arguments.line`` is a string". See the
 ``# TODO(stage-1)`` comment on ``_grade_call``.
 
@@ -257,7 +257,7 @@ def _grade_call(
     # griz_raw — bespoke L1 check (Stage-1 grammar deferred).
     if call.name == "griz_raw":
         # TODO(stage-1): grade arguments.line against the Stage-1
-        # griz GBNF artifact (planning/mili-viz/posttraining-dataset.md
+        # griz GBNF artifact (planning/mili-viz/mili-agent/posttraining-dataset.md
         # Stage 1). v0 degenerates to "is a non-empty string".
         line = call.arguments.get("line")
         if not isinstance(line, str):

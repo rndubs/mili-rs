@@ -13,7 +13,7 @@ Two uses (baseline §W4a "Replay mode"):
    pollutes a fine-tune.
 
 The canonical rollout record shape lives in
-``planning/mili-viz/posttraining-dataset.md`` §1. For v0 only the
+``planning/mili-viz/mili-agent/posttraining-dataset.md`` §1. For v0 only the
 ``messages`` array is read; the rest is forward-compatible (we don't
 parse fields we don't need).
 """
