@@ -350,6 +350,9 @@ class LlamaCppProvider:
         Tolerant parser per research report: accepts both fully closed and partially
         open tool calls. Format: <start_function_call>call:name{arg1:value1,...}<end_function_call>
         Values are wrapped in <escape>...<escape> for special chars.
+
+        Tolerates malformed tool names (e.g., material.disable → material) by extracting
+        the base tool name (first component before any dot).
         """
         import re
 
@@ -362,21 +365,26 @@ class LlamaCppProvider:
         calls = []
 
         # Try fully closed calls first: <start_function_call>call:name{...}<end_function_call>
+        # Accept tool names with dots, dashes, underscores (e.g., material.disable, show-primal)
         closed_pattern = (
-            r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
+            r"<start_function_call>call:([\w.-]+)\{(.*?)\}<end_function_call>"
         )
         closed_matches = re.findall(closed_pattern, text, re.DOTALL)
         for name, args_str in closed_matches:
+            # Extract base tool name (before any dot): material.disable → material
+            base_name = name.split('.')[0]
             args = self._parse_function_arguments(args_str)
-            calls.append({"name": name, "arguments": args})
+            calls.append({"name": base_name, "arguments": args})
 
         # If no fully closed calls found, try bare format: call:name{...}
         if not calls:
-            bare_pattern = r"call:(\w+)\{(.*?)\}(?:\s|$|<)"
+            bare_pattern = r"call:([\w.-]+)\{(.*?)\}(?:\s|$|<)"
             bare_matches = re.findall(bare_pattern, text, re.DOTALL)
             for name, args_str in bare_matches:
+                # Extract base tool name (before any dot)
+                base_name = name.split('.')[0]
                 args = self._parse_function_arguments(args_str)
-                calls.append({"name": name, "arguments": args})
+                calls.append({"name": base_name, "arguments": args})
 
         return calls if calls else None
 

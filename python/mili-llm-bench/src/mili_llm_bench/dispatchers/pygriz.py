@@ -104,6 +104,7 @@ def _proj_load(session: Any, _arguments: dict[str, Any], result: Any) -> dict[st
     classes = list(getattr(loaded, "classes", []) or [])
     return {
         "ok": True,
+        "action_complete": True,
         "num_states": int(getattr(loaded, "num_states", 0)),
         "num_classes": len(classes),
         "classes": classes,
@@ -112,15 +113,32 @@ def _proj_load(session: Any, _arguments: dict[str, Any], result: Any) -> dict[st
     }
 
 
-def _proj_state(session: Any) -> dict[str, Any]:
+def _proj_state(session: Any, arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     snap = session._snapshot()
     loaded = getattr(snap, "loaded", None)
-    return {
+    current_state = int(getattr(snap, "state", 0))
+
+    # Check if requested state matches current state for completion signal
+    action_complete = True
+    requested_state = None
+    if arguments:
+        requested_state = arguments.get("state")
+        if requested_state is not None:
+            requested_state = int(requested_state)
+            action_complete = (requested_state == current_state)
+
+    result = {
         "ok": True,
-        "state": int(getattr(snap, "state", 0)),
+        "state": current_state,
         "num_states": int(getattr(loaded, "num_states", 0)),
         "current_time": float(getattr(snap, "current_time", 0.0)),
     }
+
+    if requested_state is not None:
+        result["requested_state"] = requested_state
+        result["action_complete"] = action_complete
+
+    return result
 
 
 def _proj_selection(session: Any) -> dict[str, Any]:
@@ -129,6 +147,7 @@ def _proj_selection(session: Any) -> dict[str, Any]:
     by_class = dict(getattr(sel, "by_class", {}) or {})
     return {
         "ok": True,
+        "action_complete": True,
         "selection": {k: v for k, v in by_class.items() if v},
     }
 
@@ -137,6 +156,7 @@ def _proj_show(_session: Any, arguments: dict[str, Any], result: Any) -> dict[st
     rng = getattr(result, "range", (0.0, 0.0))
     return {
         "ok": True,
+        "action_complete": True,
         "result": arguments.get("result", ""),
         "component": arguments.get("component", ""),
         "range": [float(rng[0]), float(rng[1])],
@@ -148,7 +168,11 @@ def _proj_materials(session: Any) -> dict[str, Any]:
     mats = getattr(snap, "materials", None)
     visible_map = dict(getattr(mats, "visible", {}) or {})
     hidden = sorted(int(k) for k, v in visible_map.items() if not v)
-    return {"ok": True, "hidden_materials": hidden}
+    return {
+        "ok": True,
+        "action_complete": True,
+        "hidden_materials": hidden,
+    }
 
 
 def _proj_snapshot(session: Any) -> dict[str, Any]:
@@ -276,15 +300,25 @@ class PygrizDispatcher:
 
         if name == "close":
             s.close()
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "set_state":
             s.state = int(arguments["state"])
-            return _proj_state(s)
+            return _proj_state(s, arguments)
 
         if name == "step":
             _step_dir(arguments)(s)
-            return _proj_state(s)
+            snap = s._snapshot()
+            loaded = getattr(snap, "loaded", None)
+            result = {
+                "ok": True,
+                "action_complete": True,
+                "state": int(getattr(snap, "state", 0)),
+                "num_states": int(getattr(loaded, "num_states", 0)),
+                "current_time": float(getattr(snap, "current_time", 0.0)),
+                "direction": str(arguments.get("dir", "")).lower(),
+            }
+            return result
 
         if name == "select":
             s.select(
@@ -325,7 +359,7 @@ class PygrizDispatcher:
                 getattr(view, op)(**{k: v for k, v in arguments.items() if k != "op"})
             else:
                 raise ValueError(f"unknown view op {op!r}")
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "named_view":
             op = str(arguments.get("op", "")).upper()
@@ -338,11 +372,11 @@ class PygrizDispatcher:
                 pass  # read-only; result is in the snapshot
             else:
                 raise ValueError(f"unknown named_view op {op!r}")
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "colormap":
             s.colormap(arguments["name"])
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "legend":
             legend = s.legend
@@ -350,24 +384,24 @@ class PygrizDispatcher:
                 legend.min = float(arguments["min"])
             if "max" in arguments:
                 legend.max = float(arguments["max"])
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "iso":
             s.isosurface(arguments["result"], **{
                 k: v for k, v in arguments.items() if k != "result"
             })
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "contour":
             s.contour(
                 arguments["result"],
                 count=int(arguments.get("count", 0)),
             )
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "cutplane":
             s.cutplane(**arguments)
-            return {"ok": True}
+            return {"ok": True, "action_complete": True}
 
         if name == "query":
             table = s.query(**arguments)

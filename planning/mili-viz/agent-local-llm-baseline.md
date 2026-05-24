@@ -1,11 +1,12 @@
 # `mili-viz` — local LLM v0 baseline plan
 
-**Status: drafted, not yet started.** Concrete next milestone under
-the exploratory umbrella of `agent-local-llm.md` /
-`agent-local-llm-posttraining.md` / `posttraining-dataset.md`. Read
-`agent-local-llm.md` "Surface choice" first — this doc operationalizes
-that decision (typed-`Command` JSON tool calls) into a runnable v0.
-Tracked in `status.md` § "Local LLM agent (exploratory)".
+**Status: In progress — W4a/W4b implementation with response enrichment.**
+Concrete next milestone under the exploratory umbrella of
+`agent-local-llm.md` / `agent-local-llm-posttraining.md` /
+`posttraining-dataset.md`. W4a (harness) and W4b (driver) are
+completed with response enrichment enhancements (Task 3) to signal
+completion and prevent looping. Ready for baseline run. Tracked in
+`status.md` § "Local LLM agent (exploratory)".
 
 ## Goal — one defensible number
 
@@ -221,6 +222,14 @@ Components:
   table) to build the model-facing dict. **The harness invariants
   pinned in W1 — no `state_times`, no `flight_ticket`, no
   `Snapshot.agent` — are enforced here**.
+  - **ENHANCEMENT (Task 3 — Response Enrichment):** All tool
+    responses now include `action_complete: true` for instant
+    operations (load, show, step, select, material, etc.) to signal
+    successful completion. State-changing tools like `set_state`
+    include both `requested_state` and actual `state` for
+    verification. Enhanced system prompt guides the model to
+    recognize completion signals and avoid repeating identical tool
+    calls. Commit `0baf291`.
 - **Per-turn budget enforcement** — `step_cap`, `max_new_tokens`,
   wall-clock `timeout`. Lives in the harness, not the driver, so
   all three consumers get the same protections.

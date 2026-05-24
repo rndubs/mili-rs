@@ -44,6 +44,18 @@ After fixing these issues: **28% of scenarios now generating tool calls** (L1-L2
 | **parse_error** | 7 | 14% | Some tools not triggered (`load`, `material`, `show-primal`) |
 | **dispatch_error** | 1 | 2% | Tool execution failed |
 
+### After Type Coercion (v0-llamacpp-type-coercion)
+**Major improvement:** 80% of schema_mismatch fixed via automatic type coercion!
+
+| Mode | Count | % | Change |
+|------|-------|---|---|
+| **step_cap_hit** | 22 | 44% | ↔️ unchanged |
+| **dispatch_error** | 17 | 34% | ↑ +16 (from schema_mismatch) |
+| **parse_error** | 7 | 14% | ↔️ unchanged |
+| **schema_mismatch** | 4 | 8% | ↓ -16 (16/20 fixed) |
+
+**Key insight:** Type coercion converted 16 scenarios from "type mismatch" to "semantic validation", exposing argument-level errors (e.g., invalid material IDs, out-of-range state values) that were previously masked. This is **good progress** — the model's arguments are now structurally correct.
+
 ### By Intent (Parse Errors)
 - `load`: 2 failures
 - `material`: 2 failures  
@@ -71,6 +83,24 @@ The integration fixes from deep-research-report-3.md were correct:
 - ✅ Trigger phrase activating tool logic (model calling tools)
 - ✅ Multi-turn serialization enabling tool exchange cycles
 - ✅ Tolerant parser handling model output
+
+## Task 2 Refinement: Parse Error Fixes (In Progress)
+
+### Phase 1: Malformed Tool Names (✅ COMPLETE)
+**Issue:** Model outputs pseudo-actions like `material.disable` instead of just `material`
+**Solution:** Made regex pattern tolerant: `(\w+)` → `([\w.-]+)`, extract base name
+**Result:** 7 → 4 parse_errors (3 fixed: bs-019, bs-043, bs-050)
+**Files:** `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`
+**Commit:** 52dc016
+
+### Phase 2: Non-Triggering Tools (⏳ TESTING)
+**Issue:** Model doesn't output any tool calls for `load` and `show` tools
+**Root cause:** Semantic gap - "display velocity" ≠ "Color the mesh by a result"
+**Solution:** Enhanced system prompt with explicit KEY TOOL MAPPINGS
+**Expected:** Should fix remaining 4 parse_errors (bs-016, bs-026, bs-027, bs-040)
+**Files:** `python/mili-llm-bench/src/mili_llm_bench/driver.py`
+**Commit:** 4ecf41c
+**Status:** Baseline running (v0-llamacpp-enhanced-prompt) - awaiting results
 
 ## Next Steps (Priority Order)
 

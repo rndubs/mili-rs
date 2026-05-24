@@ -63,7 +63,19 @@ _DEFAULT_SYSTEM_PROMPT = (
     "call exactly the tools that satisfy it, and reply with one short "
     "final text message only after the request is fully complete. Do not "
     "narrate plans; emit a tool call instead. Prefer the typed tools "
-    "over the `griz_raw` fallback when a typed tool exists for the task."
+    "over the `griz_raw` fallback when a typed tool exists for the task.\n\n"
+    "UNDERSTANDING TOOL RESPONSES:\n"
+    "When a tool response includes 'action_complete': true, the action has succeeded and you should move on.\n"
+    "For state-changing tools (set_state): compare 'requested_state' with 'state' to verify completion.\n"
+    "Do not repeat the same tool call with identical arguments if you already received a successful response.\n"
+    "Only call a tool again if you need to verify something or if the previous response indicated an error (ok: false).\n\n"
+    "KEY TOOL MAPPINGS:\n"
+    "- Load/open a database: use `load` with root parameter (e.g., root='cylinder')\n"
+    "- Display/show/color a result: use `show` with result parameter (e.g., result='vx')\n"
+    "- Enable/disable materials: use `material` with enable (true/false) and material/class_name\n"
+    "- Select elements: use `select` or `clrsel` (clear selection)\n"
+    "- Change states: use `set_state` or `step`\n"
+    "- Adjust view: use `colormap`, `view`, `named_view`, `legend`"
 )
 
 
