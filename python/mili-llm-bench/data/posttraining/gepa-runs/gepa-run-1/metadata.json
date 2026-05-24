@@ -1,0 +1,9 @@
+{
+  "dataset_path": "/Users/rwhit/Workspace/mili-rs/data/posttraining/eval/bootstrap.jsonl",
+  "provider": "llamacpp",
+  "num_scenarios": 50,
+  "artifact_mode": "system_prompt",
+  "max_iterations": 5,
+  "gepa_engine": "claude-opus-4-7",
+  "gepa_reflection": "medium"
+}

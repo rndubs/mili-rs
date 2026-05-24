@@ -1,0 +1,13 @@
+{
+  "score": 0.25333333333333335,
+  "mean_tier": 0.76,
+  "l3_pass_rate": 0.0,
+  "num_scenarios": 50,
+  "wall_s": 273.83877537498483,
+  "failure_modes": {
+    "dispatch_error": 22,
+    "step_cap_hit": 20,
+    "schema_mismatch": 4,
+    "parse_error": 4
+  }
+}
