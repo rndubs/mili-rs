@@ -459,7 +459,7 @@ def _serialize_gepa_results(
     metadata = {
         "dataset_path": str(config.dataset_path),
         "provider": config.provider_name,
-        "num_scenarios": len(best_result.failure_modes),
+        "num_scenarios": best_result.num_scenarios,
         "artifact_mode": config.artifact_mode,
         "max_iterations": config.max_iterations,
         "gepa_engine": config.gepa_engine,
