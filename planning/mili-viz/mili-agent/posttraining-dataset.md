@@ -265,17 +265,37 @@ Post-condition kinds (closed set, declared by the intent):
 The only interface-dependent stage.
 
 - For each scenario, teacher (Claude API, or strong local 7–14B)
-  proposes K candidate command sequences at temperature, under
-  grammar-constrained decoding where the teacher supports it.
+  proposes **K=3 candidate command sequences** at temperature.
+  Grammar-constrained decoding applies only to local teachers that
+  support GBNF (vLLM, llama.cpp); Claude uses its native tool-use
+  API, so GBNF is a no-op there.
 - Each candidate is run through the **full L0–L3 verifier with the
   real `GrizSession`**. All candidates (pass and fail) are written as
   canonical rollout records — failures are not discarded; they are
   the negative half of the preference/RL projection.
 - `reset()` between candidates keeps rollouts cheap and independent.
-- **Budget gate before bulk run:** cost ≈ scenarios × paraphrases ×
-  K × teacher token price. Estimate and cap *before* the full sweep;
-  run a 200-scenario pilot first, inspect tier distribution, then
-  decide volume (open Q, `agent-local-llm-posttraining.md` §5).
+- **Pilot first, full sweep second.** Run 50 scenarios × ~3
+  paraphrases × K=3 ≈ 450 calls as the pilot. Inspect tier
+  distribution and cost; only then commit to the ~200-scenario full
+  sweep (~1800 calls). Hard budget cap: $50 for pilot, $200 for full
+  sweep — re-plan (smaller K, cheaper teacher, fewer paraphrases) if
+  the pilot extrapolates over those.
+- **Claude → FG canonical conversion** (no information loss; both are
+  JSON tool-call envelopes). Pin in the teacher rollout writer:
+  - Anthropic `{"type": "tool_use", "id": "...", "name": "<n>",
+    "input": {...}}` →
+    FG `{"type": "function", "function": {"name": "<n>",
+    "arguments": {...}}}`. Drop Anthropic's per-call `id` (FG doesn't
+    use it; if a future RL pass needs call-IDs, regenerate them on
+    re-projection rather than baking Anthropic's into the corpus).
+  - Anthropic `{"role": "tool_result", "tool_use_id": "...", "content": "..."}` →
+    FG `{"role": "tool", "name": "<resolved-from-prior-tool_use>",
+    "content": "<stringified content>"}`. Resolve the name by
+    matching `tool_use_id` to the preceding `tool_use` block in the
+    same message stream.
+  - Pin a round-trip unit test asserting that a fixed Anthropic
+    transcript → FG → re-rendered prompt matches the FG inference
+    prompt byte-for-byte.
 
 ### Stage 6 — Dataset assembly, dedup, splits (no dependency)
 
@@ -287,11 +307,31 @@ The only interface-dependent stage.
   row. Held-out eval = whole `(intent, fixture)` cells never seen in
   train, so eval measures generalization, not memorization. Reserve
   ≥1 fixture (candidate: `shell_mat2` or `bar5`) entirely for eval.
-- Balance: cap records per `(intent, fixture)` so high-yield easy
-  intents don't swamp the compositional tail.
+- **Balance + per-intent floor.** Cap records per `(intent, fixture)`
+  so high-yield easy intents don't swamp the compositional tail, **and
+  enforce a ≥40-row-per-intent floor** for the v1 SFT split. The four
+  0%-L3 intents at floor (`material`, `select`, `clrsel`,
+  `view-reset`) are the cheapest source of lift; if rejection sampling
+  on `max_tier>=3` leaves any intent below 40 rows, oversample —
+  re-roll the teacher with fresh paraphrases or temperature for that
+  intent until the floor is met. Failing to enforce this is how you
+  get a model that improves on what was already easy and leaves the
+  zero-rate intents at zero.
+- **Tools-array format conversion.** Records emitted to
+  `sft/*.jsonl` carry `tools` in the FunctionGemma /
+  OpenAI shape `{"type": "function", "function": {"name",
+  "description", "parameters"}}`, **not** the W1
+  `{name, description, input_schema, output_schema}` shape stored in
+  `data/posttraining/grammar/tools.json`. Reuse the existing
+  conversion in `providers/llamacpp.py::_convert_to_openai_tool`
+  (lift to a shared helper in `mili_llm_bench.tool_format` so train
+  and inference call the same function and can't drift). The
+  `output_schema` field is dropped — FunctionGemma's training format
+  has no slot for it.
 - Emit `sft/{train,val}.jsonl`, `pref/{train,val}.jsonl`,
   `eval/heldout.jsonl`, plus a `dataset_card.md` (counts, tier
-  distribution, fixture/intent coverage matrix, known gaps).
+  distribution, fixture/intent coverage matrix, per-intent row counts
+  vs. floor, known gaps).
 
 ### Stage 6.5 — Dataset smoke test (Claude validation; no dependency once Stage 5 lands)
 
@@ -322,9 +362,11 @@ problems, not model problems:
   is wrong. Re-author or split.
 
 **Gate threshold.** The v0 bootstrap ceiling under Claude is 92% L3
-(see §5 below). A synthesized corpus should clear ≥85% L3 under
-Claude with grammar-constrained decoding before SFT consumes it.
-Below that, the data is broken in a way SFT will faithfully *learn*
+(see §5 below). A synthesized corpus should clear **≥85% L3 under
+Claude with native tool-use** before SFT consumes it. (No GBNF
+qualifier — Claude doesn't support grammar-constrained decoding;
+the gate is a data-quality check, not a decoding-format check.)
+Below 85%, the data is broken in a way SFT will faithfully *learn*
 — the rejection-sampling SFT filter (`max_tier >= 3`) will throw out
 the salvageable rollouts and over-fit to whatever bad-postcondition
 artifact remains.

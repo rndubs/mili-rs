@@ -117,7 +117,8 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
 - [ ] **Stage 6.5** — Claude data smoke test. **Runs immediately
       after Stage 3 produces the first batch**, not after Stage 5.
       Catches data bugs before they look like model bugs. Gate: ≥85 %
-      L3 under Claude with grammar-constrained decoding.
+      L3 under Claude with native tool-use (no GBNF qualifier — Claude
+      doesn't support grammar-constrained decoding).
 - [ ] **Stage 5** — Teacher rollouts. Burns Anthropic API on every
       scenario; deliberately last among data stages. Pilot the first
       ~50 scenarios before committing to the full sweep.
@@ -156,12 +157,14 @@ stage runs.
 
 | Gate                          | Threshold                          | Action on miss                                                   |
 | ----------------------------- | ---------------------------------- | ---------------------------------------------------------------- |
-| Stage 6.5 — data quality      | ≥85 % L3 under Claude              | Hand-fix or drop failing scenarios; re-run before Stage 5        |
-| Stage 5 — pilot cost          | ≤ $X per 100 scenarios (TBD)       | Re-plan: smaller K, cheaper teacher, or fewer paraphrases        |
+| Stage 5 — pilot K & budget    | K=3, ≤ $50 for 50-scenario pilot   | Re-plan: smaller K, cheaper teacher, or fewer paraphrases        |
+| Stage 5 — full-sweep budget   | ≤ $200 for ~200-scenario sweep     | Same — re-plan before scaling                                    |
+| Stage 6 — per-intent SFT rows | ≥40 rows/intent in `sft/train.jsonl` | Oversample the deficient intent before training                |
+| Stage 6.5 — data quality      | ≥85 % L3 under Claude (native tool-use; no GBNF qualifier — Claude doesn't support it) | Hand-fix or drop failing scenarios; re-run before SFT |
 | Stage 8 — pre-experiment gate | Stock 0.5–1B + GBNF < ceiling      | Confirms SFT room exists. If it *clears* ceiling: stop, ship that |
 | SFT regression tripwire       | ≥40 % L3 post-SFT                  | Below the GEPA-only ceiling = SFT is harming. Stop and diagnose  |
 | SFT v1 target                 | ≥62 % L3 post-SFT                  | Half the gap. Below: investigate before retraining               |
-| Per-intent floor              | ≥50 % L3 on material/select/clrsel/view-reset | These are the 0 % intents. Failing to move them = SFT taught the wrong thing |
+| Per-intent L3 floor (post-SFT) | ≥50 % L3 on material/select/clrsel/view-reset | These are the 0 % intents. Failing to move them = SFT taught the wrong thing |
 | SFT v1 stretch                | ≥80 % L3                           | At/above: DPO/GRPO is incremental, not necessary                 |
 
 ---
@@ -205,8 +208,21 @@ them here too so the live tracker shows the live unknowns.
 
 ## Changelog
 
-- **2026-05-24** — Doc created. v5 floor (40 % L3) reproduced and
-  pinned. Stage 2 marked active. Cluster bring-up doc
+- **2026-05-24 (rev 2)** — Critique pass against Google's
+  FunctionGemma fine-tuning guide. Resolved off-GPU:
+  hyperparameters re-pinned to Google's reference recipe
+  (LR 5e-5 / 8 epochs / bs=4 / constant LR / `max_length=512` /
+  `packing=False`); TRL API drift fixed (`processing_class=`,
+  `assistant_only_loss=True`); HF model id confirmed
+  (`google/functiongemma-270m-it`, gated); tools-array
+  format-conversion step pinned in Stage 6; Claude→FG record
+  conversion specced in Stage 5; K=3 pinned with $50/$200 budget
+  caps; ≥40-row/intent floor added to Stage 6 gates; Stage 6.5 gate
+  reworded (dropped infeasible GBNF qualifier for Claude). GPU-blocked
+  items split into a new pre-flight doc
+  ([`sft-preflight-gpu.md`](sft-preflight-gpu.md)) and `cluster-setup.md` §0.
+- **2026-05-24 (rev 1)** — Doc created. v5 floor (40 % L3) reproduced
+  and pinned. Stage 2 marked active. Cluster bring-up doc
   ([`cluster-setup.md`](cluster-setup.md)) added for the H100
   training environment.
 
@@ -217,6 +233,8 @@ them here too so the live tracker shows the live unknowns.
 - Build plan: [`posttraining-dataset.md`](posttraining-dataset.md)
 - Cluster bring-up (H100 + llama.cpp + training stack):
   [`cluster-setup.md`](cluster-setup.md)
+- GPU-blocked pre-flight checklist (must clear before `trainer.train()`):
+  [`sft-preflight-gpu.md`](sft-preflight-gpu.md)
 - Why SFT vs. GEPA: [`GEPA-vs-POSTTRAINING.md`](GEPA-vs-POSTTRAINING.md)
 - Original strategy (superseded as a tracker, kept as design rationale):
   [`m3-posttraining-strategy.md`](m3-posttraining-strategy.md)

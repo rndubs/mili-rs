@@ -13,6 +13,75 @@ between macOS and Linux.
 
 ---
 
+## §0. Pre-flight checklist — gate before any `trainer.train()` call
+
+These items were resolved off-GPU (✅) or must be resolved **on the
+cluster, before the first real training run** (🛑). See
+[`sft-preflight-gpu.md`](sft-preflight-gpu.md) for the runnable scripts
+matching the 🛑 items.
+
+### Resolved off-GPU (2026-05-24)
+
+- ✅ **HF model id is `google/functiongemma-270m-it`.** Confirmed via
+  the GGUF README at `ggml-org/functiongemma-270m-it-GGUF`
+  (`base_model: google/functiongemma-270m-it`). The model is **gated**
+  on Hugging Face — a direct anonymous fetch returns HTTP 401; cluster
+  users must `huggingface-cli login` with a token that has accepted
+  the Gemma license before §5 will succeed.
+- ✅ **Reference hyperparameters pinned** to Google's published recipe
+  (LR 5e-5, 8 epochs, batch 4, constant LR, `max_length=512`,
+  `packing=False`, `adamw_torch_fused`). Any deviation from these is a
+  deliberate, justified change — see §6.
+- ✅ **TRL API contract pinned** to `processing_class=` (not the
+  deprecated `tokenizer=`) and `trl>=0.11,<0.13`; transformers pinned
+  to `>=4.50,<5` and `dtype=` (not the deprecated `torch_dtype=`).
+- ✅ **`tools.json` shape is `{name, description, input_schema,
+  output_schema}`** (W1 proto-derived). FunctionGemma's chat template
+  expects OpenAI-style `{"type": "function", "function": {"name",
+  "description", "parameters"}}`. The conversion is the same one
+  already used by `providers/llamacpp.py::_convert_to_openai_tool`
+  (`input_schema` → `parameters`); Stage 6 of the SFT assembly reuses
+  it verbatim. See §6 below.
+- ✅ **v1 pilot uses `attn_implementation="eager"`** (matches Google's
+  validated recipe). Move to `flash_attention_2` only after the v1
+  pilot clears the regression tripwire.
+- ✅ **`assistant_only_loss=True`** is pinned in `SFTConfig`. Without
+  it, the 270M model gets gradient signal on user prompts and tool
+  stdout, which is actively harmful at this scale.
+
+### Must be resolved on-GPU before training (see `sft-preflight-gpu.md`)
+
+- 🛑 **`SFTTrainer` + `tools` field test.** TRL's default collator may
+  not pass `row["tools"]` into `apply_chat_template`. Dump one
+  tokenized sample and grep for `start_function_declaration`; if
+  absent, use the explicit `formatting_func` in §6.
+- 🛑 **Train-vs-inference chat-template parity.** Training renders
+  via HF `apply_chat_template`; llama-server inference currently uses
+  the bespoke `providers/llamacpp.py::_build_functiongemma_prompt`
+  (not the GGUF's baked-in jinja). These two must produce
+  byte-identical strings for the same `(messages, tools)` input, or
+  every post-SFT L3 number is meaningless. Two acceptable paths:
+  (a) switch llama-server inference to `--jinja` (the GGUF-baked
+  template) and assert byte-equality with HF; or (b) keep the bespoke
+  builder and write a custom HF chat template at training time that
+  matches it byte-for-byte. **Pick one on day 1 of cluster bring-up.**
+- 🛑 **`assistant_only_loss=True` compatibility test.** Confirm the
+  feature works with FunctionGemma's chat template role tokens in
+  pinned TRL version — loss should be non-zero only on
+  `<start_of_turn>model …<end_of_turn>` spans.
+- 🛑 **GGUF chat-template baking.** `convert_hf_to_gguf.py` carries
+  the tokenizer's `chat_template` into the GGUF. After conversion,
+  `diff` the `tokenizer_config.json` between source HF model and saved
+  final checkpoint to detect any silent template drift introduced by
+  TRL.
+- 🛑 **Effective `max_length` audit.** Render the longest assembled
+  rollout (compound multi-step + full tools array) through
+  `apply_chat_template(..., tokenize=True)` and confirm length <
+  `max_length`. Multi-step compound scenarios with the full ~16-tool
+  inventory can blow past 512 tokens silently.
+
+---
+
 ## Hardware baseline
 
 - NVIDIA H100 80GB (Hopper, compute capability **sm_90**).
@@ -121,15 +190,21 @@ covers inference deps; for training add a new `train` extra to
 # Optional — SFT training pipeline. Heavier than `functiongemma`
 # (which is inference-only); kept separate so eval-only setups don't
 # pull TRL/PEFT.
+#
+# Version pins are upper-bounded because both TRL and transformers
+# have churned APIs across minors (tokenizer→processing_class,
+# torch_dtype→dtype, SFTTrainer collator behavior on `tools`). Bump
+# one library at a time and re-run §0's pre-flight before training.
 train = [
-  "transformers>=4.50",
-  "torch>=2.5",         # CUDA 12.4-compatible build
-  "accelerate>=0.34",
-  "trl>=0.11",          # SFTTrainer
-  "peft>=0.13",         # optional, for LoRA
-  "datasets>=3.0",
-  "sentencepiece",      # Gemma tokenizer
-  # "flash-attn>=2.6",  # add after torch is installed; see §3a
+  "transformers>=4.50,<5",     # `dtype=` arg; chat_template w/ tools
+  "torch>=2.5,<3",             # CUDA 12.4-compatible build
+  "accelerate>=0.34,<2",
+  "trl>=0.11,<0.13",           # SFTTrainer w/ assistant_only_loss
+  "peft>=0.13,<0.14",          # optional; we full-FT at 270M, see §4
+  "datasets>=3.0,<5",
+  "sentencepiece",             # Gemma tokenizer
+  "protobuf",                  # Gemma tokenizer dep
+  # "flash-attn>=2.6",         # add after torch is installed; see §3a
 ]
 ```
 
@@ -183,23 +258,37 @@ no memory or speed gain. Revisit if the base model grows past ~3B.
 You train on the original Hugging Face checkpoint. The GGUF artifact
 at `ggml-org/functiongemma-270m-it-GGUF` is the **inference output**,
 converted from upstream HF weights. The source is
-**`google/functiongemma-270m-it`** ⚠ verify the exact id from the
-`ggml-org/functiongemma-270m-it-GGUF` README before pinning, in case
-the upstream repo path differs.
+**`google/functiongemma-270m-it`** (confirmed via the GGUF repo's
+`base_model:` metadata; see §0).
+
+**Gated model — log in once per cluster session.** FunctionGemma is
+license-gated; anonymous `from_pretrained` fetches return HTTP 401.
+Accept the license on huggingface.co under your account, mint a
+read token, then:
+
+```bash
+huggingface-cli login --token "$HF_TOKEN"
+```
 
 ```python
-import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_id = "google/functiongemma-270m-it"  # verify
+model_id = "google/functiongemma-270m-it"
 tok = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
-    torch_dtype=torch.bfloat16,
-    attn_implementation="flash_attention_2",  # fallback "sdpa"
+    dtype="auto",                       # transformers ≥4.50: `dtype` (not `torch_dtype`)
+    attn_implementation="eager",        # v1 pilot: match Google's validated recipe
+                                        # post-pilot: switch to "flash_attention_2"
     device_map="cuda",
 )
 ```
+
+Rationale for `eager`: Google's reference fine-tune recipe was
+validated with `attn_implementation="eager"`. Flash-attn 2 is faster
+on H100 but introduces a second variable to debug if the v1 pilot
+yields garbage; defer the switch until after the regression tripwire
+is cleared.
 
 On clusters with a shared filesystem, point `HF_HOME` at a fast
 scratch dir so multiple jobs don't redownload:
@@ -210,12 +299,48 @@ export HF_HOME=/scratch/$USER/hf-cache
 
 ---
 
-## 6. SFT training (skeleton)
+## 6. SFT training (recipe)
 
-The dataset format from Stage 6 (`sft/{train,val}.jsonl`) already
-matches HF chat-template shape (`messages` array), so `SFTTrainer`
-consumes it directly. The TRL API has churned across versions — pin
-the `trl` version once a recipe works.
+The dataset format from Stage 6 (`sft/{train,val}.jsonl`) has one
+row per rollout in canonical FunctionGemma shape:
+
+```json
+{
+  "messages": [{"role": "developer", "content": "..."}, ...],
+  "tools":    [{"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}, ...]
+}
+```
+
+The `tools` array is **the OpenAI/FunctionGemma shape**, *not* the
+W1 `{name, description, input_schema, output_schema}` shape from
+`data/posttraining/grammar/tools.json`. Stage 6 of assembly applies
+the conversion (same as `providers/llamacpp.py::_convert_to_openai_tool`:
+`name`→`function.name`, `description`→`function.description`,
+`input_schema`→`function.parameters`); train-time data must not
+require the trainer to do that conversion.
+
+### Hyperparameters — pinned to Google's reference
+
+These match Google's published FunctionGemma fine-tuning guide
+(16/20 success on the reference task). **Deviate only with a one-line
+justification in the changelog** — silent drift is the failure mode
+that produces a worse-than-baseline model with no obvious cause.
+
+| Knob | Value | Source |
+|---|---|---|
+| `learning_rate` | `5e-5` | Google reference |
+| `num_train_epochs` | `8` | Google reference |
+| `per_device_train_batch_size` | `4` | Google reference |
+| `gradient_accumulation_steps` | `1` | (no accumulation — Google reference uses `bs=4` raw) |
+| `lr_scheduler_type` | `"constant"` | Google reference |
+| `max_length` | `512` | Google reference — **but audit longest assembled rollout first (§0)** |
+| `packing` | `False` | Google reference |
+| `optim` | `"adamw_torch_fused"` | Google reference |
+| `bf16` | `True` | H100 native |
+| `eval_strategy` | `"epoch"` | Google reference |
+| `assistant_only_loss` | `True` | Critical for tool-calling SFT at 270M (not in Google's guide, but justified — Google's tiny 20-row toy set doesn't hit the failure mode; our ~200-scenario corpus does) |
+
+### Training script
 
 ```python
 from trl import SFTConfig, SFTTrainer
@@ -224,16 +349,38 @@ from datasets import load_dataset
 train_ds = load_dataset("json", data_files="data/posttraining/sft/train.jsonl")["train"]
 val_ds   = load_dataset("json", data_files="data/posttraining/sft/val.jsonl")["train"]
 
+# Belt-and-suspenders: render the chat template ourselves so the
+# `tools` field is guaranteed to reach apply_chat_template. TRL's
+# default collator has historically dropped non-`messages` columns
+# in some minor versions; the explicit formatting_func removes that
+# variable. The §0 pre-flight test verifies whether this is needed,
+# but applying it unconditionally costs nothing.
+def formatting_func(row):
+    return tok.apply_chat_template(
+        row["messages"],
+        tools=row["tools"],
+        add_generation_prompt=False,
+        tokenize=False,
+    )
+
 cfg = SFTConfig(
     output_dir="data/posttraining/checkpoints/v1",
-    num_train_epochs=3,
-    per_device_train_batch_size=8,
-    gradient_accumulation_steps=4,
-    learning_rate=2e-5,
+    # Google reference recipe (see table above)
+    num_train_epochs=8,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=1,
+    learning_rate=5e-5,
+    lr_scheduler_type="constant",
+    max_length=512,
+    packing=False,
+    optim="adamw_torch_fused",
     bf16=True,
+    # Tool-calling SFT specifics
+    assistant_only_loss=True,
+    # Reporting / checkpoints
     eval_strategy="epoch",
     save_strategy="epoch",
-    logging_steps=10,
+    logging_steps=1,
     report_to="none",       # add "wandb" if you want a run dashboard
 )
 trainer = SFTTrainer(
@@ -241,22 +388,28 @@ trainer = SFTTrainer(
     args=cfg,
     train_dataset=train_ds,
     eval_dataset=val_ds,
-    tokenizer=tok,
+    processing_class=tok,           # TRL ≥0.11: replaces deprecated `tokenizer=`
+    formatting_func=formatting_func,
 )
 trainer.train()
 trainer.save_model("data/posttraining/checkpoints/v1/final")
 tok.save_pretrained("data/posttraining/checkpoints/v1/final")  # belt + suspenders
 ```
 
-This is the canonical-but-skeletal recipe; tighten hyperparameters
-after a first successful run. Expected wall-clock for 270M on one
-H100: minutes per epoch at v1 corpus size (~200 scenarios → a few
-hundred filtered SFT records).
+Expected wall-clock for 270M on one H100: minutes per epoch at v1
+corpus size (~200 scenarios → a few hundred filtered SFT records).
 
-**Important:** train on the `messages` field of the rollout records
-— **do not** train on the `tools` array. `tools` is a per-turn
-context prefix shown to the model at inference; making it a target
-breaks the runtime contract.
+**Important constraints:**
+
+- Train on the `messages` field; `tools` is a **context prefix** shown
+  to the model at inference, never a target. `assistant_only_loss=True`
+  enforces this at the token level (loss masked everywhere except
+  assistant turns).
+- **Do not change the tokenizer.** Any modification to
+  `tokenizer_config.json` (chat template, special tokens, vocabulary)
+  between source HF model and saved checkpoint will silently break
+  GGUF conversion or inference. The §0 pre-flight diffs these to
+  catch drift.
 
 ---
 
@@ -319,15 +472,26 @@ Grade against the M5 gates:
 - **`-hf …:BF16` requires network from the compute node.** If your
   cluster blocks outbound network from compute nodes, pre-stage the
   GGUF on shared storage and use `-m <path>`.
-- **HF model id is unverified above.** `google/functiongemma-270m-it`
-  is the natural guess but should be confirmed from the
-  `ggml-org/functiongemma-270m-it-GGUF` README before pinning.
+- **FunctionGemma is gated.** Anonymous `from_pretrained` returns
+  HTTP 401. `huggingface-cli login` with a token from an account that
+  accepted the Gemma license. See §5.
 - **Tokenizer drift on save.** `SFTTrainer.save_model()` saves the
   HF model; explicitly call `tok.save_pretrained(...)` to the same
   directory so the GGUF converter finds the tokenizer next to the
   weights. A missing/mismatched tokenizer manifests as "the model
-  speaks gibberish" post-conversion.
-- **Do not train on `tools`.** See §6.
+  speaks gibberish" post-conversion. The §0 pre-flight diff catches
+  this before it's a debugging mystery.
+- **Train-vs-inference chat template parity.** The runtime serving
+  path (`providers/llamacpp.py`) hand-rolls the FunctionGemma prompt
+  rather than using the GGUF's baked-in jinja template. Training via
+  HF `apply_chat_template` will likely *not* produce a byte-identical
+  prompt to what llama-server feeds the trained model. §0 pre-flight
+  forces a decision: switch llama-server to `--jinja`, or back-port
+  the bespoke format into a custom HF chat template. **Skipping this
+  decision is the most likely way to ship a model that scores 0 % L3
+  post-SFT for reasons that have nothing to do with training.**
+- **Do not train on `tools`.** See §6. `assistant_only_loss=True`
+  enforces this.
 
 ---
 
@@ -345,3 +509,21 @@ Grade against the M5 gates:
 **Last updated:** 2026-05-24. Treat the version-pinned ranges as
 ceilings-at-time-of-writing; bump and re-test as the upstream
 libraries move.
+
+## Changelog
+
+- **2026-05-24 (rev 2).** Added §0 pre-flight checklist (split into
+  off-GPU ✅ and on-GPU 🛑 items). Pinned hyperparameters to Google's
+  reference recipe (LR 5e-5 / 8 epochs / bs=4 / constant LR /
+  `max_length=512` / `packing=False` / `adamw_torch_fused`); the prior
+  draft (LR 2e-5 / 3 epochs / effective bs=32) is dropped — it
+  deviated without justification. Fixed `tokenizer=` →
+  `processing_class=`; `torch_dtype=` → `dtype="auto"`;
+  `attn_implementation="flash_attention_2"` → `"eager"` for v1 pilot.
+  Added `assistant_only_loss=True`. Pinned `transformers<5`,
+  `trl<0.13`. Documented `tools.json` →
+  FunctionGemma-shape conversion. Confirmed `google/functiongemma-270m-it`
+  via GGUF `base_model:` metadata; documented the gated-model login
+  requirement. Flagged train-vs-inference chat-template parity as a
+  day-1 cluster decision.
+- **2026-05-24 (rev 1).** Initial draft.
