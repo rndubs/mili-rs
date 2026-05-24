@@ -41,7 +41,7 @@ from typing import Any, Callable
 
 import yaml
 
-from . import driver, report
+from . import driver, gepa_integration, report
 from .driver import EvalConfig, compute_system_prompt_hash, run_eval, run_one_scenario
 from .harness import Dispatcher, FakeDispatcher, Registry
 from .providers.base import LlmProvider
@@ -548,6 +548,45 @@ def _default_tools_path() -> Path:
     return default_artifact_path()
 
 
+def _cmd_run_gepa(args: argparse.Namespace) -> int:
+    """Run GEPA optimization loop on system prompt.
+
+    Wraps gepa_integration.run_gepa_optimization to propose and evaluate
+    system prompt variants via GEPA.
+    """
+    try:
+        config = gepa_integration.GepaRunConfig(
+            dataset_path=Path(args.scenarios),
+            output_dir=Path(args.out),
+            provider_name=args.provider,
+            num_scenarios=args.num_scenarios,
+            artifact_mode="system_prompt",
+            max_iterations=args.max_iterations,
+            gepa_engine=args.gepa_engine,
+            gepa_reflection=args.gepa_reflection,
+        )
+
+        result = gepa_integration.run_gepa_optimization(config)
+
+        print(
+            f"GEPA optimization complete: best score {result['best_score']:.3f}; "
+            f"see {args.out}"
+        )
+        return 0
+
+    except ImportError as e:
+        sys.stderr.write(
+            f"GEPA library not installed: {e}\n"
+            "Install with: pip install gepa\n"
+        )
+        return 1
+    except Exception as exc:
+        import traceback
+        sys.stderr.write(f"run-gepa failed: {exc!r}\n")
+        traceback.print_exc(file=sys.stderr)
+        return 1
+
+
 # ---------------------------------------------------------------------------
 # argparse plumbing.
 # ---------------------------------------------------------------------------
@@ -650,6 +689,54 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--out", required=True, help="Output directory for re-graded artifacts.")
     _add_run_common_flags(replay)
     replay.set_defaults(func=_cmd_replay)
+
+    gepa = subs.add_parser(
+        "run-gepa",
+        help=(
+            "Run GEPA optimization loop on system prompt. "
+            "Proposes and evaluates system prompt variants via GEPA."
+        ),
+    )
+    gepa.add_argument(
+        "--scenarios",
+        required=True,
+        help="Path to scenarios JSONL (e.g., data/posttraining/eval/bootstrap.jsonl).",
+    )
+    gepa.add_argument(
+        "--out",
+        required=True,
+        help="Output directory for GEPA results (best artifact, history, metrics).",
+    )
+    gepa.add_argument(
+        "--provider",
+        choices=["llamacpp", "anthropic"],
+        default="llamacpp",
+        help="LLM provider for evaluation (default: llamacpp).",
+    )
+    gepa.add_argument(
+        "--num-scenarios",
+        type=int,
+        default=None,
+        help="Limit evaluation to N scenarios (for faster iteration; default: all).",
+    )
+    gepa.add_argument(
+        "--max-iterations",
+        type=int,
+        default=5,
+        help="Max GEPA optimization iterations (default: 5).",
+    )
+    gepa.add_argument(
+        "--gepa-engine",
+        default="claude-opus-4-7",
+        help="GEPA proposer model ID (default: claude-opus-4-7).",
+    )
+    gepa.add_argument(
+        "--gepa-reflection",
+        choices=["shallow", "medium", "deep"],
+        default="medium",
+        help="GEPA reflection depth (default: medium).",
+    )
+    gepa.set_defaults(func=_cmd_run_gepa)
 
     return parser
 
