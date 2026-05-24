@@ -15,13 +15,13 @@ from typing import Any
 import pytest
 
 from mili_llm_bench import driver, scenarios
-from mili_llm_bench.dispatchers import FakeDispatcher
+from mili_llm_bench.harness import FakeDispatcher, Registry
 from mili_llm_bench.gepa_integration import (
     artifact_to_eval_config,
     evaluate_artifact,
     evaluate_artifact_detailed,
 )
-from mili_llm_bench.harness import Registry
+from mili_llm_bench.providers.base import ProviderOutput
 from mili_llm_bench.providers.mock import MockLlmProvider
 
 
@@ -168,9 +168,9 @@ class TestEvaluateArtifact:
     ) -> None:
         """evaluate_artifact returns a float in [0, 1]."""
         def provider_factory() -> Any:
-            return MockLlmProvider(
-                tool_calls=[{"name": "load", "arguments": {"root": "test"}}],
-            )
+            return MockLlmProvider([
+                ProviderOutput(tool_calls=[{"name": "load", "arguments": {"root": "test"}}])
+            ])
 
         def dispatcher_factory(scenario: scenarios.Scenario) -> Any:
             return FakeDispatcher(scenario)
@@ -197,9 +197,9 @@ class TestEvaluateArtifact:
         custom_prompt = "You are a test assistant"
 
         def provider_factory() -> Any:
-            return MockLlmProvider(
-                tool_calls=[{"name": "load", "arguments": {"root": "test"}}],
-            )
+            return MockLlmProvider([
+                ProviderOutput(tool_calls=[{"name": "load", "arguments": {"root": "test"}}])
+            ])
 
         def dispatcher_factory(scenario: scenarios.Scenario) -> Any:
             return FakeDispatcher(scenario)
@@ -224,9 +224,9 @@ class TestEvaluateArtifact:
     ) -> None:
         """evaluate_artifact_detailed returns EvaluationResult with breakdown."""
         def provider_factory() -> Any:
-            return MockLlmProvider(
-                tool_calls=[{"name": "load", "arguments": {"root": "test"}}],
-            )
+            return MockLlmProvider([
+                ProviderOutput(tool_calls=[{"name": "load", "arguments": {"root": "test"}}])
+            ])
 
         def dispatcher_factory(scenario: scenarios.Scenario) -> Any:
             return FakeDispatcher(scenario)

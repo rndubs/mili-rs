@@ -50,6 +50,43 @@ from .providers.replay import ReplayLlmProvider
 from .providers.base import ProviderOutput
 from .scenarios import Scenario, load_scenarios
 
+
+# ---------------------------------------------------------------------------
+# Utility: Find repo root and normalize relative paths
+# ---------------------------------------------------------------------------
+
+
+def _find_repo_root() -> Path:
+    """Find the repository root by looking for .git or CLAUDE.md.
+
+    Returns the first parent directory (walking up from CWD) that contains
+    either .git or CLAUDE.md. Falls back to CWD if not found.
+    """
+    current = Path.cwd()
+    for parent in [current, *current.parents]:
+        if (parent / ".git").exists() or (parent / "CLAUDE.md").exists():
+            return parent
+    return current
+
+
+def _resolve_path(path_str: str) -> Path:
+    """Resolve a path, preferring repo root for relative paths.
+
+    If path_str is relative and starts with 'data/', resolve it relative
+    to the repo root. Otherwise resolve relative to CWD. Absolute paths
+    are returned unchanged.
+    """
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+
+    # If path starts with "data/", resolve from repo root
+    if path_str.startswith("data/"):
+        return _find_repo_root() / path
+
+    # Otherwise, resolve from CWD
+    return path.resolve()
+
 # The five-element closed set the operator sees.
 SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "functiongemma", "anthropic", "llamacpp")
 
@@ -362,8 +399,12 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
 def _cmd_run(args: argparse.Namespace) -> int:
     from . import __version__ as bench_version
 
-    scenarios = load_scenarios(args.scenarios)
-    tools_path = Path(args.tools) if args.tools else None
+    # Resolve paths relative to repo root for consistency
+    scenarios_path = _resolve_path(args.scenarios)
+    tools_path = _resolve_path(args.tools) if args.tools else None
+    out_dir = _resolve_path(args.out)
+
+    scenarios = load_scenarios(scenarios_path)
     if tools_path is not None:
         registry = Registry.load_from_artifact(tools_path)
     else:
@@ -380,7 +421,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         functiongemma_revision=args.functiongemma_revision,
     )
 
-    out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # config.yaml — falsifiability artifact. Compute the hashes first
@@ -443,14 +483,16 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     """
     from . import __version__ as bench_version
 
-    in_path = Path(args.rollouts)
-    out_dir = Path(args.out)
+    # Resolve paths relative to repo root for consistency
+    in_path = _resolve_path(args.rollouts)
+    out_dir = _resolve_path(args.out)
+    tools_path = _resolve_path(args.tools) if args.tools else None
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Reconstruct scenarios from the stored records.
     scenarios = _scenarios_from_rollouts(in_path)
 
-    tools_path = Path(args.tools) if args.tools else None
     if tools_path is not None:
         registry = Registry.load_from_artifact(tools_path)
     else:
@@ -549,29 +591,50 @@ def _default_tools_path() -> Path:
 
 
 def _cmd_run_gepa(args: argparse.Namespace) -> int:
-    """Run GEPA optimization loop on system prompt.
+    """Run GEPA optimization loop on artifact (prompt + step_cap + tools).
 
     Wraps gepa_integration.run_gepa_optimization to propose and evaluate
-    system prompt variants via GEPA.
+    artifact variants via GEPA, including system prompt, step_cap, and
+    tool descriptions. Automatically finds and seeds from the most recent
+    previous run (unless --seed-artifact-dir is explicitly provided).
+
+    Output directories are timestamped (gepa-run-YYYYMMDD-HHMMSS) for
+    automatic discovery of previous runs.
     """
     try:
+        # Resolve paths relative to repo root for consistency
+        scenarios_path = _resolve_path(args.scenarios)
+        output_path = _resolve_path(args.out)
+        seed_path = _resolve_path(args.seed_artifact_dir) if args.seed_artifact_dir else None
+
+        # Auto-generate timestamped output dir if user didn't provide explicit path
+        if not output_path.name.startswith("gepa-run-"):
+            # User provided a base directory; generate timestamped subdir
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_path = output_path / f"gepa-run-{timestamp}"
+
         config = gepa_integration.GepaRunConfig(
-            dataset_path=Path(args.scenarios),
-            output_dir=Path(args.out),
+            dataset_path=scenarios_path,
+            output_dir=output_path,
             provider_name=args.provider,
             num_scenarios=args.num_scenarios,
-            artifact_mode="system_prompt",
+            artifact_mode="config",  # Optimizes system_prompt, step_cap, tools
             max_iterations=args.max_iterations,
             gepa_engine=args.gepa_engine,
             gepa_reflection=args.gepa_reflection,
+            seed_artifact_dir=seed_path,  # None = auto-discover
         )
 
         result = gepa_integration.run_gepa_optimization(config)
 
         print(
-            f"GEPA optimization complete: best score {result['best_score']:.3f}; "
-            f"see {args.out}"
+            f"GEPA optimization complete: best score {result['best_score']:.3f}"
         )
+        print(f"Results saved to: {output_path}")
+        if isinstance(result["best_artifact"], dict) and "tools" in result["best_artifact"]:
+            print(f"\n✓ Best tools saved to best_tools.json")
+            print(f"  Next run will auto-discover these tools and iterate further.")
         return 0
 
     except ImportError as e:
@@ -693,8 +756,8 @@ def build_parser() -> argparse.ArgumentParser:
     gepa = subs.add_parser(
         "run-gepa",
         help=(
-            "Run GEPA optimization loop on system prompt. "
-            "Proposes and evaluates system prompt variants via GEPA."
+            "Run GEPA optimization loop: system prompt + step_cap + tool definitions. "
+            "Auto-seeds from most recent previous run for continuous improvement."
         ),
     )
     gepa.add_argument(
@@ -705,7 +768,11 @@ def build_parser() -> argparse.ArgumentParser:
     gepa.add_argument(
         "--out",
         required=True,
-        help="Output directory for GEPA results (best artifact, history, metrics).",
+        help=(
+            "Output directory or base path. If not a gepa-run-* path, "
+            "a timestamped subdirectory (gepa-run-YYYYMMDD-HHMMSS) is auto-created. "
+            "Example: --out data/posttraining/gepa-runs"
+        ),
     )
     gepa.add_argument(
         "--provider",
@@ -735,6 +802,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["shallow", "medium", "deep"],
         default="medium",
         help="GEPA reflection depth (default: medium).",
+    )
+    gepa.add_argument(
+        "--seed-artifact-dir",
+        default=None,
+        help=(
+            "Optional: Path to a specific GEPA run to seed from. "
+            "If omitted, auto-discovers the most recent run in the same parent directory. "
+            "(default: None — auto-discover, fall back to baseline tools)"
+        ),
     )
     gepa.set_defaults(func=_cmd_run_gepa)
 
