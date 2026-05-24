@@ -63,7 +63,14 @@ _DEFAULT_SYSTEM_PROMPT = (
     "call exactly the tools that satisfy it, and reply with one short "
     "final text message only after the request is fully complete. Do not "
     "narrate plans; emit a tool call instead. Prefer the typed tools "
-    "over the `griz_raw` fallback when a typed tool exists for the task."
+    "over the `griz_raw` fallback when a typed tool exists for the task.\n\n"
+    "KEY TOOL MAPPINGS:\n"
+    "- Load/open a database: use `load` with root parameter (e.g., root='cylinder')\n"
+    "- Display/show/color a result: use `show` with result parameter (e.g., result='vx')\n"
+    "- Enable/disable materials: use `material` with enable (true/false) and material/class_name\n"
+    "- Select elements: use `select` or `clrsel` (clear selection)\n"
+    "- Change states: use `set_state` or `step`\n"
+    "- Adjust view: use `colormap`, `view`, `named_view`, `legend`"
 )
 
 
