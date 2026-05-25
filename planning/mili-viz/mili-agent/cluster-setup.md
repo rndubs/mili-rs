@@ -50,9 +50,21 @@ matching the 🛑 items.
 - ✅ **v1 pilot uses `attn_implementation="eager"`** (matches Google's
   validated recipe). Move to `flash_attention_2` only after the v1
   pilot clears the regression tripwire.
-- ✅ **`assistant_only_loss=True`** is pinned in `SFTConfig`. Without
-  it, the 270M model gets gradient signal on user prompts and tool
-  stdout, which is actively harmful at this scale.
+- ✅ **Assistant-only loss masking** is wired via a custom data
+  collator (`mili_llm_bench.assistant_only_collator.MaskAssistantOnlyCollator`),
+  not TRL's native `assistant_only_loss=True` kwarg. The original
+  rev-12 seam claim ("`assistant_only_loss=True` is pinned in
+  `SFTConfig`") was vacuous: the kwarg didn't exist on the rev-2
+  pinned TRL 0.12.x (rev 15 / 16), and on rev-16's bumped TRL 1.5.0
+  the kwarg exists but `SFTTrainer.__init__` raises on FG's chat
+  template (lacks `{% generation %}` markers and is too macro-heavy
+  for TRL's auto-patch). See `m5-sft-pipeline.md` rev 17 and report
+  `data/posttraining/sft/preflight-4-loss-mask.md`. The custom
+  collator masks: developer / user / tool turns + the assistant-turn
+  `<start_of_turn>model\n` header + tool-response payloads inside
+  model turns. Without this masking, the 270M model gets gradient
+  signal on user prompts and tool stdout — actively harmful at this
+  scale.
 
 ### Must be resolved on-GPU before training (see `sft-preflight-gpu.md`)
 
@@ -69,10 +81,10 @@ matching the 🛑 items.
   `python/mili-llm-bench/tests/test_providers_llamacpp.py::
   TestChatCompletionsPath`. **v5 floor re-baseline pending on a GPU
   node** — see `sft-preflight-gpu.md` §2 "Required follow-on".
-- 🛑 **`assistant_only_loss=True` compatibility test.** Confirm the
-  feature works with FunctionGemma's chat template role tokens in
-  pinned TRL version — loss should be non-zero only on
-  `<start_of_turn>model …<end_of_turn>` spans.
+- ✅ **`assistant_only_loss` mask check.** Cleared 2026-05-25 on
+  `matrix41` H100 via custom data collator (option B) — see above and
+  `m5-sft-pipeline.md` rev 17. TRL's native path failed on FG's
+  template; `MaskAssistantOnlyCollator` is the in-tree replacement.
 - 🛑 **GGUF chat-template baking.** `convert_hf_to_gguf.py` carries
   the tokenizer's `chat_template` into the GGUF. After conversion,
   `diff` the `tokenizer_config.json` between source HF model and saved
@@ -356,13 +368,16 @@ that produces a worse-than-baseline model with no obvious cause.
 | `optim` | `"adamw_torch_fused"` | Google reference |
 | `bf16` | `True` | H100 native |
 | `eval_strategy` | `"epoch"` | Google reference |
-| `assistant_only_loss` | `True` | Critical for tool-calling SFT at 270M (not in Google's guide, but justified — Google's tiny 20-row toy set doesn't hit the failure mode; our ~200-scenario corpus does) |
+| `assistant_only_loss` | `False` at the TRL level | TRL 1.5.0's native path raises on FG's chat template (preflight #4, m5-sft-pipeline.md rev 17). Loss masking is supplied by `MaskAssistantOnlyCollator` via `data_collator=`. The training *intent* (loss only on assistant turns) is unchanged — see §0. |
 
 ### Training script
 
 ```python
+from transformers import DataCollatorForLanguageModeling
 from trl import SFTConfig, SFTTrainer
 from datasets import load_dataset
+
+from mili_llm_bench.assistant_only_collator import MaskAssistantOnlyCollator
 
 train_ds = load_dataset("json", data_files="data/posttraining/sft/train.jsonl")["train"]
 val_ds   = load_dataset("json", data_files="data/posttraining/sft/val.jsonl")["train"]
@@ -393,8 +408,10 @@ cfg = SFTConfig(
     packing=False,
     optim="adamw_torch_fused",
     bf16=True,
-    # Tool-calling SFT specifics
-    assistant_only_loss=True,
+    # Tool-calling SFT specifics — TRL's native path raises on FG's template
+    # (preflight #4, m5-sft-pipeline.md rev 17). Mask via the custom collator
+    # passed below; keep this False to bypass TRL's broken auto-patch.
+    assistant_only_loss=False,
     # Reporting / checkpoints
     eval_strategy="epoch",
     save_strategy="epoch",
@@ -409,7 +426,9 @@ trainer = SFTTrainer(
     processing_class=tok,           # TRL ≥0.11: replaces deprecated `tokenizer=`
     formatting_func=formatting_func,  # mandatory on trl 0.12.x (KeyError otherwise);
                                       # optional on trl 1.x (auto-detect) but kept for drift-proofing
-
+    data_collator=MaskAssistantOnlyCollator(
+        DataCollatorForLanguageModeling(tokenizer=tok, mlm=False),
+    ),
 )
 trainer.train()
 trainer.save_model("data/posttraining/checkpoints/v1/final")
@@ -531,6 +550,21 @@ ceilings-at-time-of-writing; bump and re-test as the upstream
 libraries move.
 
 ## Changelog
+
+- **2026-05-25 (rev 4).** Preflight #4 cleared via custom collator
+  (option B). TRL 1.5.0's native `assistant_only_loss=True` fails at
+  `SFTTrainer.__init__` on FG's chat template (`ValueError: not
+  training-compatible (missing prefix-preservation or {% generation %}
+  markers)`). The rev-2 §0 seam claim is now correctly attributed to
+  `MaskAssistantOnlyCollator` (`mili_llm_bench.assistant_only_collator`)
+  rather than the kwarg. §6 recipe updated: `assistant_only_loss=False`
+  at the TRL level; loss masking via `data_collator=` instead. Hyperparam
+  table row reworded; no other hyperparameters changed. New always-on
+  test pin
+  (`mili-llm-bench/tests/test_assistant_only_collator.py`, 8 cases).
+  Full mili-llm-bench suite: 229 / 229 + 1 skip (+8 from rev 3's
+  221 / 221). See `m5-sft-pipeline.md` rev 17 and report
+  `data/posttraining/sft/preflight-4-loss-mask.md`.
 
 - **2026-05-25 (rev 3).** Bumped `trl` pin from `>=0.11,<0.13` to
   `>=1.0,<2`. The rev-2 pin was self-contradicting: its stated

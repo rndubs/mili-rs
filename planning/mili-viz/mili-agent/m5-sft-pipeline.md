@@ -1,12 +1,19 @@
 # M5 — SFT pipeline (live tracker)
 
 **Status (2026-05-25):** Stages 2, 3, 5, 6, 6.5 cleared; preflight
-#1, #2, **#3**, #4, **#5** cleared (#2 via Path A rev 8; **#3
+#1, #2, **#3**, **#4**, **#5** cleared (#2 via Path A rev 8; #3
 cleared on `matrix41` H100 in rev 15, retested under TRL 1.5.0 in
 rev 16 — `formatting_func` is mandatory under TRL 0.12.x, optional
-under TRL 1.x but kept in the recipe for drift-proofing**; #4 =
-config seam landed pre-rev 12, GPU compat check still pending; #5
-cleared off-GPU in rev 14 — see below). **TRL pin bumped
+under TRL 1.x but kept in the recipe for drift-proofing; **#4
+cleared on `matrix41` H100 in rev 17 via option (B) — custom
+data collator; TRL 1.5.0's native `assistant_only_loss=True` raised
+at `SFTTrainer.__init__` because FG's chat template lacks
+`{% generation %}` markers and is too macro-heavy for TRL's
+auto-patch. The rev-12 config-seam claim in `cluster-setup.md` §0
+turned out to be genuinely vacuous (kwarg exists on TRL 1.5.0 but
+trainer dies on the template); see report
+`data/posttraining/sft/preflight-4-loss-mask.md`**; #5 cleared
+off-GPU in rev 14 — see below). **TRL pin bumped
 `>=0.11,<0.13` → `>=1.0,<2` in rev 16** (the original pin's stated
 justification — `assistant_only_loss` — did not exist on the pinned
 versions; trl 0.20+ is the floor for that kwarg). rev-9
@@ -296,6 +303,89 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 17)** — **Preflight #4 cleared on `matrix41` H100
+  via option (B) — custom data collator.** New module
+  `python/mili-llm-bench/src/mili_llm_bench/assistant_only_collator.py`
+  (`MaskAssistantOnlyCollator`) replaces TRL 1.5.0's native
+  `assistant_only_loss=True` path, which **fails at
+  `SFTTrainer.__init__`** on FunctionGemma's chat template with
+  `ValueError: The chat template is not training-compatible (missing
+  prefix-preservation or {% generation %} markers) and patching is not
+  supported for this template.` The FG template is macro-heavy
+  (`format_parameters`, `format_function_declaration`,
+  `format_argument`) and TRL's auto-patch can't infer assistant
+  boundaries from the substituted-`role` rendering pattern. The
+  rev-12 config-seam claim in `cluster-setup.md` §0 (line 53-55) was
+  therefore genuinely vacuous — the kwarg exists on TRL 1.5.0
+  (rev-16's bump made it accept) but the trainer dies before any
+  batch is produced. Option A (patching the FG template to add
+  `{% generation %}` markers) would require structurally rewriting
+  the for-loop body — Jinja requires balanced block tags that cannot
+  span `{% endif %}` boundaries — so the smaller and more
+  inspection-friendly path was option B.
+
+  **Collator algorithm (two passes per row).** Pass 1: find
+  `[<start_of_turn>=105, model=4368, \n=107] ... <end_of_turn>=106`
+  spans; unmask labels from header-end (exclusive) through EOT
+  (inclusive — model learns to stop). Pass 2: subtract tool-response
+  payloads inside each span — positions inside
+  `<start_function_response>response: ... <end_function_response>`
+  (token IDs `[50, 6275, 236787, ..., 51]`). The bare
+  `<start_function_response>` (token 50) that the assistant emits at
+  the end of its last tool_call (with no following `response:`)
+  stays unmasked, because that signal is the model's own output.
+
+  **Verification.** Single-row probe (3310 non-pad tokens): 17
+  visible labels (0.51 %) — the decoded visible content is exactly
+  `<start_function_call>call:load{...}<end_function_call><start_function_response>`,
+  with the entire tool-response payload correctly masked. Full-corpus
+  scan over all 82 train rows: visible / non-pad min=0.40 %, p50=0.52
+  %, p95=1.17 %, max=1.17 %; visible-tokens min=13, p50=17, p95=39,
+  max=39 (single-tool rows ≈ 13–17, compound multi-step rows up to
+  39); **0 / 82 rows collapsed to all -100**. Cross-check with
+  `mask=off`: visible / non-pad deviation = 0.0000 (matches
+  HF default pad-only masking).
+
+  **BOS-doubling side observation — resolved.** Rev 16 flagged that
+  the `formatting_func` path produced doubled `<bos>` and the TRL
+  1.x auto-detect path produced single. On the option-B path
+  (`assistant_only_loss=False` + custom data collator), **both
+  formatting_func=on and =off produce single `<bos>`** — TRL 1.5.0's
+  tokenize step under this config honors the BOS already in the
+  formatted string and does not prepend another. No per-row BOS tax.
+  formatting_func is retained in the recipe for drift-proofing per
+  rev 16.
+
+  **Side observation worth flagging (not blocking).** Per-row visible
+  fraction is 0.40 %–1.17 % — small because each row carries
+  ~2700 tokens of tool declarations (preflight #5 finding). The
+  model still gets strong gradient signal on tool-call syntax (every
+  row produces tool-call envelopes), but free-text gradient signal is
+  sparse. **`TODO(v2)`:** if SFT plateaus below the regression
+  tripwire, oversample compound scenarios that include an explicit
+  final assistant text turn.
+
+  **Tests.**
+  `python/mili-llm-bench/tests/test_assistant_only_collator.py` — 8
+  pins (always-on except a runtime FG-tokenizer ID check). 229 / 229
+  pass + 1 skip on the full `mili-llm-bench` suite (+8 from rev 16's
+  221).
+
+  **§6 recipe landed in `cluster-setup.md` rev 4.**
+  `SFTConfig(assistant_only_loss=False)` at the TRL level;
+  `SFTTrainer(...)` constructor now passes
+  `data_collator=MaskAssistantOnlyCollator(
+  DataCollatorForLanguageModeling(tokenizer=tok, mlm=False))`. The
+  training *intent* (compute loss only on assistant turns) is
+  unchanged; only the implementation moves from a TRL kwarg to a local
+  wrapper. Hyperparam table row reworded accordingly. No other
+  hyperparameters changed.
+
+  **Path forward.** Preflight #4 ✅. Preflight #6 (GGUF chat-template
+  baking) still gated on a trained checkpoint. Stage 8
+  (pre-experiment gate) remains runnable in parallel and should land
+  before `trainer.train()` so the SFT lift is measurable.
 
 - **2026-05-25 (rev 16)** — **TRL pin bumped from `>=0.11,<0.13`
   to `>=1.0,<2`.** The rev-2 pin (in `cluster-setup.md` line 211)

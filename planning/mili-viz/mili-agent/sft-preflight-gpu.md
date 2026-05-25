@@ -26,7 +26,7 @@ an early check invalidates everything below it.
 | 1 | HF login + model fetch | ✅ 2026-05-24 | All training | 5 min |
 | 2 | Train-vs-inference chat-template parity (the big one) | ✅ 2026-05-24 — Path A (rev 8, prompt side) + option (b) (rev 10, response side); see §2 "Resolved via option (b)" | All post-SFT eval | 30 min |
 | 3 | SFTTrainer + `tools` field test | ✅ 2026-05-25 — PASS with `formatting_func`; mandatory (without it TRL 0.12.1 raises `KeyError: 'text'`). Report: `data/posttraining/sft/preflight-3-tokenized-batch.md` | Stage 6 → training | 15 min |
-| 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
+| 4 | `assistant_only_loss=True` compatibility | ✅ 2026-05-25 — TRL native path FAILS on FG template; cleared via custom collator (option B). Report: `data/posttraining/sft/preflight-4-loss-mask.md` | Training | 10 min |
 | 5 | `max_length=512` audit | ✅ 2026-05-25 — PASS at max=3341 / gate=4096 (off-GPU, login-safe; m5-sft-pipeline.md rev 14) | Training data integrity | 10 min |
 | 6 | GGUF chat-template baking | pending trained checkpoint | Post-SFT eval | 15 min |
 
@@ -309,26 +309,61 @@ file a bug, do not train.
 
 ## 4. `assistant_only_loss=True` compatibility test
 
-`assistant_only_loss=True` should mask loss everywhere except inside
-assistant turns. Confirm it correctly identifies FunctionGemma's
-`<start_of_turn>model …<end_of_turn>` spans.
+**Status (2026-05-25):** ✅ PASS via **option B** (custom data
+collator). TRL 1.5.0's native `assistant_only_loss=True` path FAILS
+on FunctionGemma's chat template — `SFTTrainer.__init__` raises
+``ValueError: The chat template is not training-compatible (missing
+prefix-preservation or `{% generation %}` markers) and patching is
+not supported for this template.`` The FG template is macro-heavy
+and TRL's auto-patch can't infer assistant boundaries from the
+substituted-`role` pattern. Option A (patching the FG template to
+add `{% generation %}` markers) would require structurally rewriting
+the for-loop body — Jinja requires balanced block tags that cannot
+span `{% endif %}` boundaries — so the smaller and more
+inspection-friendly path was option B.
 
-```python
-# python/scripts/sft_loss_mask_check.py
-# Run a single training step with assistant_only_loss=True, capture
-# the labels tensor, and assert: every position outside assistant
-# turns has label == -100 (the HF "ignore" sentinel).
-#
-# Cross-check by toggling assistant_only_loss=False and verifying
-# loss is computed on *all* non-pad tokens.
-```
+**Runnable script:** `python/scripts/sft_loss_mask_check.py`.
+**Custom collator:**
+`python/mili-llm-bench/src/mili_llm_bench/assistant_only_collator.py`
+(`MaskAssistantOnlyCollator`). Two passes:
 
-**Pass criteria:** with `assistant_only_loss=True`, the fraction of
-non-`-100` label positions matches the assistant-turn token count
-to within ~1 % (allow some slop for special tokens at turn
-boundaries). If the fraction is ~0 % or ~100 %, the feature is
-mis-detecting role boundaries — do **not** train; either fall back
-to manual loss masking or pin a different TRL version.
+  1. Find `<start_of_turn>model\n … <end_of_turn>` spans (start
+     exclusive of header tokens; EOT inclusive).
+  2. Subtract tool-response payloads inside each span — positions
+     inside `<start_function_response>response: … <end_function_response>`
+     (token IDs 50, 6275, 236787, …, 51). The bare
+     `<start_function_response>` that the assistant emits without a
+     following `response:` stays unmasked, since that's the
+     assistant's own cue to the tool.
+
+Wire it into `SFTTrainer` with `assistant_only_loss=False`
+(TRL-side disabled) and `data_collator=MaskAssistantOnlyCollator(
+DataCollatorForLanguageModeling(tokenizer, mlm=False))`.
+
+**Pass criteria (all met on rev-13 corpus, 82 rows):**
+
+| Check | Threshold | Observed |
+| --- | --- | --- |
+| `mask=off`: visible / non-pad deviation | < 0.02 | 0.0000 |
+| `mask=on`: visible / non-pad fraction | 0.001..0.5 | 0.0051 (row 0); 0.0040–0.0117 (full-corpus) |
+| `mask=on`: decoded visible looks like assistant content | yes | yes (`<start_function_call>…<end_function_call><start_function_response>`) |
+| Tool-response payload masked | yes | yes (verified by decode) |
+| Rows with 0 visible tokens | 0 | 0 / 82 |
+
+**BOS-doubling probe (side observation):** rev-16 flagged that the
+`formatting_func` path produced doubled `<bos>`. On the option-B
+path (`assistant_only_loss=False` + custom data_collator), **both
+formatting_func=on and =off produce single `<bos>`**. No per-row BOS
+tax under option B.
+
+Test pins:
+`python/mili-llm-bench/tests/test_assistant_only_collator.py` — 8
+tests covering single turn, tool-response subtraction, bare
+`<start_function_response>`, multiple tool calls, padded batches,
+multi-model-turn rows, no-model-turn rows, and a runtime FG-tokenizer
+ID pin.
+
+Report: `data/posttraining/sft/preflight-4-loss-mask.md`.
 
 ---
 

@@ -1,0 +1,59 @@
+{
+  "modes": {
+    "mask=on,  formatting_func=on": {
+      "label": "mask=on,  formatting_func=on",
+      "total": 3310,
+      "pad": 0,
+      "non_pad": 3310,
+      "attention_mask_sum": 3310,
+      "visible": 17,
+      "leading_bos": 1,
+      "decoded_visible_head": "<start_function_call>call:load{                    {\"root\": \"d3samp6\"}}<end_function_call><start_function_response>",
+      "decoded_all_head": "<bos><start_of_turn>developer\nYou are an assistant that operates the Griz post-processor for the Mili finite-element format. You drive Griz by emitting JSON function calls into the supplied tool inventory. Inspect the user's request, call exactly the tools"
+    },
+    "mask=off, formatting_func=on": {
+      "label": "mask=off, formatting_func=on",
+      "total": 3310,
+      "pad": 0,
+      "non_pad": 3310,
+      "attention_mask_sum": 3310,
+      "visible": 3310,
+      "leading_bos": 1,
+      "decoded_visible_head": "<bos><start_of_turn>developer\nYou are an assistant that operates the Griz post-processor for the Mili finite-element format. You drive Griz by emitting JSON function calls into the supplied tool inventory. Inspect the user's request, call exactly the tools that satisfy it, and reply with one short final text message only after the request is fully complete. Do not narrate plans; emit a tool call instead. Prefer the typed tools over the `griz_raw` fallback when a typed tool exists for the task.\n\nUNDERSTANDIN",
+      "decoded_all_head": "<bos><start_of_turn>developer\nYou are an assistant that operates the Griz post-processor for the Mili finite-element format. You drive Griz by emitting JSON function calls into the supplied tool inventory. Inspect the user's request, call exactly the tools"
+    },
+    "mask=on,  formatting_func=off": {
+      "label": "mask=on,  formatting_func=off",
+      "total": 3310,
+      "pad": 0,
+      "non_pad": 3310,
+      "attention_mask_sum": 3310,
+      "visible": 17,
+      "leading_bos": 1,
+      "decoded_visible_head": "<start_function_call>call:load{                    {\"root\": \"d3samp6\"}}<end_function_call><start_function_response>",
+      "decoded_all_head": "<bos><start_of_turn>developer\nYou are an assistant that operates the Griz post-processor for the Mili finite-element format. You drive Griz by emitting JSON function calls into the supplied tool inventory. Inspect the user's request, call exactly the tools"
+    }
+  },
+  "gates": {
+    "off_deviation": 0.0,
+    "off_pass": true,
+    "on_ff_fraction": 0.00513595166163142,
+    "on_ff_pass_size": true,
+    "on_ff_has_assistant_marker": true,
+    "on_noff_fraction": 0.00513595166163142,
+    "on_noff_pass": true,
+    "bos_verdict": "BOTH SINGLE \u2014 no BOS tax.",
+    "full_scan_rows": 82,
+    "full_scan_visible_min": 13,
+    "full_scan_visible_p50": 17,
+    "full_scan_visible_p95": 39,
+    "full_scan_visible_max": 39,
+    "full_scan_fraction_min": 0.00401854714064915,
+    "full_scan_fraction_p50": 0.005237215033887862,
+    "full_scan_fraction_p95": 0.011722272317403066,
+    "full_scan_fraction_max": 0.011725796752856284,
+    "full_scan_rows_zero_visible": 0,
+    "full_scan_floor_pass": true
+  },
+  "overall_pass": true
+}
