@@ -1025,18 +1025,6 @@ wheels = [
 ]
 
 [[package]]
-name = "markdown-it-py"
-version = "4.2.0"
-source = { registry = "https://wci-repo.llnl.gov/repository/pypi-group/simple" }
-dependencies = [
-    { name = "mdurl" },
-]
-sdist = { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/markdown-it-py/4.2.0/markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49" }
-wheels = [
-    { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/markdown-it-py/4.2.0/markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a" },
-]
-
-[[package]]
 name = "markupsafe"
 version = "3.0.3"
 source = { registry = "https://wci-repo.llnl.gov/repository/pypi-group/simple" }
@@ -1111,15 +1099,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mdurl"
-version = "0.1.2"
-source = { registry = "https://wci-repo.llnl.gov/repository/pypi-group/simple" }
-sdist = { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/mdurl/0.1.2/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba" }
-wheels = [
-    { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/mdurl/0.1.2/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8" },
-]
-
-[[package]]
 name = "mili-llm-bench"
 version = "0.0.0"
 source = { editable = "mili-llm-bench" }
@@ -1181,7 +1160,7 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.66" },
     { name = "transformers", marker = "extra == 'functiongemma'", specifier = ">=4.50" },
     { name = "transformers", marker = "extra == 'train'", specifier = ">=4.50,<5" },
-    { name = "trl", marker = "extra == 'train'", specifier = ">=0.11,<0.13" },
+    { name = "trl", marker = "extra == 'train'", specifier = ">=1.0,<2" },
 ]
 provides-extras = ["dev", "gepa", "pygriz", "functiongemma", "anthropic", "llamacpp", "train"]
 
@@ -2263,19 +2242,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rich"
-version = "15.0.0"
-source = { registry = "https://wci-repo.llnl.gov/repository/pypi-group/simple" }
-dependencies = [
-    { name = "markdown-it-py" },
-    { name = "pygments" },
-]
-sdist = { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/rich/15.0.0/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36" }
-wheels = [
-    { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/rich/15.0.0/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb" },
-]
-
-[[package]]
 name = "rpds-py"
 version = "0.30.0"
 source = { registry = "https://wci-repo.llnl.gov/repository/pypi-group/simple" }
@@ -2683,16 +2649,18 @@ wheels = [
 
 [[package]]
 name = "trl"
-version = "0.12.1"
+version = "1.5.0"
 source = { registry = "https://wci-repo.llnl.gov/repository/pypi-group/simple" }
 dependencies = [
     { name = "accelerate" },
     { name = "datasets" },
-    { name = "rich" },
+    { name = "jinja2" },
+    { name = "packaging" },
     { name = "transformers" },
 ]
+sdist = { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/trl/1.5.0/trl-1.5.0.tar.gz", hash = "sha256:b7995caa04e2f3cfa2ba0f003d5e1057900fe2ae4fc90c55b1cdd80093e79115" }
 wheels = [
-    { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/trl/0.12.1/trl-0.12.1-py3-none-any.whl", hash = "sha256:502b958ac95313bd3e1a31ce91bc852b14f90303bc9b973ede1ee959f40c5c5a" },
+    { url = "https://wci-repo.llnl.gov/repository/pypi-group/packages/trl/1.5.0/trl-1.5.0-py3-none-any.whl", hash = "sha256:f78e989bc3420aa6799d9356aac7ddd053a458481de94aeccd361e6939887cde" },
 ]
 
 [[package]]

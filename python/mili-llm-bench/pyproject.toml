@@ -72,7 +72,7 @@ train = [
     "sentencepiece>=0.2.1",
     "torch>=2.6,<3",
     "transformers>=4.50,<5",
-    "trl>=0.11,<0.13",
+    "trl>=1.0,<2",
 ]
 
 [project.scripts]

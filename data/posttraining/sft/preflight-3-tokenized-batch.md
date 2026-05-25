@@ -156,3 +156,37 @@ already landed pre-rev 12 — to be verified during preflight #4.)
   Preflight #4 is the first check that actually runs a step.
 - The TRL pin drift above. Surfaced; the cluster-setup.md §6
   decision is queued for preflight #4.
+
+---
+
+## Followup — re-tested under TRL 1.5.0 (2026-05-25, m5-sft-pipeline.md rev 16)
+
+The two API drifts surfaced above were resolved by bumping the
+`train` extra pin: `trl>=0.11,<0.13` → `trl>=1.0,<2` (rationale in
+the m5-sft-pipeline.md rev 16 entry). `python/scripts/sft_dump_one_batch.py`
+was updated to use the current `max_length` kwarg (the script's
+docstring and the `SFTConfig` call) — same script, no behavioral
+change. Both modes re-ran on `matrix41`:
+
+| Mode                       | TRL 0.12.1 (rev 15) | TRL 1.5.0 (rev 16) |
+| -------------------------- | ------------------- | ------------------ |
+| `--with-formatting-func`   | PASS, shape `(1, 3311)` | PASS, shape `(1, 3311)` |
+| `--without-formatting-func`| FAIL — `KeyError: 'text'` | **PASS, shape `(1, 3310)`** |
+
+TRL 1.x auto-detects chat-shape rows (`messages` + `tools` columns)
+and dispatches `apply_chat_template` without a `formatting_func`.
+The 1-token shape delta between the two `--with` runs and the
+auto-detect path is explained by a `<bos>` doubling artifact in the
+explicit-formatting path (`<bos><bos><start_of_turn>developer` vs
+`<bos><start_of_turn>developer`); see the m5-sft-pipeline.md rev 16
+side observation.
+
+**Decision (still standing):** the §6 recipe in `cluster-setup.md`
+keeps `formatting_func` — not because it's mandatory on TRL 1.x,
+but because a future TRL 2.x change to auto-detect behavior would
+not affect us. The BOS-doubling artifact is a per-row token-budget
+concern (1 token at the head, well below the 4096 budget), not a
+semantic one, and will be picked up in preflight #4.
+
+Full `mili-llm-bench` test suite under the new pin: **221 passed,
+1 skipped** (same as rev 14 baseline, no regressions).

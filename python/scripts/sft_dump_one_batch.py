@@ -6,13 +6,7 @@ messages + tools through apply_chat_template, then decode batch[0]
 and assert that the `<start_function_declaration>` token block reached
 the tokenized batch.
 
-API drift note (recorded in the preflight #3 report, not silently
-worked around): the §3 recipe and cluster-setup.md §6 both use
-`SFTConfig(max_length=...)` and `assistant_only_loss=True`. Both
-landed in trl 0.13+; the workspace pins trl 0.12.1
-(`trl>=0.11,<0.13`). For this dump-only check we substitute
-`max_seq_length` (the 0.12.x spelling) and never construct
-`assistant_only_loss` — that knob is preflight #4's surface, not #3's.
+Uses TRL 1.x's `SFTConfig.max_length` (the current upstream spelling).
 """
 
 from __future__ import annotations
@@ -73,7 +67,7 @@ def main() -> int:
         help="HF tokenizer id",
     )
     ap.add_argument(
-        "--max-seq-length",
+        "--max-length",
         type=int,
         default=4096,
         help="Match preflight #5 bumped value, not the 512 default",
@@ -104,7 +98,7 @@ def main() -> int:
     print(f"# preflight #3 — SFTTrainer + tools-field dump")
     print(f"train:                {args.train}")
     print(f"tokenizer:            {args.tokenizer}")
-    print(f"max_seq_length:       {args.max_seq_length}")
+    print(f"max_length:           {args.max_length}")
     print(f"with_formatting_func: {args.with_formatting_func}")
     print()
 
@@ -121,12 +115,10 @@ def main() -> int:
 
     cfg_kwargs = dict(
         output_dir=args.output_dir,
-        max_seq_length=args.max_seq_length,  # trl 0.12.1 spelling
+        max_length=args.max_length,
         packing=False,
         per_device_train_batch_size=1,
         report_to="none",
-        # trl 0.12.x defaults dataset_kwargs={"add_special_tokens": False}
-        # for chat datasets; leave as-is to match the trainer's call shape.
     )
     if args.with_formatting_func:
         formatting_func = _build_formatting_func(tokenizer)

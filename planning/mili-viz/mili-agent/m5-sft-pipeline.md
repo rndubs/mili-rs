@@ -2,9 +2,14 @@
 
 **Status (2026-05-25):** Stages 2, 3, 5, 6, 6.5 cleared; preflight
 #1, #2, **#3**, #4, **#5** cleared (#2 via Path A rev 8; **#3
-cleared on `matrix41` H100 in rev 15 — `formatting_func` is
-mandatory**; #4 = config seam landed pre-rev 12, GPU compat check
-still pending; #5 cleared off-GPU in rev 14 — see below); rev-9
+cleared on `matrix41` H100 in rev 15, retested under TRL 1.5.0 in
+rev 16 — `formatting_func` is mandatory under TRL 0.12.x, optional
+under TRL 1.x but kept in the recipe for drift-proofing**; #4 =
+config seam landed pre-rev 12, GPU compat check still pending; #5
+cleared off-GPU in rev 14 — see below). **TRL pin bumped
+`>=0.11,<0.13` → `>=1.0,<2` in rev 16** (the original pin's stated
+justification — `assistant_only_loss` — did not exist on the pinned
+versions; trl 0.20+ is the floor for that kwarg). rev-9
 parser gap resolved via **option (b)** in rev 10 — a client-side
 `content → tool_calls` fallback inside `LlamaCppProvider.generate`,
 gated on `/props` `chat_template_caps.supports_tool_calls = false`.
@@ -291,6 +296,72 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 16)** — **TRL pin bumped from `>=0.11,<0.13`
+  to `>=1.0,<2`.** The rev-2 pin (in `cluster-setup.md` line 211)
+  was self-contradicting: its stated justification was
+  `assistant_only_loss`, but that kwarg was added in trl 0.20+ —
+  neither 0.11 nor 0.12 supported it. Preflight #3 exposed the gap
+  (rev 15), at which point Google's own FunctionGemma fine-tuning
+  guide (no version pin; uses `max_length=512` which is the
+  trl 0.13+ spelling) and the trl 1.5.0 release made the path
+  forward obvious.
+
+  **What changed.**
+  - `python/mili-llm-bench/pyproject.toml`: `train` extra
+    `trl>=0.11,<0.13` → `trl>=1.0,<2`.
+  - `python/scripts/sft_dump_one_batch.py`: `max_seq_length`
+    (0.12.x spelling) → `max_length` (trl 1.x spelling); dropped
+    the drift apology in the docstring.
+  - `cluster-setup.md` §0 pin paragraph + §6 recipe knob table +
+    §6 recipe block: pin updated; `max_length=4096` mirrored from
+    rev-14 preflight #5 (was stale at `512` here); `formatting_func`
+    comment annotated as "mandatory on 0.12.x, optional on 1.x".
+    New rev-3 changelog entry over there.
+
+  **What was tested.** Full `uv sync --directory python --all-extras`
+  → trl 1.5.0 + transformers 4.57.6 + torch 2.12.0+cu130 +
+  datasets 4.8.5 + accelerate 1.13.0 (transformers/torch unchanged
+  from rev 14). Full `pytest -q` from
+  `python/mili-llm-bench/` → **221 passed, 1 skipped** (same as
+  rev 14 baseline). Preflight #3 retested on `matrix41` H100:
+  - `--with-formatting-func`: PASS, `input_ids.shape = (1, 3311)`
+    (matches rev 15's TRL 0.12.1 number to within 1 token).
+  - `--without-formatting-func`: **also PASS** on TRL 1.5.0
+    (vs. `KeyError: 'text'` on TRL 0.12.1) — TRL 1.x has chat-dataset
+    auto-detection that dispatches `apply_chat_template` when it
+    sees `messages` + `tools` columns. `formatting_func` is no
+    longer mandatory; we keep it in the §6 recipe for drift-proofing
+    against a future TRL 2.x auto-detect change.
+
+  **One side observation worth surfacing.** The `formatting_func`
+  path produces a **doubled BOS** in `decoded[0]`
+  (`<bos><bos><start_of_turn>developer`), while the TRL 1.x
+  auto-detect path produces a single `<bos>`. Likely cause: the
+  explicit `formatting_func` returns a string from
+  `apply_chat_template(..., tokenize=False)` that already includes
+  BOS, and TRL's tokenize pass prepends BOS again. For training,
+  a single leading `<bos>` is correct — so either (a) drop the
+  `formatting_func` and rely on auto-detect, or (b) pass
+  `add_special_tokens=False` somewhere downstream of the formatter.
+  **Decision queued for preflight #4**: I'll grep whether the
+  TRL 1.x SFTTrainer strips a leading BOS before re-tokenizing or
+  not, and pick the path that produces a single BOS. The chat
+  template's correctness for FG is already pinned (preflight #2 —
+  the GGUF baked template + HF tokenizer template are identical),
+  so this is a per-row token-budget concern, not a semantic one.
+
+  **Stop-loss.** If a future bump (transformers 5.x, torch 3.x,
+  trl 2.x) breaks this stack: revert to `trl>=0.20,<0.21` — that's
+  the oldest release that still carries `assistant_only_loss`
+  natively, and was the conservative-bump option I would have picked
+  if Google's guide had been more cautious.
+
+  **Path forward.** Preflight #4 (`assistant_only_loss=True` mask
+  check) is now genuinely runnable — TRL 1.5.0 actually has the
+  kwarg, so we can run the on-GPU compat check the §4 recipe in
+  `sft-preflight-gpu.md` describes. Stage 8 (pre-experiment gate)
+  is also still runnable in parallel.
 
 - **2026-05-25 (rev 15)** — **Preflight #3 cleared on `matrix41`
   H100.** New runbook script `python/scripts/sft_dump_one_batch.py`

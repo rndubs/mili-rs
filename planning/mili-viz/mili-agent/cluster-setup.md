@@ -33,8 +33,13 @@ matching the 🛑 items.
   `packing=False`, `adamw_torch_fused`). Any deviation from these is a
   deliberate, justified change — see §6.
 - ✅ **TRL API contract pinned** to `processing_class=` (not the
-  deprecated `tokenizer=`) and `trl>=0.11,<0.13`; transformers pinned
+  deprecated `tokenizer=`) and `trl>=1.0,<2`; transformers pinned
   to `>=4.50,<5` and `dtype=` (not the deprecated `torch_dtype=`).
+  The original rev-2 pin (`trl>=0.11,<0.13`) was bumped on
+  2026-05-25 — see `m5-sft-pipeline.md` rev 16: `assistant_only_loss`
+  (rev-2's stated justification for the pin) did not actually exist
+  on trl 0.11/0.12; it landed in trl 0.20+. The `<2` upper bound is
+  a defensive ceiling against a hypothetical trl 2.x API break.
 - ✅ **`tools.json` shape is `{name, description, input_schema,
   output_schema}`** (W1 proto-derived). FunctionGemma's chat template
   expects OpenAI-style `{"type": "function", "function": {"name",
@@ -208,7 +213,11 @@ train = [
   "transformers>=4.50,<5",     # `dtype=` arg; chat_template w/ tools
   "torch>=2.5,<3",             # CUDA 12.4-compatible build
   "accelerate>=0.34,<2",
-  "trl>=0.11,<0.13",           # SFTTrainer w/ assistant_only_loss
+  "trl>=1.0,<2",               # SFTTrainer w/ assistant_only_loss
+                                # (added in trl 0.20+; the original
+                                #  trl>=0.11,<0.13 pin pre-dated the
+                                #  feature — see m5-sft-pipeline.md
+                                #  rev 16)
   "peft>=0.13,<0.14",          # optional; we full-FT at 270M, see §4
   "datasets>=3.0,<5",
   "sentencepiece",             # Gemma tokenizer
@@ -342,7 +351,7 @@ that produces a worse-than-baseline model with no obvious cause.
 | `per_device_train_batch_size` | `4` | Google reference |
 | `gradient_accumulation_steps` | `1` | (no accumulation — Google reference uses `bs=4` raw) |
 | `lr_scheduler_type` | `"constant"` | Google reference |
-| `max_length` | `512` | Google reference — **but audit longest assembled rollout first (§0)** |
+| `max_length` | `4096` | **Deviation from Google's `512`** — preflight #5 audit observed `max=3341` on the rev-13 corpus's 82 rows; 4096 is the next power-of-2 ceiling. See `m5-sft-pipeline.md` rev 14. |
 | `packing` | `False` | Google reference |
 | `optim` | `"adamw_torch_fused"` | Google reference |
 | `bf16` | `True` | H100 native |
@@ -380,7 +389,7 @@ cfg = SFTConfig(
     gradient_accumulation_steps=1,
     learning_rate=5e-5,
     lr_scheduler_type="constant",
-    max_length=512,
+    max_length=4096,  # preflight #5 bumped from 512 — m5-sft-pipeline.md rev 14
     packing=False,
     optim="adamw_torch_fused",
     bf16=True,
@@ -398,7 +407,9 @@ trainer = SFTTrainer(
     train_dataset=train_ds,
     eval_dataset=val_ds,
     processing_class=tok,           # TRL ≥0.11: replaces deprecated `tokenizer=`
-    formatting_func=formatting_func,
+    formatting_func=formatting_func,  # mandatory on trl 0.12.x (KeyError otherwise);
+                                      # optional on trl 1.x (auto-detect) but kept for drift-proofing
+
 )
 trainer.train()
 trainer.save_model("data/posttraining/checkpoints/v1/final")
@@ -521,6 +532,22 @@ libraries move.
 
 ## Changelog
 
+- **2026-05-25 (rev 3).** Bumped `trl` pin from `>=0.11,<0.13` to
+  `>=1.0,<2`. The rev-2 pin was self-contradicting: its stated
+  justification was `assistant_only_loss`, but that kwarg was added
+  in trl 0.20+ — neither 0.11 nor 0.12 supported it. Verified TRL
+  1.5.0 against this repo: full `mili-llm-bench` test suite still
+  passes (221 / 221 + 1 skip — same as rev 14 baseline);
+  preflight #3 still PASSes (with `formatting_func`, and *also*
+  without — TRL 1.x auto-detects chat-shape rows and dispatches
+  `apply_chat_template`, which trl 0.12.1 did not). The recipe in §6
+  keeps `formatting_func` for drift-proofing against a hypothetical
+  TRL 2.x change in auto-detect behavior. Stop-loss option (if a
+  future bump breaks something): revert to `trl>=0.20,<0.21`, which
+  is the oldest release that still carries `assistant_only_loss`.
+  Also corrected `max_length=512` → `4096` to reflect the deliberate
+  preflight #5 bump that was already recorded in
+  `m5-sft-pipeline.md` rev 14 but not yet mirrored here.
 - **2026-05-24 (rev 2).** Added §0 pre-flight checklist (split into
   off-GPU ✅ and on-GPU 🛑 items). Pinned hyperparameters to Google's
   reference recipe (LR 5e-5 / 8 epochs / bs=4 / constant LR /

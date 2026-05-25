@@ -250,14 +250,17 @@ array reaches the tokenized training batch through
 `apply_chat_template(messages, tools=tools, …)`; `(1, 3311)` token
 shape matches the preflight #5 distribution; 18 tool declarations
 plus assistant `<start_function_call>` envelope all present in
-`decoded[0]`. Without `formatting_func`, TRL 0.12.1's
-`_prepare_non_packed_dataloader` raises `KeyError: 'text'` (the
-`dataset_text_field` default), so `formatting_func` is **mandatory**.
-Two API drifts from this file's §3 / cluster-setup.md §6 recipe
-surfaced and recorded in the report:
-`SFTConfig.max_length` → `max_seq_length` in trl 0.12.x; and
-`SFTConfig.assistant_only_loss` doesn't exist on trl 0.12.1 (added
-in 0.20+) — decision queued for preflight #4. Report:
+`decoded[0]`. On TRL 0.12.x, without `formatting_func` the path
+fails with `KeyError: 'text'` (the `dataset_text_field` default).
+On **TRL 1.5.0 (now the pinned version, see m5-sft-pipeline.md
+rev 16)** the auto-detect path also passes — TRL 1.x dispatches
+`apply_chat_template` when it sees `messages` + `tools` columns.
+**The §6 recipe in `cluster-setup.md` keeps `formatting_func`**
+not because it's mandatory but for drift-proofing against a
+future TRL 2.x auto-detect change. The original API drifts
+(`SFTConfig.max_length` not on 0.12.x; `assistant_only_loss` not
+on 0.12.x) are resolved by the TRL bump — both kwargs exist on
+TRL 1.5.0. Report:
 `data/posttraining/sft/preflight-3-tokenized-batch.md`. Runnable
 script: `python/scripts/sft_dump_one_batch.py`.
 
