@@ -8,6 +8,19 @@ convention, calls ``verifier.verify``, and emits one canonical rollout
 record per scenario in the
 ``planning/mili-viz/mili-agent/posttraining-dataset.md`` §1 shape.
 
+Stage-5 surface (rev 11 — pilot teacher rollouts). The same ``run_eval``
+loop doubles as the Stage 5 K-pass teacher-rollout writer: when ``k > 1``
+each scenario is run K times with per-pass seed ``config.seed + k_idx``,
+and every rollout is written to ``rollouts.jsonl`` with a ``k_idx`` +
+``retained`` field. ``retain="passing"`` marks only ``max_tier == 3``
+rollouts as retained (the Stage 6 SFT-corpus filter key);
+``retain="all"`` retains every rollout. The summary aggregates
+per-category Anthropic ``usage`` into ``cost_estimate_usd`` so the
+$50 pilot budget gate is checkable without manual math. K=1 (the
+default) preserves the bench-as-eval shape byte-for-byte — no
+``k_idx`` / ``retained`` / ``usage`` keys land on those records.
+See ``planning/mili-viz/mili-agent/m5-sft-pipeline.md`` Stage 5.
+
 Three load-bearing design pins:
 
 1. **Factory seam for dispatchers + providers.** The always-on test
@@ -123,6 +136,54 @@ class EvalConfig:
 INSTRUCTION_SOURCE_V0 = "bootstrap-handauthored"
 
 
+# Retain modes for Stage 5 K-pass rollouts. ``all`` (default) tags
+# every rollout retained=True — used by bench-as-eval (K=1) and by
+# "keep everything for inspection" sweeps. ``passing`` tags only
+# rollouts whose verifier returns max_tier == 3 — used by Stage 5 so
+# Stage 6's assembler filters on ``retained == True`` instead of
+# re-grading. See ``m5-sft-pipeline.md`` Stage 5.
+RETAIN_MODES: tuple[str, ...] = ("all", "passing")
+
+
+# Claude Sonnet 4.5 pricing per million tokens (2026-05-24). Inputs:
+# $3 / Mtok. Outputs: $15 / Mtok. Cache reads: $0.30 / Mtok (90% off
+# inputs). Cache creation (5-min ephemeral): $3.75 / Mtok (25% premium
+# over inputs). The cost estimator combines these to surface the
+# $50-pilot / $200-full-sweep budget gates from the planning doc.
+_PRICING_PER_MTOK_USD: dict[str, dict[str, float]] = {
+    "claude-sonnet-4-5": {
+        "input_tokens": 3.00,
+        "output_tokens": 15.00,
+        "cache_read_input_tokens": 0.30,
+        "cache_creation_input_tokens": 3.75,
+    },
+}
+
+
+def _usage_categories() -> tuple[str, ...]:
+    return (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+    )
+
+
+def estimate_cost_usd(usage_totals: dict[str, int], model_id: str) -> float:
+    """Return the USD cost estimate for a usage totals dict against the
+    pinned model's per-Mtok pricing. Unknown model ids return 0.0 — a
+    deliberate silent zero so non-Anthropic providers (mock, llamacpp,
+    functiongemma) report ``cost_estimate_usd == 0.0`` without a
+    branching call site."""
+    pricing = _PRICING_PER_MTOK_USD.get(model_id)
+    if pricing is None:
+        return 0.0
+    total = 0.0
+    for cat, per_mtok in pricing.items():
+        total += float(usage_totals.get(cat, 0)) * (per_mtok / 1_000_000.0)
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Result dataclasses.
 # ---------------------------------------------------------------------------
@@ -132,13 +193,21 @@ INSTRUCTION_SOURCE_V0 = "bootstrap-handauthored"
 class ScenarioRunResult:
     """One scenario's outcome: the mutated ``messages`` transcript,
     every per-turn ``TurnResult``, the verifier's grading, total
-    wall-clock."""
+    wall-clock.
+
+    ``usage_sum`` is the per-category Anthropic token totals summed
+    across all turns of this scenario, or ``None`` when no turn
+    reported a usage dict (e.g. mock / replay / llamacpp). Stage 5
+    cost telemetry aggregates these into the summary's
+    ``cost_estimate_usd``.
+    """
 
     scenario: Scenario
     messages: list[dict[str, Any]]
     verifier_result: verifier.VerifierResult
     turns: list[TurnResult] = field(default_factory=list)
     wall_ms_total: int = 0
+    usage_sum: dict[str, int] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -223,12 +292,21 @@ def run_one_scenario(
         wall_ms_total = int((time.monotonic() - start) * 1000)
 
         vr = verifier.verify(messages, scenario.postcondition.to_json())
+        usage_sum: dict[str, int] | None = None
+        for t in turns:
+            if t.usage is None:
+                continue
+            if usage_sum is None:
+                usage_sum = {k: 0 for k in _usage_categories()}
+            for cat in _usage_categories():
+                usage_sum[cat] = usage_sum.get(cat, 0) + int(t.usage.get(cat, 0))
         return ScenarioRunResult(
             scenario=scenario,
             messages=messages,
             verifier_result=vr,
             turns=turns,
             wall_ms_total=wall_ms_total,
+            usage_sum=usage_sum,
         )
     finally:
         # Best-effort dispatcher teardown — a live ``griz.Session``
@@ -292,6 +370,10 @@ def write_rollout_record(
     tools: list[dict[str, Any]],
     config: EvalConfig,
     provider_meta: dict[str, Any],
+    *,
+    k_idx: int | None = None,
+    retained: bool | None = None,
+    usage: dict[str, int] | None = None,
 ) -> None:
     """Emit one JSONL line for ``rollouts.jsonl`` in the canonical
     ``posttraining-dataset.md`` §1 shape.
@@ -300,6 +382,14 @@ def write_rollout_record(
     filled in from ``compute_system_prompt_hash`` if the caller did
     not supply one (the writer is responsible for the falsifiability
     pin — see module docstring).
+
+    Stage-5 optional fields: ``k_idx`` (the 0-based rollout index when
+    K > 1), ``retained`` (Stage 6's SFT-filter key — true when the
+    verifier graded L3 under ``retain="passing"``, or always true
+    under ``retain="all"``), and ``usage`` (per-category Anthropic
+    token totals for this rollout). All three default to ``None`` so
+    bench-as-eval records (K=1, mock/replay/local providers) stay
+    byte-identical to pre-rev-11.
     """
     meta = dict(provider_meta)
     meta.setdefault("config_hash", compute_system_prompt_hash(config.system_prompt))
@@ -324,6 +414,12 @@ def write_rollout_record(
         "provider": meta,
         "split": "eval",
     }
+    if k_idx is not None:
+        record["k_idx"] = int(k_idx)
+    if retained is not None:
+        record["retained"] = bool(retained)
+    if usage is not None:
+        record["usage"] = dict(usage)
     out.write(json.dumps(record))
     out.write("\n")
 
@@ -336,6 +432,12 @@ def write_rollout_record(
 def build_summary(
     scenario_results: list[ScenarioRunResult],
     config: EvalConfig,
+    *,
+    k: int = 1,
+    retained_flags: list[bool] | None = None,
+    scenario_ids: list[str] | None = None,
+    intent_ids: list[str] | None = None,
+    model_id: str | None = None,
 ) -> dict[str, Any]:
     """Compute the summary dict per baseline.md §"Acceptance gate" #6.
 
@@ -347,6 +449,16 @@ def build_summary(
     JSON-friendly key types: ``by_max_tier`` keys are stringified
     ints (``"0"``..``"3"``) so the summary round-trips through
     ``json.dump`` / ``json.load`` without type drift.
+
+    Stage-5 telemetry (``k``, ``retained_flags``, ``scenario_ids``,
+    ``intent_ids``, ``model_id``). When ``k > 1``, the summary carries
+    ``retention_rate`` (fraction of *scenarios* with ≥1 retained
+    rollout) and ``retention_by_intent`` (the same fraction broken out
+    by intent_id — the Stage 6 ≥40-row-per-intent gate input). When
+    any scenario reports a ``usage_sum``, the summary aggregates them
+    into ``usage_totals`` (per-category tokens) plus a
+    ``cost_estimate_usd`` against ``model_id``'s per-Mtok pricing.
+    Defaults preserve the bench-as-eval shape.
     """
     by_max_tier: dict[str, int] = {str(t): 0 for t in range(4)}
     by_failure_mode: dict[str, int] = {m: 0 for m in verifier.FAILURE_MODES}
@@ -355,6 +467,7 @@ def build_summary(
     l3_passes = 0
     total_wall_ms = 0
     total_turns = 0
+    usage_totals: dict[str, int] | None = None
 
     for sr in scenario_results:
         tier = sr.verifier_result.max_tier
@@ -366,11 +479,18 @@ def build_summary(
             l3_passes += 1
         total_wall_ms += sr.wall_ms_total
         total_turns += len(sr.turns)
+        if sr.usage_sum is not None:
+            if usage_totals is None:
+                usage_totals = {k_: 0 for k_ in _usage_categories()}
+            for cat in _usage_categories():
+                usage_totals[cat] = usage_totals.get(cat, 0) + int(
+                    sr.usage_sum.get(cat, 0)
+                )
 
     l3_pass_rate = (l3_passes / total) if total else 0.0
     mean_turns = (total_turns / total) if total else 0.0
 
-    return {
+    out: dict[str, Any] = {
         "total": total,
         "by_max_tier": by_max_tier,
         "by_failure_mode": by_failure_mode,
@@ -384,14 +504,61 @@ def build_summary(
             "seed": config.seed,
             "per_turn_timeout_s": config.per_turn_timeout_s,
             "system_prompt_sha256": compute_system_prompt_hash(config.system_prompt),
+            "k": int(k),
         },
     }
+
+    if k > 1 and retained_flags is not None and scenario_ids is not None:
+        # The retention gate is per scenario, not per rollout — a scenario
+        # whose K=3 rollouts include at least one passing trajectory counts
+        # as retained for the SFT corpus.
+        retained_per_scenario: dict[str, bool] = {}
+        intent_by_scenario: dict[str, str] = {}
+        ids_iter = scenario_ids
+        intents_iter = intent_ids if intent_ids is not None else [""] * len(ids_iter)
+        for sid, intent, flag in zip(ids_iter, intents_iter, retained_flags):
+            retained_per_scenario[sid] = retained_per_scenario.get(sid, False) or bool(
+                flag
+            )
+            intent_by_scenario.setdefault(sid, intent)
+        n_scenarios = len(retained_per_scenario)
+        n_retained = sum(1 for v in retained_per_scenario.values() if v)
+        out["scenarios_total"] = n_scenarios
+        out["scenarios_retained"] = n_retained
+        out["retention_rate"] = (n_retained / n_scenarios) if n_scenarios else 0.0
+        by_intent: dict[str, dict[str, int]] = {}
+        for sid, was_retained in retained_per_scenario.items():
+            intent = intent_by_scenario.get(sid, "<unknown>")
+            slot = by_intent.setdefault(intent, {"count": 0, "retained": 0})
+            slot["count"] += 1
+            if was_retained:
+                slot["retained"] += 1
+        out["retention_by_intent"] = {
+            intent: {
+                "count": s["count"],
+                "retained": s["retained"],
+                "rate": (s["retained"] / s["count"]) if s["count"] else 0.0,
+            }
+            for intent, s in sorted(by_intent.items())
+        }
+
+    if usage_totals is not None:
+        out["usage_totals"] = usage_totals
+        out["cost_estimate_usd"] = estimate_cost_usd(usage_totals, model_id or "")
+
+    return out
 
 
 def write_summary(
     path: Path,
     scenario_results: list[ScenarioRunResult],
     config: EvalConfig,
+    *,
+    k: int = 1,
+    retained_flags: list[bool] | None = None,
+    scenario_ids: list[str] | None = None,
+    intent_ids: list[str] | None = None,
+    model_id: str | None = None,
 ) -> dict[str, Any]:
     """Write the summary dict (pretty-printed JSON) and return it.
 
@@ -399,7 +566,15 @@ def write_summary(
     rollouts file stays one-record-per-line for streaming
     consumption.
     """
-    summary = build_summary(scenario_results, config)
+    summary = build_summary(
+        scenario_results,
+        config,
+        k=k,
+        retained_flags=retained_flags,
+        scenario_ids=scenario_ids,
+        intent_ids=intent_ids,
+        model_id=model_id,
+    )
     Path(path).write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 
@@ -419,6 +594,9 @@ def run_eval(
     provider_name: str = "unknown",
     registry: Registry | None = None,
     tools: list[dict[str, Any]] | None = None,
+    k: int = 1,
+    retain: str = "all",
+    model_id: str | None = None,
 ) -> dict[str, Any]:
     """Run every scenario in order; write ``rollouts.jsonl`` +
     ``summary.json`` under ``out_dir``; return the summary dict.
@@ -429,9 +607,26 @@ def run_eval(
     before the harness loop) plus a live ``LlmProvider`` (FunctionGemma
     / Anthropic) without touching this orchestrator.
 
+    Stage-5 K-pass surface (``k``, ``retain``, ``model_id``). When
+    ``k > 1`` each scenario is run K times with per-pass seed
+    ``config.seed + k_idx``; each rollout is written separately with a
+    ``k_idx`` and ``retained`` field. ``retain="passing"`` marks only
+    L3 rollouts as retained (Stage 6's SFT-corpus filter key);
+    ``retain="all"`` marks every rollout retained. The summary
+    aggregates per-category Anthropic token usage into
+    ``cost_estimate_usd`` when ``model_id`` matches a pinned-pricing
+    entry. K=1 (default) preserves the bench-as-eval shape byte-for-byte.
+
     Returns the summary dict so callers don't need to re-read
     ``summary.json`` from disk.
     """
+    if retain not in RETAIN_MODES:
+        raise ValueError(
+            f"unknown retain={retain!r}; expected one of {RETAIN_MODES}"
+        )
+    if k < 1:
+        raise ValueError(f"k must be >= 1, got {k!r}")
+
     reg = registry if registry is not None else Registry.load_from_artifact()
     tool_list = tools if tools is not None else reg.all()
 
@@ -446,50 +641,101 @@ def run_eval(
     }
 
     results: list[ScenarioRunResult] = []
+    retained_flags: list[bool] = []
+    scenario_ids: list[str] = []
+    intent_ids: list[str] = []
+    from dataclasses import replace as _dc_replace
     from tqdm import tqdm
-    import sys
+
+    total_rollouts = len(scenarios) * k
 
     with rollouts_path.open("w") as rollouts_file:
-        pbar = tqdm(scenarios, desc="Running scenarios", unit="scenario")
-        for scenario in pbar:
+        pbar = tqdm(total=total_rollouts, desc="Running rollouts", unit="rollout")
+        for scenario in scenarios:
             provider = provider_factory(scenario)
-            sr = run_one_scenario(
-                provider=provider,
-                dispatcher_factory=dispatcher_factory,
-                scenario=scenario,
-                tools=tool_list,
-                config=config,
-                registry=reg,
-            )
-            results.append(sr)
-            write_rollout_record(
-                rollouts_file,
-                scenario=scenario,
-                messages=sr.messages,
-                verifier_result=sr.verifier_result,
-                tools=tool_list,
-                config=config,
-                provider_meta=dict(provider_meta_template),
-            )
-            rollouts_file.flush()  # Ensure output is written immediately
+            scenario_retained_any = False
+            for k_idx in range(k):
+                per_pass_config = (
+                    _dc_replace(config, seed=config.seed + k_idx) if k > 1 else config
+                )
+                sr = run_one_scenario(
+                    provider=provider,
+                    dispatcher_factory=dispatcher_factory,
+                    scenario=scenario,
+                    tools=tool_list,
+                    config=per_pass_config,
+                    registry=reg,
+                )
+                results.append(sr)
+                # Retention: under ``passing`` only L3 rollouts qualify
+                # for the Stage 6 SFT corpus; under ``all`` (the
+                # bench-as-eval default) every rollout is retained.
+                this_retained = (
+                    retain == "all" or sr.verifier_result.max_tier == 3
+                )
+                if k > 1:
+                    write_rollout_record(
+                        rollouts_file,
+                        scenario=scenario,
+                        messages=sr.messages,
+                        verifier_result=sr.verifier_result,
+                        tools=tool_list,
+                        config=per_pass_config,
+                        provider_meta=dict(provider_meta_template),
+                        k_idx=k_idx,
+                        retained=this_retained,
+                        usage=sr.usage_sum,
+                    )
+                else:
+                    # K=1: preserve the pre-rev-11 record shape exactly
+                    # (no k_idx / retained / usage keys).
+                    write_rollout_record(
+                        rollouts_file,
+                        scenario=scenario,
+                        messages=sr.messages,
+                        verifier_result=sr.verifier_result,
+                        tools=tool_list,
+                        config=per_pass_config,
+                        provider_meta=dict(provider_meta_template),
+                    )
+                rollouts_file.flush()
 
-            # Update progress with scenario result
-            l3_count = sum(1 for r in results if r.verifier_result.max_tier == 3)
-            pbar.set_postfix({
-                "last": f"{scenario.id}:{sr.verifier_result.failure_mode}",
-                "L3": f"{l3_count}/{len(results)}"
-            })
+                retained_flags.append(this_retained)
+                scenario_ids.append(scenario.id)
+                intent_ids.append(scenario.intent_id)
+                scenario_retained_any = scenario_retained_any or this_retained
 
-    summary = write_summary(summary_path, results, config)
+                l3_count = sum(1 for r in results if r.verifier_result.max_tier == 3)
+                pbar.update(1)
+                pbar.set_postfix(
+                    {
+                        "last": f"{scenario.id}/k{k_idx}:{sr.verifier_result.failure_mode}",
+                        "L3": f"{l3_count}/{len(results)}",
+                    }
+                )
+        pbar.close()
+
+    summary = write_summary(
+        summary_path,
+        results,
+        config,
+        k=k,
+        retained_flags=retained_flags if k > 1 else None,
+        scenario_ids=scenario_ids if k > 1 else None,
+        intent_ids=intent_ids if k > 1 else None,
+        model_id=model_id,
+    )
     return summary
 
 
 __all__ = [
     "EvalConfig",
     "INSTRUCTION_SOURCE_V0",
+    "RETAIN_MODES",
     "ScenarioRunResult",
     "build_summary",
     "compute_system_prompt_hash",
+    "estimate_cost_usd",
     "extract_tool_calls_flat",
     "run_eval",
     "run_one_scenario",

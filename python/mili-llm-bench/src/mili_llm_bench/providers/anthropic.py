@@ -263,23 +263,31 @@ def _parse_response(response: Any) -> ProviderOutput:
 
     usage = getattr(response, "usage", None)
     tokens_used = 0
+    usage_dict: dict[str, int] | None = None
     if usage is not None:
-        tokens_used = int(
-            getattr(usage, "input_tokens", 0)
-            + getattr(usage, "output_tokens", 0)
-            + getattr(usage, "cache_read_input_tokens", 0)
-            + getattr(usage, "cache_creation_input_tokens", 0)
-        )
+        input_tokens = int(getattr(usage, "input_tokens", 0))
+        output_tokens = int(getattr(usage, "output_tokens", 0))
+        cache_read = int(getattr(usage, "cache_read_input_tokens", 0))
+        cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0))
+        tokens_used = input_tokens + output_tokens + cache_read + cache_creation
+        usage_dict = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+        }
 
     if tool_calls:
         return ProviderOutput(
             tool_calls=tool_calls,
             tokens_used=tokens_used,
+            usage=usage_dict,
             raw=response,
         )
     return ProviderOutput(
         final_text=" ".join(texts).strip(),
         tokens_used=tokens_used,
+        usage=usage_dict,
         raw=response,
     )
 

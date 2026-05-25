@@ -1,6 +1,6 @@
 # M5 — SFT pipeline (live tracker)
 
-**Status (2026-05-24):** Stages 2, 3, 6.5 cleared; preflight #2
+**Status (2026-05-24):** Stages 2, 3, 5, 6.5 cleared; preflight #2
 cleared via Path A (rev 8); rev-9 parser gap resolved via **option
 (b)** in rev 10 — a client-side `content → tool_calls` fallback
 inside `LlamaCppProvider.generate`, gated on `/props`
@@ -8,9 +8,11 @@ inside `LlamaCppProvider.generate`, gated on `/props`
 the same `--jinja` path with the fallback active lands at **13 / 50
 L3 (26.0 %)** — the 37/50 parser-gap cluster is fully cleared
 (those scenarios now grade against actual tool behavior) and the
-13/50 model-refusal cluster carries over verbatim. **Stage 5 is
-unblocked.** Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5
-on synth.jsonl, rev 7) stands.
+13/50 model-refusal cluster carries over verbatim. **Stage 5 cleared
+in rev 11 (pilot) + rev 12 (full sweep)** — 171 / 175 retention
+(97.7 %) at $1.88 total spend, K=3, byte-for-byte the same retention
+rate as the v7 stage-6.5 ceiling. **Stage 6 unblocked.** Matched-tools
+ceiling 97.71 % L3 (Claude Sonnet 4.5 on synth.jsonl, rev 7) stands.
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -147,9 +149,21 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
       `<param:class>` keys were not resolved); fix landed in
       `slots.py`, corpus regenerated deterministically, second pass
       cleared. See changelog rev 7.
-- [ ] **Stage 5** — Teacher rollouts. Burns Anthropic API on every
-      scenario; deliberately last among data stages. Pilot the first
-      ~50 scenarios before committing to the full sweep.
+- **Stage 5** — Teacher rollouts. Burns Anthropic API on every
+      scenario; deliberately last among data stages. Split into pilot
+      (first 50 of 175) and full sweep so the $50/$200 budget gates
+      have a checkpoint.
+  - [x] **Stage 5 pilot** — `stage5-pilot-anthropic-20260524-222350`:
+        50 / 50 retention, $0.43, K=3, ≈ 6 min wall-clock. Cleared
+        the ≤ $50 budget and ≥ 85 % retention gates; full sweep
+        authorized. See changelog rev 11.
+  - [x] **Stage 5 full sweep** —
+        `stage5-fullsweep-anthropic-20260524-223426`: **171 / 175
+        retention (97.7 %)**, **$1.88** (vs $200 gate — 106×
+        headroom), K=3, ≈ 27 min wall-clock. Matches v7 stage-6.5
+        ceiling exactly; same 4 `query` failures persist
+        (parked under `query.todo_v2` per rev 7). See changelog rev
+        12. **Stage 6 unblocked.**
 - [ ] **Stage 6** — Assembly, dedup, splits, `dataset_card.md`.
       Contamination control: split by `(intent_id, fixture)` cell,
       not by row.
@@ -241,6 +255,134 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-24 (rev 12)** — Stage 5 full sweep cleared. K=3 teacher
+  rollouts (Claude Sonnet 4.5, `--temperature 0.7`,
+  `system_prompt_sha256 = 9f36d0deb5e98a89`,
+  `tools_sha256 = 27ffbd0e…`) over all 175 scenarios of
+  `data/posttraining/scenarios/synth.jsonl` produced **513 / 525 L3
+  (97.71 %)** with **171 / 175 scenarios retained (97.71 %,
+  retain="passing")**. Cost: **$1.88** (vs $200 gate — 106×
+  headroom). Wall-clock 1613 s (≈ 27 min). Artifacts:
+  `data/posttraining/runs/stage5-fullsweep-anthropic-20260524-223426/`.
+
+  **Retention by intent (Stage 6's per-intent floor input).** 13 / 14
+  intents at 100 % retention (clrsel 6/6, colormap 18/18,
+  compound-material-then-show 13/13, compound-select-then-show 14/14,
+  compound-state-then-show 14/14, load 6/6, material 20/20, select
+  16/16, set-state 18/18, show-derived 8/8, show-primal 18/18, step
+  8/8, view-reset 4/4). `query` at **8 / 12 (66.7 %)** — same 4
+  `wrong_final_state` misses v6/v7 stage-6.5 flagged, parked under
+  catalog `query.todo_v2` per rev 7 and explicitly out of scope for
+  v1 (model retries `query(...)` without `states=[1]`,
+  postcondition exact-matches). Every other intent satisfies the
+  Stage 6 ≥ 40-rows-per-intent floor when the assembler is run with
+  the typical paraphrase multiplier — the four `query` misses leave
+  that intent at 8 retained rollouts, which is below the ≥ 40 floor.
+  Stage 6 either oversamples `query` deliberately, drops the intent
+  to `v2_backlog`, or accepts the smaller-than-floor cell with a
+  documented `dataset_card.md` note.
+
+  **Pilot-era diversity hypothesis falsified.** Rev 11 conjectured
+  that K=3 collapse on the easy first-50 subset (clrsel / load /
+  select / set-state / step) was an artifact of those single-answer
+  intents, and that compound / query / material / show-* would
+  exhibit real K-pass diversity. Post-hoc inspection of the full
+  sweep (group by `scenario_id`, count distinct
+  JSON-serialized `tool_calls_flat`) **falsifies that hypothesis
+  unambiguously: 0 / 175 scenarios produced any diverse trajectory
+  under K=3 at temperature=0.7**. Mean distinct rollouts per
+  scenario = 1.00 across every intent including the compound and
+  query families. Even the 4 `query` failures fail identically
+  three times — K=3 did not recover any failing scenario. **K=3 at
+  temperature=0.7 against Claude Sonnet 4.5 on this corpus is
+  wasted spend.** The cost is small enough ($1.88 vs $200) that
+  the lesson is "v2 should be K=1 or temperature ≥ 1.0", not "rerun
+  v1". For Stage 6, dedup on `(intent_id, fixture, tool_calls_flat)`
+  collapses the 525 rollouts to 175 unique trajectories (one per
+  scenario) by construction; the 3× K redundancy contributes zero
+  net training signal beyond what K=1 would have produced. **v2
+  knob:** drop K to 1 for the next sweep against a frontier teacher;
+  reserve K > 1 for genuinely stochastic teachers (local 7B with
+  temperature 1.0+ and top_p sampling).
+
+  **Stage 6 unblocked.** The corpus is graded, retained rollouts
+  are flagged in-place, cost telemetry is pinned. Next stage:
+  `mili-llm-bench` assembler reads `rollouts.jsonl`, filters
+  `retained == True`, dedups on the §1 key, splits by
+  `(intent_id, fixture)` cell, writes `sft/{train,val}.jsonl` +
+  `pref/{train,val}.jsonl` + `eval/heldout.jsonl` +
+  `dataset_card.md`. Per the working brief, Stage 6 is **out of
+  scope for this session** — separate work, gated on this row's
+  landing (which just happened).
+
+- **2026-05-24 (rev 11)** — Stage 5 pilot cleared. K=3 teacher
+  rollouts (Claude Sonnet 4.5, `--temperature 0.7`) over the first
+  50 scenarios of `data/posttraining/scenarios/synth.jsonl` produced
+  **150 / 150 L3 (100 %)** with **50 / 50 scenarios retained**
+  (≥ 1 passing rollout per scenario; `retain="passing"`). Cost:
+  **$0.43** (vs $50 gate — 116× headroom). Wall-clock 378 s. Per-K
+  seed plumbing forwards `config.seed + k_idx` to the provider
+  (tested via `_SeedRecordingProvider` in `tests/test_driver_stage5.py`);
+  the Anthropic API does not honor seed, so per-pass diversity is
+  driven by `temperature=0.7`. Artifacts:
+  `data/posttraining/runs/stage5-pilot-anthropic-20260524-222350/`.
+
+  **Surface delivered (option (a) — extends `mili-llm-bench run`).**
+  Five new flags on the `run` subcommand:
+  `--limit N` (cap scenarios), `--k K` (rollouts per scenario,
+  default 1), `--retain {passing,all}` (Stage 6 SFT-filter key,
+  default `all`), `--temperature` (default 0.0). New driver helpers:
+  `estimate_cost_usd` against pinned Sonnet 4.5 pricing
+  (input $3 / output $15 / cache_read $0.30 / cache_creation
+  $3.75 per Mtok); `RETAIN_MODES`; per-category usage aggregation
+  through `ProviderOutput.usage → TurnResult.usage →
+  ScenarioRunResult.usage_sum → summary.usage_totals`. K=1
+  preserves the bench-as-eval record shape byte-for-byte (no
+  `k_idx`/`retained`/`usage` keys land on those rollouts —
+  pinned by `test_run_eval_k_eq_1_preserves_pre_rev11_record_shape`).
+  Summary adds `scenarios_total / scenarios_retained /
+  retention_rate / retention_by_intent / usage_totals /
+  cost_estimate_usd` under K > 1. Five new pins land in
+  `tests/test_driver_stage5.py`; 201 / 201 tests pass.
+
+  **Two caveats worth surfacing.**
+  - **Intent coverage.** The first-50-row pilot subset only
+    exercises 5 of the 14 intents in `synth.jsonl` (clrsel 2,
+    load 6, select 16, set-state 18, step 8 = 50). The other 9
+    intents (colormap, compound-{material,select,state}-then-show,
+    material, query, show-derived, show-primal, view-reset) sit at
+    rows 51..174 and are unmeasured by the pilot. The full sweep
+    is what tells us those intents are healthy under Claude; the
+    pilot only tells us the K-pass plumbing is honest and the
+    budget gate is non-issue.
+  - **Per-K trajectory collapse on easy intents.** Despite
+    `temperature=0.7`, all K=3 rollouts produced byte-identical
+    `tool_calls_flat` for every one of the 50 pilot scenarios.
+    Confirmed by post-hoc inspection (group-by `(scenario_id)`,
+    count distinct JSON-serialized `tool_calls_flat`): 50 / 50
+    scenarios have K=3 collapse, 0 / 50 have any diversity. Cause
+    is the intent mix, not the plumbing — `load("d3samp6")`,
+    `set_state(state=N)`, `select(...)`, `step(direction=...)` and
+    `clrsel(...)` are single-answer tool calls; once Claude picks
+    the canonical call, `temperature=0.7` doesn't change the result
+    because there is no alternative correct call. The harder intents
+    (compound, query, material, show-*) are expected to exhibit
+    real K-pass diversity in the full sweep. For Stage 6 dedup
+    (`(intent_id, fixture, tool_calls_flat)` as the dedup key) this
+    means K=3 on easy intents yields ~50 unique trajectories from
+    150 rollouts — a 3× redundancy that costs $0 extra (we already
+    paid) but produces no extra training signal. Worth re-tuning
+    the K policy in Stage 6 (or v2): K=1 on easy intents,
+    K=3 only on the hard tail. For v1, the redundancy is harmless;
+    the dedup pass collapses it.
+
+  **Verdict: full sweep AUTHORIZED.** Both gates cleared. Launch
+  the 175-scenario sweep at the same config (K=3, temperature=0.7,
+  retain=passing, step_cap=8, per_turn_timeout_s=120,
+  max_new_tokens=256). Projected cost ≲ $5 (linear extrapolation
+  from the pilot is $1.50; the harder-intent token mix biases it
+  upward, but still ≪ the $200 full-sweep gate).
 
 - **2026-05-24 (rev 10)** — Rev-9 parser gap resolved via **option
   (b)**: client-side `content → tool_calls` fallback added to

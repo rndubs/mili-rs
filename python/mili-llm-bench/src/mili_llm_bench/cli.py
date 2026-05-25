@@ -378,6 +378,10 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
     """Build an ``EvalConfig`` from the parsed CLI args, honoring
     the baseline-pinned defaults when a flag is unset."""
     base = EvalConfig()
+    # ``--temperature`` lives on the run subcommand only; replay /
+    # synth never expose it. ``getattr`` with the pinned default
+    # keeps both code paths shape-compatible.
+    temperature = getattr(args, "temperature", None)
     return EvalConfig(
         step_cap=args.step_cap if args.step_cap is not None else base.step_cap,
         max_new_tokens=(
@@ -385,7 +389,7 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
             if args.max_new_tokens is not None
             else base.max_new_tokens
         ),
-        temperature=base.temperature,
+        temperature=temperature if temperature is not None else base.temperature,
         seed=args.seed if args.seed is not None else base.seed,
         per_turn_timeout_s=(
             args.per_turn_timeout_s
@@ -405,6 +409,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     out_dir = _resolve_path(args.out)
 
     scenarios = load_scenarios(scenarios_path)
+    # ``--limit N`` caps the run to the first N scenarios so the Stage-5
+    # pilot (50 of 175) stays under the budget gate; applied here so the
+    # cost telemetry + retention rate reflect the *capped* sweep, not
+    # the full corpus. K=1 bench-as-eval still uses this; absent flag =
+    # no cap.
+    if getattr(args, "limit", None) is not None and args.limit > 0:
+        scenarios = scenarios[: args.limit]
     if tools_path is not None:
         registry = Registry.load_from_artifact(tools_path)
     else:
@@ -420,6 +431,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         functiongemma_model=args.functiongemma_model,
         functiongemma_revision=args.functiongemma_revision,
     )
+
+    k = int(getattr(args, "k", 1) or 1)
+    retain = getattr(args, "retain", "all") or "all"
+    if k > 1 and config.temperature == 0.0 and args.provider == "anthropic":
+        sys.stderr.write(
+            f"warning: --k {k} against anthropic with --temperature 0.0 will "
+            "produce K identical rollouts (the Anthropic API does not honor "
+            "a seed parameter; only temperature creates per-pass diversity). "
+            "Consider --temperature 0.7 for the Stage 5 teacher-rollout pilot.\n"
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -447,6 +468,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             provider_name=bundle.provider_name,
             registry=registry,
             tools=tool_list,
+            k=k,
+            retain=retain,
+            model_id=bundle.model_id,
         )
     except Exception as exc:
         sys.stderr.write(f"run failed: {exc!r}\n")
@@ -463,11 +487,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         scenarios_sha256=scenarios_sha256,
     )
 
-    print(
+    msg = (
         f"run complete: L3 pass rate {summary['l3_pass_rate']:.3f} "
-        f"({summary['by_max_tier'].get('3', 0)}/{summary['total']}); "
-        f"see {out_dir / 'report.md'}"
+        f"({summary['by_max_tier'].get('3', 0)}/{summary['total']})"
     )
+    if k > 1:
+        msg += (
+            f"; retention {summary.get('scenarios_retained', 0)}/"
+            f"{summary.get('scenarios_total', 0)} "
+            f"({summary.get('retention_rate', 0.0):.1%})"
+        )
+    if "cost_estimate_usd" in summary:
+        msg += f"; cost ${summary['cost_estimate_usd']:.2f}"
+    msg += f"; see {out_dir / 'report.md'}"
+    print(msg)
     return 0
 
 
@@ -778,6 +811,47 @@ def build_parser() -> argparse.ArgumentParser:
         "--functiongemma-revision",
         default=None,
         help="Pin a specific HF revision/commit for the FunctionGemma model.",
+    )
+    run.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "Cap the run to the first N scenarios. Used by the Stage 5 "
+            "pilot (--limit 50 against the 175-row synth.jsonl) to stay "
+            "under the $50 budget gate."
+        ),
+    )
+    run.add_argument(
+        "--k",
+        type=int,
+        default=1,
+        help=(
+            "Number of rollouts per scenario (Stage 5 teacher-rollout "
+            "fan-out). K>1 writes K rollouts per scenario into "
+            "rollouts.jsonl with a k_idx + retained field; per-pass "
+            "seed = config.seed + k_idx. Default 1 (bench-as-eval)."
+        ),
+    )
+    run.add_argument(
+        "--retain",
+        choices=["all", "passing"],
+        default="all",
+        help=(
+            "Stage 5 retention filter. 'passing' marks only L3 rollouts "
+            "as retained=true (the Stage 6 SFT-corpus filter key); 'all' "
+            "marks every rollout retained=true. Default 'all'."
+        ),
+    )
+    run.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "Sampling temperature (default 0.0). Stage 5 K=3 pilots "
+            "against Anthropic require temperature > 0 to produce "
+            "diverse rollouts (the API does not honor a seed parameter)."
+        ),
     )
     _add_run_common_flags(run)
     run.set_defaults(func=_cmd_run)
