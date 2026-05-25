@@ -106,11 +106,11 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
 - [ ] **Stage 1** — Grammar / vocabulary extraction from `interpret.c`.
       Deferred: only gates `griz_raw` fallback grading, off v1 critical
       path. Counted-but-not-blocking.
-- [ ] **Stage 2** — Intent catalog `data/posttraining/intents/catalog.yaml`.
-      **Active next.** v1 inventory = intents whose canonical command
-      is in `tools.json`.
+- [x] **Stage 2** — Intent catalog `data/posttraining/intents/catalog.yaml`
+      (11 atomic + 3 compound; closed-7 postcondition kinds; Risk #2
+      resolved by keeping the set closed — see changelog rev 4).
 - [ ] **Stage 3** — Scenario synthesis (~200 records, multi-step
-      ratio ≥ 20 %). Blocked on Stage 2.
+      ratio ≥ 20 %). **Active next.** Blocked on nothing.
 - [ ] **Stage 4** — Verifier (already exists at
       `python/mili-llm-bench/src/mili_llm_bench/verifier.py`; L0–L3,
       closed failure-mode taxonomy). Reuse, do not rebuild.
@@ -208,6 +208,26 @@ them here too so the live tracker shows the live unknowns.
 
 ## Changelog
 
+- **2026-05-24 (rev 4)** — Stage 2 landed.
+  `data/posttraining/intents/catalog.yaml` written with 11 atomic intents
+  (`load, set-state, step, select, clrsel, show-primal, show-derived,
+  material, view-reset, colormap, query` — 10 mirror `bootstrap.jsonl`
+  plus `query` for read-path coverage) and 3 compound families
+  (`compound-material-then-show`, `compound-select-then-show`,
+  `compound-state-then-show`). **Risk #2 resolved:** verifier
+  postcondition kinds stay closed at 7; compounds grade the final state
+  only via the existing `active_result` kind. `state_sequence` and
+  `composite` are parked under `todo_v2.verifier_kinds`. Fixture facts
+  for `d3samp6` and `cylinder` filled from `bootstrap.jsonl` +
+  `interpret.c` as placeholders; Stage 3 confirms them via real
+  load+snapshot before grounding params. Risk #1 (held-out fixture
+  choice) still pending; the catalog only registers the two fixtures in
+  `_FIXTURE_PATHS`, no held-out binding yet. Punted intents
+  (`snapshot/legend/iso/contour/cutplane/named_view/close`) and the 7
+  unmapped fixtures live under `todo_v2:` so the v2 backlog is a diff,
+  not a re-derivation. Catalog passes 5 sanity checks against
+  `scenarios.VALID_POSTCONDITION_KINDS`, `tools.json`, and the
+  shape↔steps invariants.
 - **2026-05-24 (rev 3)** — Cluster bring-up on the H100 login node
   (`matrix2`). Workspace `train` extra added via `uv add` (transformers,
   torch+cu130, accelerate, trl 0.12.1, datasets, sentencepiece); the
