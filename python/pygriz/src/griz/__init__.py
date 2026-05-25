@@ -803,10 +803,20 @@ def _connect_uds(
     session file's ``transport == "in-process"``, the windowed GUI
     bound its in-process server on this UDS so a sibling script attaches
     without a TCP hop. Wire format is identical (HTTP/2 over UDS), so
-    the same proto stubs work — only the channel URL changes."""
+    the same proto stubs work — only the channel URL changes.
+
+    ``grpc.default_authority`` is pinned to ``"localhost"`` because
+    tonic 0.14 (the server side) rejects the ``:authority: unix:<path>``
+    header grpcio synthesises by default for ``unix:`` URLs, replying
+    with HTTP/2 RST_STREAM PROTOCOL_ERROR before Hello ever returns.
+    A literal ``localhost`` is a valid HTTP/2 authority on a UDS hop
+    (no DNS resolution happens — the socket file is the destination)."""
     import grpc
 
-    channel = grpc.insecure_channel(f"unix:{socket_path}")
+    channel = grpc.insecure_channel(
+        f"unix:{socket_path}",
+        options=[("grpc.default_authority", "localhost")],
+    )
     return _handshake(
         channel,
         token=token,
