@@ -66,6 +66,14 @@ anthropic = [
 llamacpp = [
   "requests>=2.31",
 ]
+train = [
+    "accelerate>=0.34,<2",
+    "datasets>=3.0,<5",
+    "sentencepiece>=0.2.1",
+    "torch>=2.6,<3",
+    "transformers>=4.50,<5",
+    "trl>=0.11,<0.13",
+]
 
 [project.scripts]
 mili-llm-bench = "mili_llm_bench.cli:main"

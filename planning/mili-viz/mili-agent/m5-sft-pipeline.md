@@ -208,6 +208,22 @@ them here too so the live tracker shows the live unknowns.
 
 ## Changelog
 
+- **2026-05-24 (rev 3)** — Cluster bring-up on the H100 login node
+  (`matrix2`). Workspace `train` extra added via `uv add` (transformers,
+  torch+cu130, accelerate, trl 0.12.1, datasets, sentencepiece); the
+  workspace now resolves through the LLNL Nexus PyPI mirror with
+  `native-tls = true`. Two new scripts: `scripts/setup-gpu-env.sh`
+  (sourceable session env matching `cadsat/build.sh`'s toolchain)
+  and `scripts/gpu-sanity.sh` (srun-able smoke check). `torch+cu130`
+  wheel verified end-to-end on H100 via `pdebug` allocation: sm_90,
+  BF16 supported, real `bf16` matmul through PyTorch's bundled cu130
+  runtime — confirms PyTorch's bundled CUDA coexists with llama.cpp
+  built against `cuda/12.9.1`. Preflight check #1 PASS (Gemma license
+  granted after Google's manual review; config + tokenizer cached).
+  Checks #2–#6 remain deferred — they require either a GPU compute
+  node + `llama-server` running (#2, #4) or the assembled
+  `sft/train.jsonl` (#3, #5) which Stage 6 produces. Work landed on
+  branch `m5-sft-cluster-bringup` (unpushed pending git auth).
 - **2026-05-24 (rev 2)** — Critique pass against Google's
   FunctionGemma fine-tuning guide. Resolved off-GPU:
   hyperparameters re-pinned to Google's reference recipe

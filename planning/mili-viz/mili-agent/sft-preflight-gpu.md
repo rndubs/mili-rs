@@ -21,18 +21,25 @@ For *why* these checks matter, see the rev-2 critique entry in
 Each check builds on the previous one. Don't skip ahead — failure at
 an early check invalidates everything below it.
 
-| # | Check | Blocks | Time |
-|---|---|---|---|
-| 1 | HF login + model fetch | All training | 5 min |
-| 2 | Train-vs-inference chat-template parity (the big one) | All post-SFT eval | 30 min |
-| 3 | SFTTrainer + `tools` field test | Stage 6 → training | 15 min |
-| 4 | `assistant_only_loss=True` compatibility | Training | 10 min |
-| 5 | `max_length=512` audit | Training data integrity | 10 min |
-| 6 | GGUF chat-template baking | Post-SFT eval | 15 min |
+| # | Check | Status | Blocks | Time |
+|---|---|---|---|---|
+| 1 | HF login + model fetch | ✅ 2026-05-24 | All training | 5 min |
+| 2 | Train-vs-inference chat-template parity (the big one) | pending GPU node | All post-SFT eval | 30 min |
+| 3 | SFTTrainer + `tools` field test | pending `sft/train.jsonl` (Stage 6) | Stage 6 → training | 15 min |
+| 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
+| 5 | `max_length=512` audit | pending `sft/train.jsonl` (Stage 6) | Training data integrity | 10 min |
+| 6 | GGUF chat-template baking | pending trained checkpoint | Post-SFT eval | 15 min |
 
 ---
 
 ## 1. HF login + model fetch
+
+**Status (2026-05-24):** ✅ PASS. `rwhitmore` authenticated; Gemma
+license granted by Google after manual review (initial accept-and-fetch
+returned 403 "awaiting review"; resolved within the session). Smoke
+fetch returned `gemma3_text` config + 262,146-token tokenizer, cached
+under `~/.cache/huggingface/` (default location — see commentary in
+`scripts/setup-gpu-env.sh` for why we did not override `HF_HOME`).
 
 FunctionGemma is gated. Without an accepted-license token the rest
 of the pipeline 401s with a confusing error.
