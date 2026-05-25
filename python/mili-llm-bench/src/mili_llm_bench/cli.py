@@ -42,6 +42,7 @@ from typing import Any, Callable
 import yaml
 
 from . import assemble as _assemble_mod
+from . import audit_token_budget as _audit_mod
 from . import driver, gepa_integration, report
 from .driver import EvalConfig, compute_system_prompt_hash, run_eval, run_one_scenario
 from .harness import Dispatcher, FakeDispatcher, Registry
@@ -1077,6 +1078,50 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     asm.set_defaults(func=_assemble_mod.run_assemble_cli)
+
+    audit = subs.add_parser(
+        "audit-token-budget",
+        help=(
+            "Preflight #5 of the M5 SFT pipeline. Renders every row of "
+            "sft/train.jsonl through the FunctionGemma tokenizer's "
+            "apply_chat_template(messages, tools=tools, ...) call and "
+            "writes a pass/fail report; default gate is max_length=512 "
+            "(Google's FG fine-tuning recipe). Login-node safe but "
+            "requires the [train] (or [functiongemma]) extra."
+        ),
+    )
+    audit.add_argument(
+        "--train",
+        required=True,
+        help="Path to sft/train.jsonl (absolute path recommended).",
+    )
+    audit.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "Override the report path "
+            "(default: <train>/../preflight-5-token-budget.md)."
+        ),
+    )
+    audit.add_argument(
+        "--tokenizer",
+        default=_audit_mod.DEFAULT_TOKENIZER_ID,
+        help=(
+            f"HF tokenizer id (default: {_audit_mod.DEFAULT_TOKENIZER_ID}). "
+            "Pulled from cache; preflight #1 must have cleared first."
+        ),
+    )
+    audit.add_argument(
+        "--max-length",
+        type=int,
+        default=_audit_mod.DEFAULT_MAX_LENGTH,
+        help=(
+            f"Pass/fail threshold (default: {_audit_mod.DEFAULT_MAX_LENGTH}, "
+            "Google's FG recipe). Bumping requires a deliberate entry in "
+            "m5-sft-pipeline.md per sft-preflight-gpu.md §5."
+        ),
+    )
+    audit.set_defaults(func=_audit_mod.run_audit_cli)
 
     return parser
 

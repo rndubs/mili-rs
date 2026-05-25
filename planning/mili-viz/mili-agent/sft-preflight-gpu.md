@@ -27,7 +27,7 @@ an early check invalidates everything below it.
 | 2 | Train-vs-inference chat-template parity (the big one) | ✅ 2026-05-24 — Path A (rev 8, prompt side) + option (b) (rev 10, response side); see §2 "Resolved via option (b)" | All post-SFT eval | 30 min |
 | 3 | SFTTrainer + `tools` field test | pending `sft/train.jsonl` (Stage 6) | Stage 6 → training | 15 min |
 | 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
-| 5 | `max_length=512` audit | pending `sft/train.jsonl` (Stage 6) | Training data integrity | 10 min |
+| 5 | `max_length=512` audit | ✅ 2026-05-25 — PASS at max=3341 / gate=4096 (off-GPU, login-safe; m5-sft-pipeline.md rev 14) | Training data integrity | 10 min |
 | 6 | GGUF chat-template baking | pending trained checkpoint | Post-SFT eval | 15 min |
 
 ---
@@ -315,28 +315,52 @@ to manual loss masking or pin a different TRL version.
 
 ## 5. `max_length=512` audit
 
-Multi-step compound scenarios with the full ~16-tool inventory can
+**Status (2026-05-25):** ✅ PASS at max=3341 / gate=4096. The audit
+is tokenizer-only (login-node safe — needs the HF tokenizer cache
+from preflight #1, no GPU). Originally queued as GPU-blocked; the
+mislabel was corrected in `m5-sft-pipeline.md` rev 14.
+
+Multi-step compound scenarios with the full ~18-tool inventory
 silently exceed 512 tokens. The trainer truncates from the right —
 which throws away the assistant turns we actually want to learn from.
+Built `audit-token-budget` so this is a single command instead of an
+inline one-liner that drifts.
 
 ```bash
-uv run --directory python python -c "
-import json
-from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained('google/functiongemma-270m-it')
-worst = 0
-for line in open('data/posttraining/sft/train.jsonl'):
-    row = json.loads(line)
-    n = len(tok.apply_chat_template(row['messages'], tools=row['tools'],
-                                    add_generation_prompt=False, tokenize=True))
-    worst = max(worst, n)
-print('max tokens:', worst)
-"
+uv run --directory python mili-llm-bench audit-token-budget \
+  --train /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/sft/sft/train.jsonl \
+  --max-length 4096
 ```
 
-**Pass criteria:** `worst <= 512`. If it exceeds:
+This renders every row through
+`tokenizer.apply_chat_template(messages, tools=tools, tokenize=True)`
+(the same call SFTTrainer makes) and writes
+`data/posttraining/sft/preflight-5-token-budget.md` with the per-intent
+token-count distribution. The default tokenizer is
+`google/functiongemma-270m-it` (override with `--tokenizer`).
+
+**Pass criteria:** every row fits in `--max-length`. Default is 512
+(Google's recipe pin); raise it deliberately when the corpus shape
+requires.
+
+**On the rev-13 corpus (82 rows):**
+
+- min = 3234, p50 = 3263, p95 = 3337, **max = 3341**
+- 0 / 82 over the bumped 4096 gate; 82 / 82 over Google's recipe
+  pin of 512
+- Cost driver is the ~18-tool inventory (~2700 tokens/row); messages
+  contribute a few hundred more
+- **Decision:** bump `max_length` from 512 → 4096 (next power-of-2
+  above 3341) for the v1 SFT run. H100 has headroom for the linear
+  8× context-window bump at the recipe's batch_size=4. The
+  alternative (per-scenario tool pruning) narrows the training
+  distribution vs inference, so we accept the wider context. Recorded
+  in `m5-sft-pipeline.md` rev 14 so the trained checkpoint's context
+  window is traceable.
+
+**On miss (if you re-run with a different corpus and it fails):**
 - Bump `max_length` to the next power-of-2 above the observed max
-  (1024, 2048). Cost is a small VRAM bump; H100 has headroom.
+  (1024, 2048, 4096). Cost is a small VRAM bump; H100 has headroom.
 - *Or* prune the assembled tools array per scenario (only include
   tools the canonical sequence actually calls). This makes the
   training distribution narrower than inference — risky.

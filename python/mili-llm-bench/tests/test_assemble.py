@@ -375,6 +375,29 @@ class TestProjectRecord:
                 and content.startswith("stop:")
             )
 
+    def test_postcondition_preserved(self, tmp_path: Path) -> None:
+        """rev 14 / option (a): the heldout/SFT record carries
+        ``postcondition`` as a top-level field so Stage 7's loader can
+        reconstruct ``Scenario`` objects without joining against
+        synth.jsonl. Drift here invalidates the eval set silently."""
+        path = tmp_path / "rollouts.jsonl"
+        rec = _make_rollout(
+            scenario_id="synth-001",
+            intent_id="load",
+            fixture="d3samp6",
+            instruction="load",
+            tool_calls_flat=[{"name": "load", "arguments": {"root": "d3samp6"}}],
+        )
+        # rec already includes verifier.postcondition from _make_rollout.
+        _write_rollouts(path, [rec])
+        rollouts = A.dedup_retained(A.load_rollouts([path]))
+        out = A.project_sft_record(rollouts[0], _build_minimal_registry())
+        assert "postcondition" in out
+        assert out["postcondition"] == {
+            "kind": "state_index",
+            "expect": {"state": 1},
+        }
+
     def test_unknown_tool_dropped(self, tmp_path: Path) -> None:
         path = tmp_path / "rollouts.jsonl"
         _write_rollouts(

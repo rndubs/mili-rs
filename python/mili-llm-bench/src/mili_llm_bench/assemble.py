@@ -347,6 +347,13 @@ def project_sft_record(
         can't drift).
       * ``tool_calls_flat`` — the dedup key body, surfaced for audit
         in dataset_card.md.
+      * ``postcondition`` — the verifier's grading target. Lifted
+        from ``record["verifier"]["postcondition"]`` so the assembled
+        corpus is self-contained for Stage 7 (the eval harness reads
+        it back to reconstruct a ``Scenario`` without joining against
+        ``synth.jsonl``). Self-containment is load-bearing — a future
+        synth.jsonl regen must not silently rewrite the heldout
+        postconditions. Decision pinned 2026-05-24 (rev 14, option a).
 
     Tool names referenced by the rollout but missing from the registry
     are dropped with no warning (Stage 5 already validated they
@@ -363,6 +370,9 @@ def project_sft_record(
 
     messages = _strip_driver_stop_markers(rec.get("messages") or [])
 
+    verifier = rec.get("verifier") or {}
+    postcondition = verifier.get("postcondition") or {}
+
     return {
         "scenario_id": rollout.scenario_id,
         "intent_id": rollout.intent_id,
@@ -372,6 +382,7 @@ def project_sft_record(
         "messages": messages,
         "tools": tools_oai,
         "tool_calls_flat": rec.get("tool_calls_flat", []),
+        "postcondition": dict(postcondition),
     }
 
 

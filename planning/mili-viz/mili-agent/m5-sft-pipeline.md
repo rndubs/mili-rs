@@ -1,23 +1,30 @@
 # M5 — SFT pipeline (live tracker)
 
-**Status (2026-05-24):** Stages 2, 3, 5, 6, 6.5 cleared; preflight #1,
-#2, #4 cleared (#2 via Path A rev 8; #4 = config seam landed pre-rev
-12); rev-9 parser gap resolved via **option (b)** in rev 10 — a
-client-side `content → tool_calls` fallback inside
-`LlamaCppProvider.generate`, gated on `/props`
-`chat_template_caps.supports_tool_calls = false`. v7 re-baseline on
-the same `--jinja` path with the fallback active lands at **13 / 50
-L3 (26.0 %)**. **Stage 5 cleared in rev 11 (pilot) + rev 12 (full
-sweep)** — 171 / 175 retention (97.7 %) at $1.88 total spend, K=3,
-byte-for-byte the same retention rate as the v7 stage-6.5 ceiling.
-**Stage 6 cleared in rev 13** — `mili-llm-bench assemble` produced
-the v1 SFT corpus from the rev-12 rollouts: 82 train / 8 val / 81
-heldout / 0 DPO pairs (K=3@T=0.7 produced 0 mixed-tier scenarios; pref
-files land empty by construction). Floor re-pinned from ≥40 →
-**≥10** after dedup math falsified the rev-4 paraphrase-multiplier
-assumption (see rev 13 changelog). Stage 7/8 + preflight #3/#5/#6
-**unblocked**. Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5 on
-synth.jsonl, rev 7) stands.
+**Status (2026-05-25):** Stages 2, 3, 5, 6, 6.5 cleared; preflight
+#1, #2, #4, **#5** cleared (#2 via Path A rev 8; #4 = config seam
+landed pre-rev 12; #5 cleared off-GPU in rev 14 — see below); rev-9
+parser gap resolved via **option (b)** in rev 10 — a client-side
+`content → tool_calls` fallback inside `LlamaCppProvider.generate`,
+gated on `/props` `chat_template_caps.supports_tool_calls = false`.
+v7 re-baseline on the same `--jinja` path with the fallback active
+lands at **13 / 50 L3 (26.0 %)**. **Stage 5 cleared in rev 11
+(pilot) + rev 12 (full sweep)** — 171 / 175 retention (97.7 %) at
+$1.88 total spend, K=3, byte-for-byte the same retention rate as the
+v7 stage-6.5 ceiling. **Stage 6 cleared in rev 13** — `mili-llm-bench
+assemble` produced the v1 SFT corpus from the rev-12 rollouts: 82
+train / 8 val / 81 heldout / 0 DPO pairs (K=3@T=0.7 produced 0
+mixed-tier scenarios; pref files land empty by construction). Floor
+re-pinned from ≥40 → **≥10** after dedup math falsified the rev-4
+paraphrase-multiplier assumption (see rev 13 changelog). **Stage 7
+loader landed in rev 14** — `scenarios.load_scenarios` auto-detects
+the assembled shape so the eval harness reads `eval/heldout.jsonl`
+directly (no synth.jsonl join); mock-provider smoke against the real
+81-row heldout split confirms end-to-end load. **Preflight #5
+cleared in rev 14** at max=3341 / gate=4096 (deliberate bump above
+Google's `max_length=512` recipe pin — recorded here per
+sft-preflight-gpu.md §5). Preflight #3/#6 + Stage 8 still
+**unblocked** (GPU-bound). Matched-tools ceiling 97.71 % L3 (Claude
+Sonnet 4.5 on synth.jsonl, rev 7) stands.
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -185,7 +192,17 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
       scenario IDs ∩ train+val = ∅; heldout cells ∩ train+val cells
       = ∅. See rev 13 changelog.
 - [ ] **Stage 7** — Eval harness (same code as Stage 4, pointed at the
-      held-out split).
+      held-out split). **Loader landed in rev 14**:
+      `scenarios.load_scenarios` auto-detects the assembled-corpus
+      shape (`scenario_id` + `messages`) and lifts the verifier's
+      `postcondition` from a top-level field projected by
+      `assemble.project_sft_record`, so the eval reads
+      `eval/heldout.jsonl` standalone (no synth.jsonl join). Mock
+      smoke against the real 81-row heldout split graded
+      end-to-end (`runs/stage7-smoke-mock-20260525-000258/` — 81/81
+      `parse_error` from the mock, expected). Remaining work: real
+      eval pass against the post-SFT checkpoint (GPU-blocked behind
+      `trainer.train()`).
 - [ ] **Stage 8** — Pre-experiment gate. Run a stock 0.5–1B model with
       grammar-constrained decoding and **no fine-tune** against
       Stage-7 eval. If it clears the bar, post-training is moot for v1
@@ -272,6 +289,77 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 14)** — **Stage 7 loader + preflight #5
+  cleared.** Three landing changes:
+
+  **(1) Assembled corpus is now self-contained.**
+  `assemble.project_sft_record` lifts
+  `record["verifier"]["postcondition"]` to a top-level
+  `postcondition` field on each emitted SFT/heldout row (option (a)
+  of the "where does Stage 7 read the postcondition from?" decision
+  — option (b) was a synth.jsonl join, rejected because a future
+  synth regeneration would silently rewrite heldout postconditions
+  and invalidate the eval set with no detectable trace). One new
+  pin: `tests/test_assemble.py::TestProjectRecord::
+  test_postcondition_preserved`. Existing pins in `TestEndToEnd`
+  (`test_contamination_clean`, the rev-12 rollouts smoke) still
+  pass — 20 / 20 assemble tests.
+
+  **(2) Stage 7 loader auto-detects the assembled shape.**
+  `mili_llm_bench.scenarios` gains `_parse_assembled_record`,
+  `_is_assembled_record` (keys on `scenario_id` AND `messages` — an
+  assembled row could theoretically grow an `id` field, so both
+  discriminators are checked), `load_scenarios_from_assembled`
+  (strict — rejects synth-shape rows for explicit eval-harness use)
+  and a per-row auto-detect inside `load_scenarios`. The eval reads
+  `eval/heldout.jsonl` standalone — no synth.jsonl path required at
+  eval time. Stage 7 mock smoke against the real 81-row heldout
+  split (`runs/stage7-smoke-mock-20260525-000258/`) graded
+  end-to-end: 81 / 81 `parse_error` from the mock provider is the
+  expected behavior; the success signal is that all 81 rows loaded,
+  resolved to `Scenario` objects, and reached the verifier without
+  any synth-join lookup. **Loader-side unit pins are a follow-up**
+  (the heldout smoke is end-to-end coverage but does not lock the
+  parser's error paths) — tracked in `TODO(v2)`.
+
+  **(3) Preflight #5 cleared off-GPU.** New module
+  `python/mili-llm-bench/src/mili_llm_bench/audit_token_budget.py`
+  + `mili-llm-bench audit-token-budget` subcommand renders every
+  row of `sft/train.jsonl` through
+  `tokenizer.apply_chat_template(messages, tools=tools,
+  tokenize=True)` — the same call SFTTrainer makes — and emits a
+  pass/fail report under `data/posttraining/sft/
+  preflight-5-token-budget.md`. Result on the rev-13 corpus
+  (`google/functiongemma-270m-it`, 82 rows): **max = 3341 tokens**,
+  p95 = 3337, p50 = 3263, min = 3234, 0 / 82 over budget. The cost
+  driver is the ~18-tool inventory (~2700 tokens/row); messages
+  contribute a few hundred more. **Verdict: PASS at gate = 4096
+  (deliberate bump from Google's recipe pin of 512)**. The bump is
+  recorded here per `sft-preflight-gpu.md` §5's instruction (the
+  trained checkpoint's context window must be traceable to a
+  decision in this tracker). VRAM cost on H100 is the headroom-side
+  of "small" — the linear bump from 512 → 4096 is 8× the per-row
+  token count, and the recipe's batch_size=4 means peak activation
+  memory stays well under H100's 80GB. The alternative —
+  per-scenario tool pruning — narrows the training distribution vs
+  inference, so we pin the inventory-wide bump for v1 and revisit
+  in v2 only if VRAM forces it.
+
+  **(4) Preflight #5's runtime label was wrong.** The `sft-preflight-gpu.md`
+  §5 entry was queued as "pending GPU node + sft/train.jsonl"; in
+  practice the audit is tokenizer-only (login-node safe — needs only
+  the HF tokenizer cache populated by preflight #1) and gates the
+  data, not training. Marking off-GPU-runnable in §5.
+
+  **Path forward.** Preflights #3 (SFTTrainer + tools dump),
+  #4 (`assistant_only_loss=True` mask check), and #6 (GGUF
+  chat-template baking — gated on a trained checkpoint) remain
+  GPU-bound. Stage 8 (pre-experiment gate: stock 0.5–1B + GBNF
+  against `eval/heldout.jsonl`) is also runnable and should land
+  before `trainer.train()` so we know SFT room exists. 221 / 221
+  tests + 1 skip pass on the full `mili-llm-bench` suite (+1 from
+  rev 13's 220, the postcondition pin).
 
 - **2026-05-24 (rev 13)** — **Stage 6 cleared.** `mili-llm-bench
   assemble` ran against
