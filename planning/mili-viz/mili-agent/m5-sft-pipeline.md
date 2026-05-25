@@ -1,13 +1,20 @@
 # M5 — SFT pipeline (live tracker)
 
 **Status (2026-05-24):** Stages 2, 3, 6.5 cleared; preflight #2
-cleared via Path A (rev 8). Floor **stale** — the prior 40 % v5 L3
-was measured against a bespoke inference renderer that silently
-discarded the bench-pinned system prompt; v5 re-baseline on the
-new `--jinja` path is queued (GPU-blocked — needs llama-server).
+cleared via Path A (rev 8). v6 re-baseline on the new `--jinja`
+path landed at **0 / 50 L3 (rev 9)** — diagnosed as an upstream
+parser gap in `llama.cpp` b9307 (`549b9d843`):
+`chat_template_caps.supports_tool_calls = false` for the
+FunctionGemma BF16 GGUF, so FG's `<start_function_call>…
+<end_function_call>` response markers return as literal
+`message.content` instead of structured `tool_calls`. **Stage 5 is
+blocked** until the inference path emits structured tool_calls.
 Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5 on synth.jsonl,
-rev 7) stands. Next: v5 re-baseline (GPU node) → Stage 5 teacher
-rollout pilot.
+rev 7) stands. Next decision: (a) upgrade `llama.cpp` to a build
+with a FG response parser, (b) add a content→`tool_calls` fallback
+inside `LlamaCppProvider.generate` (re-introduces parser code Path
+A deleted), (c) revert Path A and re-apply the developer-message
+fix to the bespoke renderer, or (d) switch the inference runtime.
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -29,7 +36,7 @@ canonical harness config (`step_cap=8`, `temperature=0.0`,
 
 | Run                                                       | Provider                      | L3       | tools_sha256 | Notes                                            |
 | --------------------------------------------------------- | ----------------------------- | -------- | ------------ | ------------------------------------------------ |
-| ~~v5 floor~~ (`v5-llamacpp-promoted-tools`) **stale rev 8** | llamacpp / FunctionGemma-270M | ~~40 %~~ | `27ffbd0e…`  | Bespoke renderer dropped the developer message; re-baseline pending under `--jinja` |
+| **v6 floor** (`v6-llamacpp-jinja-rebaseline-20260524-205725`) | llamacpp / FunctionGemma-270M | **0 %** | `27ffbd0e…` | Re-baseline on `--jinja` path; 50 / 50 `parse_error`. llama.cpp b9307 (`549b9d843`) has no FG response parser (`chat_template_caps.supports_tool_calls = false`); 37 / 50 emit FG markers in content, 13 / 50 model-refused. Stage 5 blocked — see rev 9. Supersedes the stale v5 floor (40 % L3 under the deleted bespoke renderer). |
 | v4 floor (`v4-llamacpp-realfixtures-fullresolve`)         | llamacpp / FunctionGemma-270M | 32 %     | `cdda3677…`  | Pre-GEPA-promotion; historical                   |
 | **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools, bootstrap eval; re-measured |
 | **v7 ceiling** (`v7-stage65-anthropic-smoke-…`)           | anthropic / claude-sonnet-4-5 | **98 %** | (synth)      | Post-promotion tools on `synth.jsonl` (175 rows) |
@@ -39,10 +46,15 @@ fixture-resolver landed; their absolute numbers are not comparable —
 see [`bench-fixture-stub-fallback-fixed`](../../../../.claude/projects/-Users-rwhit-Workspace-mili-rs/memory/bench-fixture-stub-fallback-fixed.md)
 in memory.
 
-**Per-intent floor (FunctionGemma v5, 40 %):** load 83 %, set-state
-83 %, colormap 75 %, show-derived 25 %, show-primal/step 17 %,
-material / select / clrsel / view-reset / compound **0 %**. The
-zero-rate intents are SFT's primary lift target.
+**Per-intent floor (FunctionGemma v6, 0 %):** every intent at 0 / N
+on the new `--jinja` path — see rev 9 for the failure-cluster
+breakdown. Not a measurement of FG capability under a working
+inference path; reflects only that the response parser doesn't
+recognize FG's format. Historical v5 per-intent numbers (load 83 %,
+set-state 83 %, colormap 75 %, show-derived 25 %, show-primal /
+step 17 %, material / select / clrsel / view-reset / compound 0 %)
+are kept here for orientation but were measured against the deleted
+bespoke renderer that nullified the bench system prompt.
 
 ---
 
@@ -228,6 +240,61 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-24 (rev 9)** — v5 re-baseline (the required follow-on to
+  rev 8) ran on the new `--jinja` inference path against the
+  canonical bootstrap eval (50 scenarios, step_cap=8,
+  temperature=0.0, system_prompt_sha256 `9f36d0deb5e98a89`,
+  tools_sha256 `27ffbd0e…`). Result: **0 / 50 L3 (0.0 %)**, all 50
+  graded `parse_error`. Pinned as **v6 floor**; supersedes the
+  stale v5 row. Artifacts:
+  `data/posttraining/runs/v6-llamacpp-jinja-rebaseline-20260524-205725/`.
+  Wall-clock 12 s — `parse_error` short-circuits the harness's
+  retry path so each scenario costs a single turn.
+
+  **Root cause: upstream parser gap in llama.cpp.** `llama-server`
+  build `b9307` / `549b9d843` reports
+  `chat_template_caps.supports_tool_calls = false` for the
+  FunctionGemma BF16 GGUF (via `/props`). The GGUF's baked-in jinja
+  template renders the tool inventory correctly into the prompt —
+  `/apply-template` confirms `<start_function_declaration>` blocks
+  appear in the rendered string — but llama.cpp's chat-handler in
+  `common/chat.cpp` does not have a parser for FunctionGemma's
+  response format (`<start_function_call>call:NAME{…}
+  <end_function_call>`). The server returns the literal markers
+  inside `message.content`; the OpenAI-shape `tool_calls` field
+  stays empty. Sample (bs-001 / load):
+  `'<start_function_call>call:load{root:<escape>d3samp6<escape>}
+  <end_function_call>…'`. `LlamaCppProvider.generate` reads
+  `tool_calls=[]`, emits an empty `ProviderOutput.tool_calls`, and
+  the verifier grades the rollout as `parse_error` — correctly,
+  given what was returned.
+
+  **Two failure clusters** across the 50 scenarios:
+  - **37 / 50 parser gap.** FG emits valid `<start_function_call>`
+    markers and llama.cpp leaves them in `content`. Affects every
+    intent the model actually attempts: material 6/6, set-state 6/6,
+    step 6/6, view-reset 3/3, show-primal 4/6, show-derived 3/4,
+    clrsel 3/4, select 3/4, compound 1/1, colormap 1/4, load 1/6.
+  - **13 / 50 model refusal.** Even when FG decides to call a
+    function, the bench's canonical developer prompt sometimes
+    leaves it chatting instead: `"I cannot assist with…"`, `"My
+    current capabilities are limited to…"`. Concentrated on `load`
+    (5/6) and `colormap` (3/4) — the intents where the deleted
+    bespoke renderer's trigger phrase ("You are a model that can
+    do function calling…") had the most lift over the
+    bench-pinned system prompt.
+
+  **Stage 5 is blocked.** Maps to the §2 third gate-branch
+  (`L3 ≤ 35 % — investigate before SFT`), with a sharper
+  diagnosis than §2 anticipated: the bespoke trigger phrase *was*
+  slightly load-bearing for FG's emission rate (the 13/50 refusal
+  subset), but the dominant blocker is the response-parser side of
+  the runtime contract. Path A's claim of "single source of truth
+  via the FG jinja baked into the GGUF" holds for the prompt path
+  but not the response path on this `llama.cpp` build. No code
+  change in this rev; surfacing to the user for the path-forward
+  decision (see Status header — options a/b/c/d).
 
 - **2026-05-24 (rev 8)** — Preflight check #2 (train-vs-inference
   chat-template parity) resolved via **Path A**. Login-safe diff of

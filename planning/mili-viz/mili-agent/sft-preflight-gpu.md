@@ -24,7 +24,7 @@ an early check invalidates everything below it.
 | # | Check | Status | Blocks | Time |
 |---|---|---|---|---|
 | 1 | HF login + model fetch | ✅ 2026-05-24 | All training | 5 min |
-| 2 | Train-vs-inference chat-template parity (the big one) | ✅ 2026-05-24 (Path A landed; v5 re-baseline pending GPU) | All post-SFT eval | 30 min |
+| 2 | Train-vs-inference chat-template parity (the big one) | ⚠️ 2026-05-24 — Path A landed but **response-parser side is broken upstream**; see §2 "v6 re-baseline finding" | All post-SFT eval | 30 min |
 | 3 | SFTTrainer + `tools` field test | pending `sft/train.jsonl` (Stage 6) | Stage 6 → training | 15 min |
 | 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
 | 5 | `max_length=512` audit | pending `sft/train.jsonl` (Stage 6) | Training data integrity | 10 min |
@@ -65,18 +65,26 @@ tokenizer vocab size without an HTTP error.
 
 ## 2. Train-vs-inference chat-template parity (highest stakes)
 
-**Status (2026-05-24):** ✅ Resolved via **Path A** (see §2b below).
-The bespoke ``_build_functiongemma_prompt`` was deleted from
+**Status (2026-05-24):** ⚠️ Partially resolved via **Path A** (see
+§2b). The bespoke ``_build_functiongemma_prompt`` was deleted from
 `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`;
 `LlamaCppProvider.generate` now POSTs to ``/v1/chat/completions`` and
 relies on llama-server's ``--jinja`` flag to apply the FunctionGemma
 chat template baked into the GGUF. Training via HF
 `apply_chat_template` against `google/functiongemma-270m-it` and
-inference both render through the **same** FG jinja — single source
-of truth. Test pin:
+inference render the *prompt* through the same FG jinja — single
+source of truth for what the model sees on input. Test pin:
 `python/mili-llm-bench/tests/test_providers_llamacpp.py::
 TestChatCompletionsPath` (POST URL, OpenAI tool shape, tool-call
 parsing, and a guard that the bespoke renderer doesn't return).
+
+The **response** direction is **not** symmetric on `llama.cpp`
+`b9307` / `549b9d843`: the chat-handler has no FunctionGemma
+response parser, so the model's
+`<start_function_call>…<end_function_call>` output comes back as
+literal `message.content` and `tool_calls` is always empty. The v6
+re-baseline (2026-05-24) measured 0 / 50 L3 as a direct consequence
+— see "v6 re-baseline finding" below.
 
 The parity check itself was a login-safe diff (HF
 `apply_chat_template` vs the now-deleted `_build_functiongemma_prompt`)
@@ -108,34 +116,56 @@ against a renderer that nullified the pinned system prompt — so the
 re-baseline below may *raise* the floor. That's why it's queued
 explicitly rather than assumed unchanged.
 
-### Required follow-on (GPU-blocked) — re-baseline v5
+### v6 re-baseline finding (2026-05-24) — Path A is incomplete
 
-The 40 % v5 floor in `m5-sft-pipeline.md` was measured against the
-deleted renderer. Re-pinning requires:
+The re-baseline ran and **measured 0 / 50 L3** (all 50 graded
+`parse_error`). Map to the third branch below
+(`L3 ≤ 35 % — investigate`). Per-cluster diagnosis lives in
+`m5-sft-pipeline.md` changelog rev 9; the headline:
 
-```bash
-# GPU node, llama-server WITH --jinja
-llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 --jinja &
+- `llama-server` build `b9307` / `549b9d843` does not have a
+  FunctionGemma response parser. `/props` returns
+  `chat_template_caps.supports_tool_calls = false` for the BF16
+  GGUF. The jinja template renders the inventory into the prompt
+  correctly (`<start_function_declaration>` blocks confirmed via
+  `/apply-template`), but the model's
+  `<start_function_call>call:NAME{…}<end_function_call>` response
+  is returned as `message.content`, never re-parsed into
+  `tool_calls`. 37 / 50 scenarios fail this way.
+- The remaining 13 / 50 are model refusals — FG sometimes chats
+  instead of function-calling under the bench's canonical
+  developer prompt (concentrated on `load` 5/6 and `colormap`
+  3/4). This is the smaller "trigger phrase was load-bearing"
+  finding the third branch anticipated; it cannot be measured
+  cleanly until the parser gap is closed.
 
-# Then on the GPU node:
-uv run --directory python --extra llamacpp --extra pygriz mili-llm-bench run \
-  --provider llamacpp \
-  --scenarios data/posttraining/eval/bootstrap.jsonl \
-  --out data/posttraining/runs/v6-llamacpp-jinja-rebaseline-$(date +%Y%m%d-%H%M%S)
-```
+**Stage 5 is blocked.** Path A's claim of "single source of truth
+via the FG jinja baked into the GGUF" holds for the *prompt*
+direction only — the response-parser side of the runtime contract
+is missing on this `llama.cpp` build. Decision needed before any
+further SFT work:
 
-Expected outcomes and what each implies:
+- (a) Upgrade `llama.cpp` to a build with a FunctionGemma response
+  parser if/when one lands upstream.
+- (b) Add a content→`tool_calls` fallback parser inside
+  `LlamaCppProvider.generate` (re-introduces parser code Path A
+  deleted; pin a new test that the fallback is only used when
+  `supports_tool_calls == false`).
+- (c) Revert Path A in favor of the bespoke renderer, with the
+  developer-message bug fixed in place (the rev-8 patch dropped
+  ~460 lines of code we now need to restore).
+- (d) Switch the inference runtime (vLLM / a Python `transformers`
+  serving wrapper) — heavier change but inherits FG support
+  directly from the HF tokenizer's `apply_chat_template`.
 
-- **L3 ≈ 40 % (±5 pp)**: the bespoke and jinja paths happened to be
-  isomorphic for the bootstrap eval. Floor stands; pin the new run
-  as `v6 floor` and supersede `v5 floor` in the baselines table.
-- **L3 substantially higher (≥ 50 %)**: the dropped system prompt was
-  meaningfully constraining the bespoke path. Use the new number as
-  the floor; the gap SFT must close is smaller than previously
-  measured.
-- **L3 lower (≤ 35 %)**: the bespoke format was unintentionally helping
-  (e.g. the trigger phrase was load-bearing for FG's tool-calling
-  logic). Investigate before SFT — the prior 40 % was inflated.
+Originally documented outcomes (kept for context):
+
+- **L3 ≈ 40 % (±5 pp)**: jinja and bespoke paths were isomorphic.
+- **L3 substantially higher (≥ 50 %)**: dropped system prompt was
+  constraining the bespoke path.
+- **L3 lower (≤ 35 %)**: bespoke format unintentionally helping —
+  **this is what landed**, modulo the upstream parser gap that
+  dominates the symptom.
 
 ### 2a. Render both sides on one sample
 
