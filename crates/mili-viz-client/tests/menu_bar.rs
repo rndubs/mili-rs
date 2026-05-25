@@ -118,7 +118,10 @@ fn plot_menu_state_mutation_is_pure_and_observable() {
     // mutation through the same shape the menu uses so a regression in
     // the open-the-tab behavior surfaces here too.
     let mut s = ShellState::default();
-    assert!(s.bottom_tab.is_none(), "default is the 22 px collapsed strip");
+    assert!(
+        s.bottom_tab.is_none(),
+        "default is the 22 px collapsed strip"
+    );
     s.bottom_tab = Some(BottomTab::TimeHistory);
     let a = UiAction::SelectBottomTab(BottomTab::TimeHistory);
     assert_eq!(a, UiAction::SelectBottomTab(BottomTab::TimeHistory));

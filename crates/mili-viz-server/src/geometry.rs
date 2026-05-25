@@ -1252,7 +1252,11 @@ impl MeshTopology {
                 + tri_flags.len() * 4
                 + (edges.len() * 4)
                 + if with_scalar { verts.len() / 3 * 4 } else { 0 }
-                + if with_member { tri_member_id.len() * 4 } else { 0 },
+                + if with_member {
+                    tri_member_id.len() * 4
+                } else {
+                    0
+                },
         );
         buf.extend_from_slice(b"MVG3");
         buf.extend_from_slice(&3u32.to_le_bytes());
@@ -1478,7 +1482,10 @@ mod tests {
         let elem0_count = member.iter().filter(|m| **m == 0).count();
         let elem1_count = member.iter().filter(|m| **m == 1).count();
         assert_eq!(elem0_count, 12, "first hex: 6 faces × 2 tris");
-        assert_eq!(elem1_count, 10, "second hex: 5 unique faces × 2 tris (one dedup)");
+        assert_eq!(
+            elem1_count, 10,
+            "second hex: 5 unique faces × 2 tris (one dedup)"
+        );
     }
 
     #[test]

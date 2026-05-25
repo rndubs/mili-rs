@@ -24,7 +24,10 @@ fn uds_path(tag: &str) -> std::path::PathBuf {
     } else {
         std::env::temp_dir()
     };
-    dir.join(format!("mili-viz-uds-test-{}-{tag}.sock", std::process::id()))
+    dir.join(format!(
+        "mili-viz-uds-test-{}-{tag}.sock",
+        std::process::id()
+    ))
 }
 
 async fn dial(

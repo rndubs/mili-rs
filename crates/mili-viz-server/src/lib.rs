@@ -1249,9 +1249,7 @@ impl MiliViz for VizService {
         let mut states_0 = Vec::with_capacity(states_1.len());
         for st in &states_1 {
             if *st == 0 || (*st as usize) > n {
-                return err(format!(
-                    "query: state {st} out of range (1..={n})"
-                ));
+                return err(format!("query: state {st} out of range (1..={n})"));
             }
             states_0.push(*st as usize - 1);
         }
@@ -1266,9 +1264,7 @@ impl MiliViz for VizService {
             subrec: None,
         }) {
             Ok(qr) => qr,
-            Err(e) => {
-                return err(format!("query: `{svar}` on class `{}`: {e}", q.class_name))
-            }
+            Err(e) => return err(format!("query: `{svar}` on class `{}`: {e}", q.class_name)),
         };
         drop(s);
 

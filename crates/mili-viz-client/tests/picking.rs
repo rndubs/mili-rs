@@ -122,8 +122,10 @@ fn quad_with_members() -> Mesh {
     let mut m = quad();
     // Both tris belong to class_idx=0 (`brick`), but to different
     // element rows so the pick distinguishes them.
-    let id_tri0 = (0u32 << 24) | 0; // (brick, elem_row=0)
-    let id_tri1 = (0u32 << 24) | 1; // (brick, elem_row=1)
+    // member_id encoding: `class_idx << 24 | elem_row`. Both tris are
+    // class_idx=0 (`brick`); only elem_row differs.
+    let id_tri0: u32 = 0; // (brick, elem_row=0)
+    let id_tri1: u32 = 1; // (brick, elem_row=1)
     m.tri_member_id = Some(vec![id_tri0, id_tri1]);
     m
 }
@@ -195,7 +197,8 @@ fn catalog_resolve_member_unpacks_class_and_label() {
     // Out-of-range elem_row → None.
     assert!(cat.resolve_member(99).is_none());
     // Unknown class_idx → None.
-    assert!(cat.resolve_member((5u32 << 24) | 0).is_none());
+    // class_idx=5 (unknown), elem_row=0.
+    assert!(cat.resolve_member(5u32 << 24).is_none());
 }
 
 #[test]
@@ -321,7 +324,7 @@ fn mvg3_blob_round_trips_member_id_column() {
     for &f in &[0u32, 0] {
         blob.extend_from_slice(&f.to_le_bytes()); // tri_flags
     }
-    let id_tri0 = (3u32 << 24) | 11; // class_idx=3, elem_row=11
+    let id_tri0 = (3u32 << 24) | 0x0b; // class_idx=3, elem_row=11
     let id_tri1 = u32::MAX; // sentinel
     for &id in &[id_tri0, id_tri1] {
         blob.extend_from_slice(&id.to_le_bytes());

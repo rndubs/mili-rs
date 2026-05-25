@@ -294,7 +294,9 @@ fn submit_picked_uses_picked_element_and_current_svar() {
         ..ResultInfo::default()
     });
     s.picked_element = Some(("brick".to_string(), 42));
-    let a = s.submit_picked_element_query().expect("full contract lowers");
+    let a = s
+        .submit_picked_element_query()
+        .expect("full contract lowers");
     let UiAction::QueryElementSeries {
         label,
         class_name,

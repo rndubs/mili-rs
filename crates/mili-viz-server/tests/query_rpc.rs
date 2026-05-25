@@ -80,10 +80,7 @@ async fn query_returns_real_values_for_primal_svar() {
         t.components, 1,
         "`sand` is a scalar — one component per (state, label)"
     );
-    assert!(
-        !t.labels.is_empty(),
-        "brick has at least one element"
-    );
+    assert!(!t.labels.is_empty(), "brick has at least one element");
     assert_eq!(
         t.values.len() as i32,
         t.states.len() as i32 * t.labels.len() as i32 * t.components as i32,

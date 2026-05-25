@@ -731,7 +731,10 @@ impl App {
                     let Some(value) = table.values.get(i * comps) else {
                         break;
                     };
-                    let t = times.get(*st as usize - 1).copied().unwrap_or(f64::from(*st));
+                    let t = times
+                        .get(*st as usize - 1)
+                        .copied()
+                        .unwrap_or(f64::from(*st));
                     samples.push(ElementSeriesSample {
                         state: *st,
                         t,
@@ -1404,9 +1407,9 @@ pub fn run(
             #[cfg(unix)]
             match rt.block_on(crate::session::publish_in_process_session(svc.clone())) {
                 Ok(g) => session_guard = Some(g),
-                Err(e) => eprintln!(
-                    "mili-viz-client: could not publish in-process session file: {e}"
-                ),
+                Err(e) => {
+                    eprintln!("mili-viz-client: could not publish in-process session file: {e}")
+                }
             }
             rt.block_on(Session::connect_in_process_with(svc, root.as_deref()))?
         }

@@ -280,7 +280,10 @@ async fn cutplane_operator() {
                 "cap tri {i} must carry the no-member sentinel"
             );
         } else {
-            assert_ne!(mem, TRI_MEMBER_NONE, "kept tri {i} must carry a real member id");
+            assert_ne!(
+                mem, TRI_MEMBER_NONE,
+                "kept tri {i} must carry a real member id"
+            );
         }
     }
 

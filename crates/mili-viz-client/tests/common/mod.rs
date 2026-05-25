@@ -94,6 +94,10 @@ pub fn is_grey_chrome_pixel(c: &[u8]) -> bool {
 /// region most visibly relit by a Theme switch. Returns `0.0` if no
 /// chrome pixels are detected (e.g. degenerate width/height).
 #[must_use]
+#[allow(clippy::cast_precision_loss)]
+// `sum`/`n` are bounded by `band_h * w * 255` (a few million for any
+// realistic test image); well below f32's 24-bit mantissa, so the
+// precision warning is theoretical here.
 pub fn mean_chrome_luminance_top(px: &[u8], w: u32, band_h: u32) -> f32 {
     let w = w as usize;
     let band_h = band_h as usize;

@@ -386,11 +386,12 @@ impl Session {
     /// server-rejected query (unknown svar, no run loaded, etc.)
     /// surfaces as `Ok(reply)` with `reply.ok == false`; the caller
     /// inspects `reply.error`.
-    pub async fn query(
-        &mut self,
-        req: pb::QueryRequest,
-    ) -> Result<pb::QueryReply, BoxErr> {
-        let reply = self.client.query(tonic::Request::new(req)).await?.into_inner();
+    pub async fn query(&mut self, req: pb::QueryRequest) -> Result<pb::QueryReply, BoxErr> {
+        let reply = self
+            .client
+            .query(tonic::Request::new(req))
+            .await?
+            .into_inner();
         Ok(reply)
     }
 
@@ -559,6 +560,7 @@ impl Drop for InProcessSessionGuard {
 ///     never collide,
 ///   * tmpdir-resident so the OS reclaims it on reboot if a force-kill
 ///     skipped Drop.
+///
 /// `/tmp` is preferred over `$TMPDIR` (the macOS `/var/folders/...`
 /// path is often >80 bytes and crowds the sun_path budget).
 #[cfg(unix)]
@@ -994,6 +996,12 @@ mod tests {
     /// Drop cleanup. Combined because `cargo test` runs cases in
     /// parallel and they share the `GRIZ_SESSIONS_DIR` env var — a
     /// split case would race the env stomping of the other.
+    // ENV_LOCK is a plain std::sync::Mutex held across the test's
+    // awaits because it guards `GRIZ_SESSIONS_DIR` env-var mutation,
+    // not any async state — an async-aware mutex would not change the
+    // contract (the env var must stay stable across the publisher's
+    // awaits) and would only obscure the synchronous-data intent.
+    #[allow(clippy::await_holding_lock)]
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn publish_in_process_session_round_trip() {
@@ -1002,10 +1010,8 @@ mod tests {
         use tower::service_fn;
 
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "mili-viz-client-publish-{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("mili-viz-client-publish-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let prev = std::env::var_os("GRIZ_SESSIONS_DIR");

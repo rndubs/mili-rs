@@ -1601,10 +1601,7 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                 // L3-focus shortcut. Static text, no actions.
                 ui.menu_button("Help", |ui| {
                     ui.menu_button("About mili-viz", |ui| {
-                        ui.label(format!(
-                            "mili-viz-client v{}",
-                            env!("CARGO_PKG_VERSION")
-                        ));
+                        ui.label(format!("mili-viz-client v{}", env!("CARGO_PKG_VERSION")));
                         ui.label(format!(
                             "frozen proto: {}",
                             mili_viz_proto::v1::PROTOCOL_VERSION
@@ -2018,7 +2015,12 @@ fn bottom_tabs(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
 /// or down on switch.
 const INPUT_ROW_H: f32 = 22.0;
 
-fn tab_body(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>, tab: BottomTab) {
+fn tab_body(
+    ui: &mut egui::Ui,
+    state: &mut ShellState,
+    actions: &mut Vec<UiAction>,
+    tab: BottomTab,
+) {
     let avail = ui.available_size();
     // VB-007: the parent placer inserts `item_spacing.y` between the
     // body and the input-row chunks. If we don't subtract it from
@@ -2035,19 +2037,15 @@ fn tab_body(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActio
     let body_size = egui::vec2(avail.x, body_h);
     let row_size = egui::vec2(avail.x, row_h);
 
-    ui.allocate_ui_with_layout(
-        body_size,
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.set_min_size(body_size);
-            ui.set_max_size(body_size);
-            match tab {
-                BottomTab::CommandLine => cmdline_body(ui, state),
-                BottomTab::Scripting => scripting_body(ui, state),
-                BottomTab::TimeHistory => time_history_body(ui, state),
-            }
-        },
-    );
+    ui.allocate_ui_with_layout(body_size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_min_size(body_size);
+        ui.set_max_size(body_size);
+        match tab {
+            BottomTab::CommandLine => cmdline_body(ui, state),
+            BottomTab::Scripting => scripting_body(ui, state),
+            BottomTab::TimeHistory => time_history_body(ui, state),
+        }
+    });
     ui.allocate_ui_with_layout(
         row_size,
         egui::Layout::left_to_right(egui::Align::Center),
@@ -2168,12 +2166,9 @@ fn scripting_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<
     if state.script_running {
         ui.spinner();
     }
-    ui.with_layout(
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            ui.weak(&state.script_status);
-        },
-    );
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.weak(&state.script_status);
+    });
 }
 
 /// Time-history plot (`phase-5-m3.5.md` Decision 50): an `egui_plot`
@@ -2203,10 +2198,8 @@ fn time_history_body(ui: &mut egui::Ui, state: &ShellState) {
         .legend(egui_plot::Legend::default())
         .show(ui, |p| {
             if !state.time_history.is_empty() {
-                let mins: Vec<[f64; 2]> =
-                    state.time_history.iter().map(|s| [s.t, s.min]).collect();
-                let maxs: Vec<[f64; 2]> =
-                    state.time_history.iter().map(|s| [s.t, s.max]).collect();
+                let mins: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.min]).collect();
+                let maxs: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.max]).collect();
                 p.line(
                     egui_plot::Line::new(format!("{envelope_label} max"), maxs)
                         .color(egui::Color32::from_rgb(220, 110, 100)),
@@ -2220,8 +2213,7 @@ fn time_history_body(ui: &mut egui::Ui, state: &ShellState) {
                 if series.samples.is_empty() {
                     continue;
                 }
-                let pts: Vec<[f64; 2]> =
-                    series.samples.iter().map(|s| [s.t, s.value]).collect();
+                let pts: Vec<[f64; 2]> = series.samples.iter().map(|s| [s.t, s.value]).collect();
                 p.line(
                     egui_plot::Line::new(series.label.clone(), pts)
                         .color(ELEMENT_SERIES_PALETTE[idx % ELEMENT_SERIES_PALETTE.len()]),
