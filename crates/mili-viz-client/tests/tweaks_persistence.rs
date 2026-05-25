@@ -96,6 +96,7 @@ fn json_round_trip_is_loss_free() {
         overlay_bbox: false,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        show_bottom_tabs: false,
         interactive_clip: false,
     };
     let back = PersistedTweaks::from_json(&t.to_json()).expect("valid JSON round-trips");
@@ -128,6 +129,7 @@ fn apply_to_is_pure_and_touches_only_persisted_fields() {
         overlay_bbox: false,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        show_bottom_tabs: false,
         interactive_clip: false,
     };
     t.apply_to(&mut s);
@@ -135,6 +137,7 @@ fn apply_to_is_pure_and_touches_only_persisted_fields() {
     // Persisted fields took the tweak values.
     assert_eq!(s.theme, Theme::Light);
     assert!(s.dock_collapsed);
+    assert!(!s.show_bottom_tabs);
     assert!(!s.overlays.title && !s.overlays.bbox);
     // Round-trips back out exactly.
     assert_eq!(PersistedTweaks::from_state(&s), t);
@@ -152,6 +155,7 @@ fn is_persisted_action_classifies_exactly_the_tweak_actions() {
         UiAction::ToggleOverlay(Overlay::Bbox),
         UiAction::SetTheme(Theme::Light),
         UiAction::SetDockCollapsed(true),
+        UiAction::SetShowBottomTabs(false),
     ] {
         assert!(is_persisted_action(&a), "{a:?} is a persisted tweak");
     }
@@ -182,6 +186,7 @@ fn save_to_then_load_from_round_trips_on_disk() {
         overlay_bbox: true,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        show_bottom_tabs: false,
         interactive_clip: false,
     };
     t.save_to(&path)

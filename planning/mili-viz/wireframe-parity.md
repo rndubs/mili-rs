@@ -95,7 +95,7 @@ indicators, File→Open, picking class-N label) are unchanged.
 | Command line (Layer-0 verbatim, transcript) | ✅ done | — | status 17 |
 | Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). Forward path: a `pip install`ed managed venv + `attach()`-into-*this*-GUI (the latter gated on Phase 5 M5 remote mode — the in-process client writes no session file) | client.md dec 3 / phase-6-m2 / status 18–20, 23 |
 | Time-history plot | 🟡 partial | fed by `ResultState` min/max envelope, not the `Query` per-element series; server `Query` is a stub | phase-5-m3.5 Dec 50 |
-| Whole-region hide (tweak) | 🟡 partial | collapses body only; 22 px strip always present | — |
+| Whole-region hide (tweak) | ✅ done | `Preferences → Show bottom tabs` checkbox suppresses the whole `tabs` panel (strip + body) via `ShellState::show_bottom_tabs` (default `true` → L1 byte-stable) → `UiAction::SetShowBottomTabs` → persisted in `tweaks.json`. The per-tab `▾ hide` still collapses the body only (its own runtime mode). Regression-tested by `m3_5_bottom_tabs::show_bottom_tabs_false_suppresses_the_panel` | — |
 
 ## Status bar
 
@@ -107,7 +107,7 @@ indicators, File→Open, picking class-N label) are unchanged.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | ✅ done | `Preferences` menu surfaces **Theme** + **Left dock collapsed** (pure-client, `SetTheme`/`SetDockCollapsed`). Bottom-tab hide is already reachable via the tab strip's `▾ hide`; **AI-panel position** is M6 (panel is a placeholder). Cross-session persistence built: a `serde` `PersistedTweaks` (the 5 overlay chips + theme + dock-collapse — the wireframe-justified set) is loaded into `ShellState` at windowed startup from `$XDG_CONFIG_HOME`/`$HOME/.config/mili-viz/tweaks.json` and re-written when a persisted `UiAction` fires (`is_persisted_action`). No config ⇒ `PersistedTweaks::default` == default-shell snapshot, so the headless composite gate is disk-free + byte-stable (VB-001) | status 23 |
+| Theme (dark/light), left-dock collapse, full bottom-tab hide, AI-panel position | ✅ done | `Preferences` menu surfaces **Theme** + **Left dock collapsed** + **Show bottom tabs** (pure-client, `SetTheme`/`SetDockCollapsed`/`SetShowBottomTabs`). The wireframe-named whole-region bottom-tabs hide now exists alongside the runtime `▾ hide` body collapse; **AI-panel position** is M6 (panel is a placeholder). Cross-session persistence built: a `serde` `PersistedTweaks` (the 5 overlay chips + theme + dock-collapse + show-bottom-tabs + interactive-clip — the wireframe-justified set) is loaded into `ShellState` at windowed startup from `$XDG_CONFIG_HOME`/`$HOME/.config/mili-viz/tweaks.json` and re-written when a persisted `UiAction` fires (`is_persisted_action`). No config ⇒ `PersistedTweaks::default` == default-shell snapshot, so the headless composite gate is disk-free + byte-stable (VB-001) | status 23 |
 
 ## Renderer / rendering modes
 
@@ -170,9 +170,10 @@ leverage, ordered "ship-blocking first":
    mapping is missing (frozen proto has no label catalog, so this
    needs a new catalog side-channel tag or a `Query` round-trip).
    Small UX gain; design-first.
-7. **Bottom-tabs whole-region hide** — `▾ hide` collapses the body
-   but the 22 px strip persists. Adding a `Preferences → Show
-   bottom tabs` toggle is a one-line client change. Trivial.
+7. **Bottom-tabs whole-region hide** — ✅ done. `Preferences → Show
+   bottom tabs` checkbox suppresses the whole `tabs` panel (strip +
+   body); persisted via `tweaks.json`. The per-tab `▾ hide` retains
+   its runtime body-only collapse.
 8. **File → Open / `rfd` picker** — intentionally deferred
    (maintainer decision, own milestone). Lift if needed.
 9. **VB-006 (open bug)** — `Theme` switch is invisible in

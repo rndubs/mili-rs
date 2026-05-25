@@ -430,6 +430,11 @@ pub enum UiAction {
     /// full dock. Returned for observability/persistence. No proto
     /// command.
     SetDockCollapsed(bool),
+    /// Pure-client bottom-tabs visibility (wireframes §"Tweaks": *Show
+    /// bottom tabs*). Already applied to [`ShellState`]; when `false`
+    /// the whole `tabs` panel is suppressed (strip + body). Cross-
+    /// session-persisted via `tweaks.json`. No proto command.
+    SetShowBottomTabs(bool),
     /// Pure-client L3 focus-mode toggle (wireframes §"L3 — Focus
     /// mode"; `Ctrl+\`). Already applied to [`ShellState`]
     /// (`set_focus_mode` also collapses the dock); the shell hides the
@@ -670,6 +675,16 @@ pub struct ShellState {
     /// §"Tweaks": *Left dock collapsed*). Default `false` keeps the L1
     /// full dock, so `scene_frac` / the composite gate are unchanged.
     pub dock_collapsed: bool,
+    /// Whether the bottom-tabs region is visible at all (wireframes
+    /// §"Tweaks": *Show bottom tabs* — "the whole bottom-tabs region is
+    /// hideable via tweak"). Default `true` keeps the 22 px tab strip
+    /// visible (the L1 chrome), so the headless composite gate stays
+    /// byte-stable (`bug-tracker.md` VB-001). Distinct from the per-tab
+    /// `▾ hide` (which sets `bottom_tab = None` but leaves the strip):
+    /// flipping this off removes the strip *and* the body, freeing the
+    /// pixels for clean screenshots. Cross-session-persisted via
+    /// `tweaks.json` (Preferences → Show bottom tabs).
+    pub show_bottom_tabs: bool,
     /// L3 focus mode (wireframes §"L3 — Focus mode"): stripped to the
     /// viewport — the AI rail + bottom tabs are hidden and the dock is
     /// the icon rail. Toggled with `Ctrl+\`. Default `false` keeps the
@@ -762,6 +777,7 @@ impl Default for ShellState {
             interior_on: false,
             theme: Theme::default(),
             dock_collapsed: false,
+            show_bottom_tabs: true,
             focus_mode: false,
             scene_frac: None,
             camera: None,
@@ -824,6 +840,14 @@ impl ShellState {
     pub fn set_dock_collapsed(&mut self, collapsed: bool) -> UiAction {
         self.dock_collapsed = collapsed;
         UiAction::SetDockCollapsed(collapsed)
+    }
+
+    /// Show/hide the entire bottom-tabs region (wireframes §"Tweaks":
+    /// *Show bottom tabs*). Pure client state; observability/persistence-
+    /// only (no proto command).
+    pub fn set_show_bottom_tabs(&mut self, show: bool) -> UiAction {
+        self.show_bottom_tabs = show;
+        UiAction::SetShowBottomTabs(show)
     }
 
     /// Toggle L3 focus mode (wireframes §"L3 — Focus mode"; `Ctrl+\`).
@@ -1221,6 +1245,15 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     if ui.checkbox(&mut collapsed, "Left dock collapsed").clicked() {
                         actions.push(state.set_dock_collapsed(collapsed));
                     }
+                    // Preferences → Show bottom tabs (wireframes
+                    // §"Tweaks"): persisted region-level hide so the
+                    // 22 px strip and body both disappear for clean
+                    // screenshots. Per-tab `▾ hide` remains the runtime
+                    // body-only collapse.
+                    let mut show_tabs = state.show_bottom_tabs;
+                    if ui.checkbox(&mut show_tabs, "Show bottom tabs").clicked() {
+                        actions.push(state.set_show_bottom_tabs(show_tabs));
+                    }
                     ui.separator();
                     // Preferences → Interactive clip (Phase 5 M8
                     // Decision 86; persisted via tweaks.json). When off,
@@ -1249,8 +1282,10 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
             status_bar(ui, state);
         });
 
-    // Bottom tabs are hidden in L3 focus mode (wireframes §"L3").
-    if !state.focus_mode {
+    // Bottom tabs are hidden in L3 focus mode (wireframes §"L3") and
+    // when the Preferences → Show bottom tabs tweak is off (wireframes
+    // §"Tweaks" — region-level hide).
+    if !state.focus_mode && state.show_bottom_tabs {
         bottom_tabs(ui, state, &mut actions);
     }
 

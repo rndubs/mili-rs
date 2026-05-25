@@ -277,6 +277,77 @@ fn tab_switch_does_not_drift_panel_height() {
     );
 }
 
+/// Wireframe §"Tweaks" *Show bottom tabs* regression: flipping
+/// `ShellState::show_bottom_tabs = false` removes the whole tabs panel
+/// — both the 22 px tab strip and the body — so no `PanelState` is
+/// stored under the `tabs` id. The default-`ShellState` path keeps the
+/// tweak on, so the composite gate (`bug-tracker.md` VB-001) is
+/// byte-stable.
+#[test]
+fn show_bottom_tabs_false_suppresses_the_panel() {
+    let ctx = egui::Context::default();
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 700.0),
+        )),
+        ..Default::default()
+    };
+    let paint = |ctx: &egui::Context, s: &mut ShellState| {
+        let _ = ctx.run_ui(raw(), |ui| {
+            let _ = build_shell_ui(ui, s);
+        });
+    };
+
+    // Default is L1 with the tabs panel — its PanelState is stored
+    // (the 22 px strip occupies space even with `bottom_tab = None`).
+    assert!(
+        ShellState::default().show_bottom_tabs,
+        "default must keep the tab strip — VB-001 byte-stable composite gate"
+    );
+    let mut on = ShellState::default();
+    paint(&ctx, &mut on);
+    paint(&ctx, &mut on);
+    assert!(
+        egui::PanelState::load(&ctx, egui::Id::new("tabs")).is_some(),
+        "tabs panel must be present when show_bottom_tabs == true"
+    );
+
+    // Flip the tweak off on a fresh context — the panel is gone (no
+    // PanelState written), so dock + AI rail + viewport are the only
+    // chrome left.
+    let ctx_off = egui::Context::default();
+    let mut off = ShellState {
+        show_bottom_tabs: false,
+        ..ShellState::default()
+    };
+    let paint_off = |ctx: &egui::Context, s: &mut ShellState| {
+        let _ = ctx.run_ui(raw(), |ui| {
+            let _ = build_shell_ui(ui, s);
+        });
+    };
+    paint_off(&ctx_off, &mut off);
+    paint_off(&ctx_off, &mut off);
+    assert!(
+        egui::PanelState::load(&ctx_off, egui::Id::new("tabs")).is_none(),
+        "tabs panel must be absent when show_bottom_tabs == false"
+    );
+}
+
+/// `ShellState::set_show_bottom_tabs` mutates the field and emits the
+/// `SetShowBottomTabs` `UiAction` so the windowed app can persist it
+/// (via `is_persisted_action`).
+#[test]
+fn set_show_bottom_tabs_returns_persisted_action() {
+    let mut s = ShellState::default();
+    let a = s.set_show_bottom_tabs(false);
+    assert_eq!(a, UiAction::SetShowBottomTabs(false));
+    assert!(!s.show_bottom_tabs);
+    let a = s.set_show_bottom_tabs(true);
+    assert_eq!(a, UiAction::SetShowBottomTabs(true));
+    assert!(s.show_bottom_tabs);
+}
+
 #[tokio::test]
 async fn composite_render() {
     let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);

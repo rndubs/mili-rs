@@ -681,6 +681,7 @@ impl App {
             | UiAction::TogglePicking
             | UiAction::SetTheme(_)
             | UiAction::SetDockCollapsed(_)
+            | UiAction::SetShowBottomTabs(_)
             | UiAction::SetFocusMode(_)
             | UiAction::SetCutGizmoVisible(_)
             | UiAction::SetInteractiveClip(_)
