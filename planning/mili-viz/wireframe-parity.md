@@ -46,7 +46,7 @@ indicators, File→Open, picking class-N label) are unchanged.
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Results · Time · Plot · Help` items | 🔴 placeholder | still `ui.menu_button(m, \|_\| {})` empty bodies (`shell.rs:1234-1236`) — open but empty. No spec yet for what verbs these surface beyond the toolbar/left-dock duplicates the `Control` menu already covers | — |
+| `Results · Time · Plot · Help` items | ✅ done | populated from `reference/griz/Src/gui.c::create_menu_bar` (the wireframe README defers menu contents to "the legacy griz Motif menus"). **Results** mirrors the left-dock catalog (`derived`/`primal`/`time-indep` submenus → same `Show` action the dock click does). **Time** runs `time_menu_items()` — Next/Prev/First/Last + Animate/Stop Animate, the legacy `Time` transport verbs (reuses `UiAction`s the toolbar / `Control` menu already lower; griz idiom of menus duplicating the toolbar). **Plot** is the legacy `Time Hist Plot` (opens the `TimeHistory` bottom tab via `SelectBottomTab`). **Help** is the honest port of `Display Griz Manual` — an `About mili-viz` submenu listing the crate version, the frozen-proto major (`mili_viz_proto::v1::PROTOCOL_VERSION`), and the `Ctrl+\` shortcut; no Rust-port manual yet | — |
 | `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
 | `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode`. The `LineList` edge pipeline carried an illegal non-zero depth bias that aborted startup on a real device — fixed (zero bias + `LessEqual`), now device-verified by `tests/vb004_edge_pipeline_validation.rs` | VB-003 / VB-004 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
@@ -136,12 +136,15 @@ With every Phase 5 milestone landed, the remaining stub/placeholder
 inventory is **substantially smaller** than the May-18 MVP cut. By
 leverage, ordered "ship-blocking first":
 
-1. **`Results` / `Time` / `Plot` / `Help` empty menus**
-   (`shell.rs:1234-1236`) — four `|_| {}` bodies. Cheapest win is
-   either (a) populate them with verbs the wireframe spec already
-   names, or (b) drop them entirely and let `Control` /
-   `Rendering` / `Picking` / `Preferences` carry the menu bar. No
-   spec exists for (a) — needs design first.
+1. **`Results` / `Time` / `Plot` / `Help` empty menus** — ✅ done.
+   Populated from the legacy griz Motif menus
+   (`reference/griz/Src/gui.c::create_menu_bar` — what the wireframe
+   README defers to): Results mirrors the left-dock catalog, Time is
+   the transport-verb pulldown that re-uses already-lowered
+   `UiAction`s (`time_menu_items()`), Plot opens the `TimeHistory`
+   bottom tab, Help carries an `About mili-viz` submenu with the
+   crate version + frozen-proto major. Regression-covered by
+   `tests/menu_bar.rs`.
 2. **Surfaces section** (`shell.rs:1588-1592`) — literal
    `(surfaces: M4+)` string. No surfaces data model yet; needs a
    server-side surface catalog (sibling to the M4 primal/derived

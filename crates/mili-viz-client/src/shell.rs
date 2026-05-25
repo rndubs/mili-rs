@@ -575,6 +575,26 @@ pub fn control_menu_items() -> Vec<(&'static str, UiAction)> {
     ]
 }
 
+/// The `Time` menu rows: transport + animate verbs that match the
+/// legacy griz `Time` pulldown (`reference/griz/Src/gui.c::create_menu_bar`
+/// — Next/Prev/First/Last State + Animate/Stop Animate; the legacy
+/// "Continue Animate" is the same verb as our toggle re-entry, so it
+/// is not a separate row). Sub-set of [`control_menu_items`] — the
+/// griz idiom is that menus duplicate the toolbar / sibling menus, so
+/// the same `UiAction`s the toolbar already lowers fire here. No
+/// proto change, no new `UiAction`.
+#[must_use]
+pub fn time_menu_items() -> Vec<(&'static str, UiAction)> {
+    vec![
+        ("⏮ first state", UiAction::First),
+        ("◀ prev state", UiAction::Prev),
+        ("▶ next state", UiAction::Next),
+        ("⏭ last state", UiAction::Last),
+        ("▶/⏸ animate", UiAction::ToggleAnimate),
+        ("⏹ stop animate", UiAction::StopAnimate),
+    ]
+}
+
 /// The L3 focus-mode icon-rail entries (wireframes §"L3 — Focus mode":
 /// *R/M/S/P glyphs for Results / Materials / Surfaces / Picking*). Pure
 /// data: a single-char glyph + its hover text. The `Picking` entry's
@@ -1270,9 +1290,98 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                         actions.push(state.set_interactive_clip(live));
                     }
                 });
-                for m in ["Results", "Time", "Plot", "Help"] {
-                    let _ = ui.menu_button(m, |_| {});
-                }
+                // Results menu: mirrors the left-dock Results section —
+                // wireframes §"Menu bar" defers menu contents to "the
+                // legacy griz Motif menus", and the griz Results menu
+                // (`reference/griz/Src/gui.c::create_derived_res_menu`,
+                // `create_primal_res_menu`) is the same DB-filtered
+                // derived + primal catalog rendered as menu rows. Each
+                // row emits the same `Show` action the dock click does.
+                ui.menu_button("Results", |ui| {
+                    let primal: Vec<String> = state
+                        .catalog
+                        .as_ref()
+                        .map(|c| c.primal.clone())
+                        .unwrap_or_default();
+                    let derived: Vec<String> = state
+                        .catalog
+                        .as_ref()
+                        .map(|c| c.derived.clone())
+                        .unwrap_or_else(|| {
+                            DERIVED_RESULTS.iter().map(|s| (*s).to_string()).collect()
+                        });
+                    ui.menu_button("derived", |ui| {
+                        for r in &derived {
+                            if ui.button(r).clicked() {
+                                actions.push(state.select_result(r));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("primal", |ui| {
+                        if primal.is_empty() {
+                            ui.weak("(catalog: M4+)");
+                        } else {
+                            for r in &primal {
+                                if ui.button(r).clicked() {
+                                    actions.push(state.select_result(r));
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
+                    ui.menu_button("time-indep", |ui| {
+                        // Same blocker as the left dock: no mili-rs TI
+                        // accessor yet (`phase-5-m4.md` Decision 69).
+                        ui.weak("(time-indep: no catalog path yet)");
+                    });
+                });
+                // Time menu: legacy griz transport pulldown
+                // (`reference/griz/Src/gui.c` — Next/Prev/First/Last
+                // State + Animate/Stop Animate). Duplicates the
+                // toolbar / Control menu by design — the griz idiom is
+                // "the menu bar names the same verbs the toolbar
+                // surfaces", so a user looking for `next state` finds
+                // it under both Time and Control.
+                ui.menu_button("Time", |ui| {
+                    for (label, action) in time_menu_items() {
+                        if ui.button(label).clicked() {
+                            actions.push(action);
+                            ui.close();
+                        }
+                    }
+                });
+                // Plot menu: legacy griz `Time Hist Plot` (one verb —
+                // opens the time-history plot). Lowers to selecting the
+                // `TimeHistory` bottom tab so the egui_plot host is
+                // visible (and the panel un-collapsed if it was).
+                ui.menu_button("Plot", |ui| {
+                    if ui.button("Time Hist Plot").clicked() {
+                        state.bottom_tab = Some(BottomTab::TimeHistory);
+                        actions.push(UiAction::SelectBottomTab(BottomTab::TimeHistory));
+                        ui.close();
+                    }
+                });
+                // Help menu: legacy griz `Display Griz Manual` — there
+                // is no Rust-port manual yet, so this is the honest
+                // substitute: an `About mili-viz` submenu listing the
+                // crate version, the frozen-proto major (the same
+                // source-of-truth the status bar uses), and the
+                // L3-focus shortcut. Static text, no actions.
+                ui.menu_button("Help", |ui| {
+                    ui.menu_button("About mili-viz", |ui| {
+                        ui.label(format!(
+                            "mili-viz-client v{}",
+                            env!("CARGO_PKG_VERSION")
+                        ));
+                        ui.label(format!(
+                            "frozen proto: {}",
+                            mili_viz_proto::v1::PROTOCOL_VERSION
+                        ));
+                        ui.separator();
+                        ui.weak("Ctrl+\\ — toggle L3 focus mode");
+                    });
+                });
             });
         });
 

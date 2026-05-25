@@ -53,10 +53,11 @@ pub use renderer::{
 };
 pub use session::{fetch_server_mesh, Session};
 pub use shell::{
-    build_shell_ui, control_menu_items, cutplane_cmd, dock_rail_glyphs, slice_cmd, BottomTab,
-    CutPlaneState, CutThrottle, LoadedInfo, Overlay, Overlays, RenderMode, ResultInfo,
-    SessionPhase, ShellState, Theme, TimeSample, TranscriptKind, TranscriptLine, UiAction,
-    CUT_GIZMO_COLOR, CUT_PREVIEW_INTERVAL, DERIVED_RESULTS, SLICE_GIZMO_COLOR,
+    build_shell_ui, control_menu_items, cutplane_cmd, dock_rail_glyphs, slice_cmd,
+    time_menu_items, BottomTab, CutPlaneState, CutThrottle, LoadedInfo, Overlay, Overlays,
+    RenderMode, ResultInfo, SessionPhase, ShellState, Theme, TimeSample, TranscriptKind,
+    TranscriptLine, UiAction, CUT_GIZMO_COLOR, CUT_PREVIEW_INTERVAL, DERIVED_RESULTS,
+    SLICE_GIZMO_COLOR,
 };
 pub use snapshot::{
     latest_path as snapshot_latest_path, request_file as snapshot_request_file, run_snapshot_cli,
