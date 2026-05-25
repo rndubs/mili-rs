@@ -26,9 +26,12 @@ this provider runs a client-side fallback after each chat-completions
 response: probe `/props` once, cache
 `chat_template_caps.supports_tool_calls`, and when that's false (or
 unknown) AND `tool_calls` is empty AND content contains the FG
-envelope, extract `(name, args_dict)` pairs via the vLLM reference
-regexes and synthesize the canonical normalized tool_calls. Caller
-behavior is identical to a server that does parse FG natively.
+envelope, extract `(name, args_dict)` pairs via the shared
+``parse_fg_envelopes`` helper (``providers._fg_envelope``) and
+synthesize the canonical normalized tool_calls. The same helper is
+the response parser inside ``TransformersProvider`` for SFT
+checkpoint eval — single regex set, no drift. Caller behavior is
+identical to a server that does parse FG natively.
 
 Earlier versions of this provider hand-rolled the prompt via a bespoke
 ``_build_functiongemma_prompt`` and hit ``/completion``. That path
@@ -54,26 +57,14 @@ on ``$PATH``.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .base import ProviderOutput
+from ._fg_envelope import parse_fg_envelopes
 from ..tool_format import w1_to_openai_tool
-
-# FunctionGemma response-envelope regexes. The vLLM reference parser
-# (`vllm/tool_parsers/functiongemma_tool_parser.py`) uses the same shape.
-# Envelope is permissive on inner whitespace so paths like
-# `<start_function_call>call:NAME{a:<escape>v<escape>}<end_function_call>`
-# parse the same as the rare `call:NAME {…}` whitespace variant.
-_FG_ENVELOPE_RE = re.compile(
-    r"<start_function_call>\s*call:(\w+)\s*\{(.*?)\}\s*<end_function_call>",
-    re.DOTALL,
-)
-_FG_STRING_ARG_RE = re.compile(r"(\w+):<escape>(.*?)<escape>", re.DOTALL)
-_FG_BARE_ARG_RE = re.compile(r"(\w+):([^,}]+)")
 
 DEFAULT_MODEL_ID = "ggml-org/functiongemma-270m-it-GGUF:BF16"
 DEFAULT_GGUF_REPO = "ggml-org/functiongemma-270m-it-GGUF"
@@ -242,7 +233,7 @@ class LlamaCppProvider:
         # emitted an FG envelope in content, parse it client-side here
         # so the rest of the bench harness sees structured tool_calls.
         if self._should_run_fg_fallback(content):
-            parsed = _parse_fg_envelopes(content)
+            parsed = parse_fg_envelopes(content)
             if parsed:
                 self._last_tool_call_parsing_approach = "b-fg-content-fallback"
                 return ProviderOutput(
@@ -344,59 +335,6 @@ class LlamaCppProvider:
             out.append({"name": str(name), "arguments": arguments})
 
         return out if out else []
-
-
-def _coerce_fg_scalar(raw: str) -> Any:
-    """Coerce a bare (unquoted) FunctionGemma arg value to bool/int/float
-    or leave as string. ``true``/``false`` → bool; otherwise try int,
-    then float, else strip and return the original string.
-    """
-    s = raw.strip()
-    if s == "true":
-        return True
-    if s == "false":
-        return False
-    try:
-        return int(s)
-    except ValueError:
-        pass
-    try:
-        return float(s)
-    except ValueError:
-        pass
-    return s
-
-
-def _parse_fg_envelopes(content: str) -> list[dict[str, Any]]:
-    """Parse FunctionGemma ``<start_function_call>...<end_function_call>``
-    envelopes out of llama-server ``message.content`` and return one
-    canonical ``{"name", "arguments": dict}`` per envelope, in source
-    order.
-
-    Mirrors vLLM's ``FunctionGemmaToolParser``. String args are
-    delimited by ``<escape>`` markers; remaining ``key:value`` pairs
-    are bare scalars (bool / int / float / unquoted string).
-    """
-    out: list[dict[str, Any]] = []
-    for env in _FG_ENVELOPE_RE.finditer(content):
-        name = env.group(1)
-        body = env.group(2)
-        args: dict[str, Any] = {}
-        # Pull string args first; record names so the bare-scalar pass
-        # doesn't double-count them.
-        for sm in _FG_STRING_ARG_RE.finditer(body):
-            args[sm.group(1)] = sm.group(2)
-        # Mask out the string-arg spans (including their <escape>...<escape>
-        # values) so the bare-scalar regex doesn't capture <escape> as a
-        # bogus value.
-        masked = _FG_STRING_ARG_RE.sub("", body)
-        for bm in _FG_BARE_ARG_RE.finditer(masked):
-            key = bm.group(1)
-            if key in args:
-                continue
-            args[key] = _coerce_fg_scalar(bm.group(2))
-        out.append({"name": name, "arguments": args})
-    return out
 
 
 __all__ = [

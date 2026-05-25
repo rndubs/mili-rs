@@ -90,7 +90,7 @@ def _resolve_path(path_str: str) -> Path:
     return path.resolve()
 
 # The five-element closed set the operator sees.
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "functiongemma", "anthropic", "llamacpp")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "transformers", "anthropic", "llamacpp")
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +104,11 @@ class FactoryBundle:
     """The provider + dispatcher factories ``run_eval`` consumes.
 
     ``provider_name`` is the human-readable label that lands in the
-    rollout record + report headline (e.g. ``"functiongemma"``).
-    ``model_id`` is the *pinned* model identifier — for the local
-    runtimes this is the HF repo id; for ``mock`` / ``replay`` it's
-    the literal provider name. Recorded verbatim in ``config.yaml``.
+    rollout record + report headline (e.g. ``"transformers"``).
+    ``model_id`` is the *pinned* model identifier — for ``llamacpp``
+    this is the GGUF repo id; for ``transformers`` this is the local
+    checkpoint path; for ``mock`` / ``replay`` it's the literal
+    provider name. Recorded verbatim in ``config.yaml``.
     """
 
     provider_factory: Callable[[Scenario], LlmProvider]
@@ -146,8 +147,7 @@ def build_factories(
     *,
     config: EvalConfig,
     anthropic_model: str | None = None,
-    functiongemma_model: str | None = None,
-    functiongemma_revision: str | None = None,
+    transformers_model_path: str | None = None,
     # Test seams — production callers leave both None.
     provider_factory_override: Callable[[Scenario], LlmProvider] | None = None,
     dispatcher_factory_override: Callable[[Scenario], Dispatcher] | None = None,
@@ -162,12 +162,14 @@ def build_factories(
     ``MockLlmProvider`` per scenario without the live pygriz / LLM
     deps.
 
-    The four supported provider names are
-    ``{mock, replay, functiongemma, anthropic}`` — anything else
-    raises ``ValueError`` so the operator sees the closed-set message
-    instead of a downstream traceback. The default dispatcher is the
-    pygriz one (the production lowering); when pygriz is unavailable
-    or the test seam fires we fall back to the ``FakeDispatcher``.
+    The supported provider names are
+    ``{mock, replay, transformers, anthropic, llamacpp}`` — anything
+    else raises ``ValueError`` so the operator sees the closed-set
+    message instead of a downstream traceback. ``transformers``
+    requires ``transformers_model_path`` (the local SFT checkpoint
+    directory). The default dispatcher is the pygriz one (the
+    production lowering); when pygriz is unavailable or the test seam
+    fires we fall back to the ``FakeDispatcher``.
     """
     if provider_name not in SUPPORTED_PROVIDERS:
         raise ValueError(
@@ -190,21 +192,19 @@ def build_factories(
     elif provider_name == "mock":
         provider_factory = _mock_provider_factory
         model_id = "mock"
-    elif provider_name == "functiongemma":
-        from .providers.functiongemma import (  # lazy
-            DEFAULT_MODEL_ID as FG_DEFAULT_ID,
-            FunctionGemmaProvider,
-        )
-        chosen_model = functiongemma_model or FG_DEFAULT_ID
-        chosen_revision = functiongemma_revision
+    elif provider_name == "transformers":
+        if not transformers_model_path:
+            raise ValueError(
+                "--provider transformers requires --model-path "
+                "(the local SFT checkpoint directory)."
+            )
+        from .providers.transformers import TransformersProvider  # lazy
+
         # One provider per run — the model weights are loaded once and
         # reused across scenarios.
-        provider = FunctionGemmaProvider(
-            model_id=chosen_model,
-            revision=chosen_revision,
-        )
+        provider = TransformersProvider(model_path=transformers_model_path)
         provider_factory = lambda _s: provider  # noqa: E731
-        model_id = chosen_model
+        model_id = transformers_model_path
     elif provider_name == "anthropic":
         from .providers.anthropic import (  # lazy
             DEFAULT_MODEL_ID as ANT_DEFAULT_ID,
@@ -430,8 +430,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args.provider,
         config=config,
         anthropic_model=args.anthropic_model,
-        functiongemma_model=args.functiongemma_model,
-        functiongemma_revision=args.functiongemma_revision,
+        transformers_model_path=args.model_path,
     )
 
     k = int(getattr(args, "k", 1) or 1)
@@ -805,14 +804,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pin a specific Claude model id (defaults to the baseline pin).",
     )
     run.add_argument(
-        "--functiongemma-model",
+        "--model-path",
         default=None,
-        help="Pin a specific FunctionGemma HF repo id (defaults to the baseline pin).",
-    )
-    run.add_argument(
-        "--functiongemma-revision",
-        default=None,
-        help="Pin a specific HF revision/commit for the FunctionGemma model.",
+        help=(
+            "Local checkpoint directory for --provider transformers "
+            "(e.g. data/posttraining/checkpoints/v1/checkpoint-21). "
+            "Required when --provider transformers is selected."
+        ),
     )
     run.add_argument(
         "--limit",
@@ -1087,7 +1085,7 @@ def build_parser() -> argparse.ArgumentParser:
             "apply_chat_template(messages, tools=tools, ...) call and "
             "writes a pass/fail report; default gate is max_length=512 "
             "(Google's FG fine-tuning recipe). Login-node safe but "
-            "requires the [train] (or [functiongemma]) extra."
+            "requires the [train] extra."
         ),
     )
     audit.add_argument(

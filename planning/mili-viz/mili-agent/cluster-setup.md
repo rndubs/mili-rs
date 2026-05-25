@@ -523,26 +523,73 @@ llama-quantize \
 
 ## 8. Eval the new checkpoint
 
-Same harness as the v5 baseline, just pointed at the new GGUF:
+Two paths, gated on whether GGUF conversion has happened yet:
+
+### 8a. HF checkpoint — `--provider transformers` (canonical for v1 sweep)
+
+Grade an HF checkpoint directly. The provider re-uses
+`tokenizer.apply_chat_template(messages, tools=tools, …)` — the same
+call SFTTrainer rendered against — so the prompt distribution at eval
+matches training byte-for-byte; no chat-template mutation risk to debug.
+
+```bash
+uv run --directory python mili-llm-bench run \
+  --provider transformers \
+  --model-path /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/checkpoints/v1/checkpoint-21 \
+  --scenarios /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/sft/eval/heldout.jsonl \
+  --out /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/runs/v1-sft-checkpoint-21-$(date +%Y%m%d-%H%M%S) \
+  --step-cap 8 --per-turn-timeout-s 120 --max-new-tokens 256
+```
+
+- Use absolute paths for `--model-path`, `--scenarios`, `--out` (the
+  `uv run --directory python` cwd-shift makes relative paths break in
+  1 s; see memory `bench-cli-uv-cwd`).
+- Do **not** source `scripts/setup-gpu-env.sh` for this path — the
+  `cuda/12.9.1` module-load shadows torch's bundled CUDA 13 runtime on
+  `LD_LIBRARY_PATH` (same reasoning as `gpu-sanity.sh`'s top-of-file
+  comment).
+- The training stack already covers the runtime — `uv sync --directory
+  python --extra train` (`transformers`, `torch`, `accelerate`) is the
+  whole dependency set.
+
+The 8-checkpoint sweep is just the above command in a `for` loop over
+`data/posttraining/checkpoints/v1/checkpoint-*`. One H100 grades the
+full 81-row heldout split in ~3–5 s per scenario, so the entire 8 × 81
+sweep finishes in roughly 30 minutes.
+
+### 8b. GGUF checkpoint — `--provider llamacpp` (post-winner only)
+
+After the sweep picks a winner, convert that one HF checkpoint to GGUF
+(§7) and re-grade through llama-server to confirm the conversion didn't
+mutate the chat template or the model output. Same eval, different
+provider:
 
 ```bash
 llama-server -m data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf \
   --port 8080 --jinja &
 
-uv run --directory python/mili-llm-bench mili-llm-bench run \
+uv run --directory python mili-llm-bench run \
   --provider llamacpp \
-  --scenarios ../../data/posttraining/eval/bootstrap.jsonl \
-  --out ../../data/posttraining/runs/v6-sft-pilot-$(date +%Y%m%d-%H%M%S) \
+  --scenarios /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/sft/eval/heldout.jsonl \
+  --out /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/runs/v1-sft-winner-gguf-$(date +%Y%m%d-%H%M%S) \
   --step-cap 8 --per-turn-timeout-s 120 --max-new-tokens 256
 ```
 
-Grade against the M5 gates:
+For the llamacpp path, *do* source `scripts/setup-gpu-env.sh` (same
+Bash invocation as `uv run`; see memory
+`bench-gpu-env-source-per-bash`) — the `llama-server` binary needs the
+matched CUDA runtime that torch must not see.
+
+### Gates
 
 - **Regression tripwire:** ≥ 40 % L3 (the GEPA-only ceiling). Below
   that means SFT is *harming* — stop and diagnose.
 - **v1 target:** ≥ 62 % L3 (half the FunctionGemma↔Claude gap).
-- **Per-intent floor:** ≥ 50 % L3 on `material`, `select`, `clrsel`,
-  `view-reset` (the four 0 %-L3 intents at floor).
+- **Per-intent floor:** ≥ 50 % L3 on the four 0-rate intents (`colormap`,
+  `select`, `show-primal`, `show-derived` per the v7 baseline). The
+  rev-2 list (`material`, `select`, `clrsel`, `view-reset`) was from
+  an earlier baseline; see `m5-sft-pipeline.md` v7 per-intent
+  breakdown for the live floor.
 
 ---
 
@@ -591,11 +638,30 @@ Grade against the M5 gates:
 
 ---
 
-**Last updated:** 2026-05-24. Treat the version-pinned ranges as
-ceilings-at-time-of-writing; bump and re-test as the upstream
+**Last updated:** 2026-05-25 (rev 6). Treat the version-pinned ranges
+as ceilings-at-time-of-writing; bump and re-test as the upstream
 libraries move.
 
 ## Changelog
+
+- **2026-05-25 (rev 6).** Eval path landed for HF checkpoints. §8 split
+  into 8a (HF via `--provider transformers`, canonical for the v1 sweep)
+  and 8b (GGUF via `--provider llamacpp`, post-winner only). The
+  `transformers` provider re-uses `tokenizer.apply_chat_template(...)`
+  — the same call SFTTrainer rendered against — so the prompt
+  distribution at eval matches training byte-for-byte; no
+  chat-template-mutation risk for the seven losing checkpoints in the
+  sweep. See `m5-sft-pipeline.md` rev 21 for the provider's landing,
+  the deleted `FunctionGemmaProvider` (broken parser, no functional
+  callers — replaced wholesale), and the v1-SFT-corpus JSON-literal
+  arguments-shape discovery (chat template's string-branch produced
+  double-braced tool-call bodies in the training tokens; parser now
+  handles both shapes — `TODO(v2)` to re-render the corpus with
+  dict-shaped arguments and retire the JSON branch). Per-intent
+  floor list corrected to match the v7 baseline's actual 0-rate
+  intents (colormap/select/show-primal/show-derived) — the rev-2
+  list (material/select/clrsel/view-reset) was from an earlier
+  baseline.
 
 - **2026-05-25 (rev 5).** Training entry point landed.
   `python/scripts/sft_train.py` realizes the §6 recipe (rev 4) as a

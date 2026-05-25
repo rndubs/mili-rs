@@ -548,7 +548,7 @@ def test_cli_import_does_not_load_heavy_deps() -> None:
         sys.modules.pop(mod, None)
     # Also drop the cli module so its top-level imports re-run.
     sys.modules.pop("mili_llm_bench.cli", None)
-    sys.modules.pop("mili_llm_bench.providers.functiongemma", None)
+    sys.modules.pop("mili_llm_bench.providers.transformers", None)
     sys.modules.pop("mili_llm_bench.providers.anthropic", None)
     sys.modules.pop("mili_llm_bench.dispatchers.pygriz", None)
 

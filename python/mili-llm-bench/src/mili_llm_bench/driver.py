@@ -173,7 +173,7 @@ def estimate_cost_usd(usage_totals: dict[str, int], model_id: str) -> float:
     """Return the USD cost estimate for a usage totals dict against the
     pinned model's per-Mtok pricing. Unknown model ids return 0.0 — a
     deliberate silent zero so non-Anthropic providers (mock, llamacpp,
-    functiongemma) report ``cost_estimate_usd == 0.0`` without a
+    transformers) report ``cost_estimate_usd == 0.0`` without a
     branching call site."""
     pricing = _PRICING_PER_MTOK_USD.get(model_id)
     if pricing is None:

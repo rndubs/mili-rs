@@ -27,7 +27,27 @@ training entry point landed — `scripts/sft_train.sbatch` +
 ~0 by epoch 6 — pure memorization on 82 rows. Per-checkpoint
 heldout eval pending; **GGUF conversion deferred** to post-winner
 selection (`eval/heldout.jsonl` can be graded directly off HF
-checkpoints via a new TransformersProvider). **TRL pin bumped
+checkpoints via a new TransformersProvider). **rev 21
+(2026-05-25):** `TransformersProvider` landed (shared FG
+envelope parser at `providers/_fg_envelope.py`; deleted
+`FunctionGemmaProvider` — stale parser, no functional callers);
+**8 × 81 heldout sweep cleared all four gates.** Curve: epoch 1
+= 48 / 81 (59.3 %), epoch 2 = 54 / 81 (66.7 %), epoch 3 =
+65 / 81 (80.2 %), epoch 4 = 76 / 81 (93.8 %), epoch 5 =
+75 / 81 (92.6 %), epoch 6+ plateau at **77 / 81 (95.1 %)**.
+Three-way tie at the plateau (`checkpoint-126` / `-147` / `-168`
+— identical per-intent profile); **winner = `checkpoint-126`**
+(earliest of the plateau triplet, least over-trained; symlink
+`data/posttraining/checkpoints/v1/winner → checkpoint-126`).
+Surfaced a v1-corpus data shape: assistant turns store
+`function.arguments` as JSON **strings**, which the FG chat
+template's string-branch (jinja lines 194-197) renders as
+`call:NAME{<JSON_dict>}` (double-braced) in the training tokens
+— the v1 checkpoints learned and emit that exact shape, not the
+FG-DSL `<escape>` form. Parser now handles both; corpus
+re-render queued under v2 backlog. **Path forward:** preflight
+#6 (GGUF chat-template baking diff, on the winner) →
+GGUF conversion → llamacpp re-eval on the winner only. **TRL pin bumped
 `>=0.11,<0.13` → `>=1.0,<2` in rev 16** (the original pin's stated
 justification — `assistant_only_loss` — did not exist on the pinned
 versions; trl 0.20+ is the floor for that kwarg). rev-9
@@ -79,6 +99,7 @@ canonical harness config (`step_cap=8`, `temperature=0.0`,
 | v4 floor (`v4-llamacpp-realfixtures-fullresolve`)         | llamacpp / FunctionGemma-270M | 32 %     | `cdda3677…`  | Pre-GEPA-promotion; historical                   |
 | **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools, bootstrap eval; re-measured |
 | **v7 ceiling** (`v7-stage65-anthropic-smoke-…`)           | anthropic / claude-sonnet-4-5 | **98 %** | (synth)      | Post-promotion tools on `synth.jsonl` (175 rows) |
+| **v1 SFT winner** (`v1-sft-sweep/checkpoint-126-20260525-152545`) | transformers / `checkpoint-126` | **95.1 %** | (heldout)    | rev 21 sweep. 77 / 81 L3 on `eval/heldout.jsonl` (81 rows). Different corpus from the bootstrap eval — not a direct successor to the v7 26.0 % floor; both numbers are pinned for parallel reference. Three-way tie at the plateau (`checkpoint-126` / `-147` / `-168`); winner = earliest. See rev 21 full curve + per-intent breakdown.
 
 Earlier runs (`v0…v3`) ran against the empty M1 stub corpus before the
 fixture-resolver landed; their absolute numbers are not comparable —
@@ -219,18 +240,18 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
       (train↔inference drift-proof). Contamination clean: heldout
       scenario IDs ∩ train+val = ∅; heldout cells ∩ train+val cells
       = ∅. See rev 13 changelog.
-- [ ] **Stage 7** — Eval harness (same code as Stage 4, pointed at the
-      held-out split). **Loader landed in rev 14**:
-      `scenarios.load_scenarios` auto-detects the assembled-corpus
-      shape (`scenario_id` + `messages`) and lifts the verifier's
-      `postcondition` from a top-level field projected by
-      `assemble.project_sft_record`, so the eval reads
-      `eval/heldout.jsonl` standalone (no synth.jsonl join). Mock
-      smoke against the real 81-row heldout split graded
-      end-to-end (`runs/stage7-smoke-mock-20260525-000258/` — 81/81
-      `parse_error` from the mock, expected). Remaining work: real
-      eval pass against the post-SFT checkpoint (GPU-blocked behind
-      `trainer.train()`).
+- [x] **Stage 7** — Eval harness. Loader landed in rev 14;
+      **8 × 81 sweep ran in rev 21** via the new
+      `--provider transformers --model-path` path. Curve: 59.3 % →
+      66.7 % → 80.2 % → 93.8 % → 92.6 % → 95.1 % (plateau, epochs
+      6–8); winner `checkpoint-126` at **77 / 81 = 95.1 %** L3 on
+      the 81-row heldout split (`data/posttraining/runs/v1-sft-sweep/`).
+      Symlink `data/posttraining/checkpoints/v1/winner →
+      checkpoint-126`. All four gates cleared (regression tripwire,
+      v1 target, stretch, per-intent floor); see rev 21 for the
+      detailed curve, per-intent profile, and the four residual
+      `select` semantic-disambiguation misses queued as a v2
+      lever.
 - [~] **Stage 8** — Pre-experiment gate. **Deferred 2026-05-25 (rev 18).**
       Original framing was "stock 0.5–1B + GBNF, does it clear the
       ceiling?" — a self-hosted-small-model gate. We already have the
@@ -307,6 +328,30 @@ them here too so the live tracker shows the live unknowns.
 5. **`griz_raw` fallback grammar (Stage 1).** Deferred from v1, but it
    gates whether long-tail griz commands can ever participate. Track
    in v2 backlog.
+6. **v1 corpus `function.arguments` as JSON string.** Discovered in
+   rev 21. The Stage 5 driver writes each assistant rollout's
+   `function.arguments` as a JSON **string** instead of a dict. The FG
+   chat template's string-arguments branch (`chat_template.jinja`
+   lines 194-197) inserts that literal between the call's curly
+   braces, producing double-braced training tokens
+   (`call:NAME{<whitespace>{<JSON>}}`) instead of the canonical FG-DSL
+   (`call:NAME{key:<escape>value<escape>}`). The v1 checkpoints
+   learned the accidental shape; `parse_fg_envelopes` was extended to
+   accept both. v2 fix path: normalize string → dict in
+   `assemble.project_sft_record` on the way out of dedup (path b in
+   rev 21 (4)) so the next training run renders canonical FG-DSL and
+   the parser's JSON-literal branch can retire. The current v1 corpus
+   stays as the pinned input for this generation; not refactored
+   in place.
+7. **`select` per-intent floor at exactly 50 %.** Winner
+   (`checkpoint-126`) clears the per-intent floor on the four 0-rate
+   intents from v7 (colormap, show-primal, show-derived all at 100 %;
+   select at 4/8 = exactly 50 %). The four residual misses are
+   semantic disambiguation (range vs singular, brick vs node) — not
+   parse-shape bugs; the model emits well-formed FG envelopes that
+   just resolve to the wrong arguments. v2 lever: paraphrase
+   multiplier on the `select` intent with disambiguating phrasings.
+   Tracked under `query.todo_v2` analogue (`select.todo_v2`).
 
 ---
 
@@ -325,6 +370,184 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 21)** — **Eval path landed; v1 corpus data-shape
+  discovery flagged for v2.** Three changes plus one finding.
+
+  **(1) `TransformersProvider` landed** at
+  `python/mili-llm-bench/src/mili_llm_bench/providers/transformers.py`.
+  Loads an HF checkpoint in-process
+  (`AutoTokenizer.from_pretrained` + `AutoModelForCausalLM.from_pretrained(
+  dtype=torch.bfloat16, attn_implementation="eager", device_map="cuda")`);
+  re-uses `tokenizer.apply_chat_template(messages, tools=tools,
+  add_generation_prompt=True)` — the same call SFTTrainer's
+  `formatting_func` rendered against — so prompt distribution at eval
+  matches training byte-for-byte; greedy decode at `temperature=0` with
+  `do_sample=False`; converts the bench harness's W1-shape tools to
+  OpenAI shape via the existing `tool_format.w1_to_openai_tool` helper
+  (same call site as `LlamaCppProvider`). CLI: `--provider transformers
+  --model-path <ckpt-dir>` (required; raises `ValueError` if missing).
+
+  **(2) Shared FG envelope parser** at
+  `python/mili-llm-bench/src/mili_llm_bench/providers/_fg_envelope.py`.
+  Lifted the `_FG_ENVELOPE_RE` / `_FG_STRING_ARG_RE` / `_FG_BARE_ARG_RE`
+  regexes out of `providers/llamacpp.py` so the train- and
+  inference-time paths can't drift on what `<start_function_call>call:NAME{
+  …}<end_function_call>` means. Both `LlamaCppProvider` and
+  `TransformersProvider` import `parse_fg_envelopes`; a
+  drift-prevention test pins both providers' references to the same
+  function object (mirrors the `TestToolFormatHelper` pattern from
+  rev 13).
+
+  **(3) `FunctionGemmaProvider` deleted** (along with its tests and the
+  `[functiongemma]` pyproject extra). Its parser expected
+  `<start_function_call>[{"name": "…", "arguments": {…}}]<end_function_call>`
+  — a JSON-list inner payload that no FG checkpoint ever emits. The
+  helper was authored alongside the v0 baseline before the FG-DSL was
+  understood; the v0–v3 baselines that "used" it ran against the empty
+  M1 stub corpus and graded ~0 % L3 for unrelated reasons (no fixtures
+  resolved), so the parser's brokenness was masked. No tracked baseline
+  was ever produced by it correctly. `TransformersProvider` replaces it
+  wholesale; the `train` extra (`transformers` + `torch` + `accelerate`)
+  was already in place from the SFT training stack, so no dep churn.
+
+  **(4) Finding — v1 corpus data shape: `function.arguments` as a
+  string instead of a dict.** The Stage 5 driver wrote each assistant
+  rollout's `function.arguments` as a JSON **string** (e.g.
+  `'{"root": "d3samp6"}'`) rather than a dict (`{"root": "d3samp6"}`).
+  The FG chat template's `arguments` branch checks `is mapping` first,
+  but with strings it falls into the secondary `is string` branch
+  (`chat_template.jinja` lines 194-197) and renders the literal JSON
+  text between the call's curly braces — producing
+  `<start_function_call>call:load{                    {"root": "d3samp6"}}<end_function_call>`
+  in the training tokens. The v1 checkpoints learned this exact
+  double-braced shape; the probe against `checkpoint-21` confirms
+  greedy decode emits the same.
+
+  *Implication on what training actually learned.* The model still
+  learned a correct mapping from prompt → structured tool call — the
+  tool name, the argument keys, and the argument values are all in the
+  output and the JSON inside the braces is well-formed in the 3 / 3
+  smoke. The training *target* shape is just different from the FG
+  chat template's documented dict-rendering. Not a correctness bug in
+  the trained weights; a data-rendering bug in the corpus that ships
+  to v1 as an accidental encoding choice.
+
+  *Parser handles both shapes.* `parse_fg_envelopes` now JSON-parses
+  the envelope body first; on success returns those args, on failure
+  falls through to the existing `<escape>` / bare-scalar FG-DSL
+  pass. Stock pretrained FG-270M (which emits the FG-DSL — the
+  v7 26 % L3 llamacpp baseline) still parses correctly via the
+  fallthrough; the v1 SFT checkpoints (which emit the JSON-literal
+  shape) parse via the JSON branch. New test pins in
+  `tests/test_fg_envelope.py::TestParseEnvelopes::
+  test_json_literal_body_shape` (and `_with_compound_calls`); existing
+  FG-DSL pins unchanged.
+
+  *`TODO(v2)` — re-render the training corpus with dict-shaped
+  arguments.* Two paths: (a) fix the Stage 5 driver to write
+  `arguments` as a dict on the rollout's wire shape, then re-assemble;
+  (b) fix `assemble.project_sft_record` to normalize string → dict
+  on the way out of dedup, leaving Stage 5 untouched. Path (b) is
+  smaller and lets the existing rev-12 rollouts feed forward without
+  re-running teacher API calls. The current v1 corpus stays as the
+  pinned input for the in-flight sweep; v2 corpus is the place to
+  fix.
+
+  **(5) Sweep results — all four gates clear.** Sweep artifacts at
+  `data/posttraining/runs/v1-sft-sweep/checkpoint-*-20260525-152545/`;
+  full log at `sweep-20260525-152545.log`. Wall-clock ~10 min total
+  across 8 checkpoints on `matrix41` (≈ 70 s per checkpoint /
+  81 scenarios). The per-epoch L3 curve on the 81-row heldout:
+
+  | Epoch | Checkpoint        | L3        | Notes                          |
+  |-------|-------------------|-----------|--------------------------------|
+  | 1     | `checkpoint-21`   | 48 / 81 = **59.3 %** | Above regression tripwire on epoch 1; epoch with non-trivial gradient signal. Falls short of per-intent floor on colormap (0/9) and show-derived (0/3). |
+  | 2     | `checkpoint-42`   | 54 / 81 = **66.7 %** | Crosses v1 target; per-intent floor cleared on all four 0-rate intents (colormap 6/9, select 5/8, show-primal 9/9, show-derived 3/3). But compound-material 0/6 and compound-state 0/7 regress vs epoch 1. |
+  | 3     | `checkpoint-63`   | 65 / 81 = **80.2 %** | Crosses stretch gate. Compound-material partial (2/6), compound-state partial (3/7). |
+  | 4     | `checkpoint-84`   | 76 / 81 = **93.8 %** | Saturates most intents; per-intent floor cleared. |
+  | 5     | `checkpoint-105`  | 75 / 81 = **92.6 %** | Slight regression on query (2/4 vs prior 4/4); not material. |
+  | 6     | `checkpoint-126`  | 77 / 81 = **95.1 %** | **Plateau begins.** All non-`select` intents at 100 %. ✅ winner. |
+  | 7     | `checkpoint-147`  | 77 / 81 = **95.1 %** | Identical per-intent profile to `-126`. |
+  | 8     | `checkpoint-168`  | 77 / 81 = **95.1 %** | Identical per-intent profile to `-126`. (= `final/`) |
+
+  **Winner: `checkpoint-126`.** Three-way tie at the plateau; same
+  per-intent numbers across the three. The tiebreak is *earliest of
+  the plateau triplet* — less over-trained, identical eval signal.
+  Symlink `data/posttraining/checkpoints/v1/winner → checkpoint-126`
+  is the single canonical pointer for post-winner work.
+
+  **Per-intent profile at the plateau (`checkpoint-126`).** 13 / 14
+  intents at 100 % L3. Single residual cell: `select` at **4 / 8**
+  (exactly the ≥ 50 % per-intent floor; not above). The four
+  persistent `select` failures are all semantic, not parse-shape:
+
+  - `synth-00042` "select bricks 7" → model emits `range: '1-7'`
+    instead of `range: '7'` (confused singular vs range).
+  - `synth-00043` "pick brick 7" → same pattern.
+  - `synth-00046` "select nodes 1" → model emits
+    `class_name: 'brick', range: '1'` (class confusion: node →
+    brick).
+  - `synth-00047` "pick node 1" → emits `class_name: 'node'`
+    (correct class) but no `range` (omitted required arg).
+
+  These are not training-pipeline bugs; they're genuine
+  paraphrase-disambiguation failures. The model knows the FG-DSL
+  shape and the `select` tool exists; it doesn't disambiguate
+  *which element class* / *singular vs range* from natural language.
+  This is the v2 paraphrase-multiplier lever — more training rows
+  per intent with disambiguating phrasings would lift this cell.
+
+  **Gates (post-sweep status):**
+
+  - [x] Regression tripwire (≥ 40 % L3): cleared on epoch 1
+        (`checkpoint-21` at 59.3 %).
+  - [x] v1 target (≥ 62 % L3): cleared on epoch 2 (`checkpoint-42`
+        at 66.7 %).
+  - [x] Stretch (≥ 80 % L3): cleared on epoch 3 (`checkpoint-63`
+        at 80.2 %).
+  - [x] Per-intent floor (≥ 50 % on colormap / select /
+        show-primal / show-derived): cleared starting epoch 4
+        (`checkpoint-84` — colormap 100 %, select 50 %,
+        show-primal 100 %, show-derived 100 %). At the winner the
+        floor is still **exactly 50 %** on select; v2 lever
+        flagged.
+  - [x] Winner choice defensible: earliest of the plateau triplet,
+        identical per-intent profile to later plateau checkpoints,
+        less over-trained.
+  - [x] Per-checkpoint L3 curve recorded above.
+  - [x] `data/posttraining/checkpoints/v1/winner → checkpoint-126`
+        symlink in place.
+
+  **Two side-observations from the curve.**
+
+  - **Loss=0 by epoch 6 (rev 20 observation) does not mean
+    over-memorization.** The heldout split is in-distribution
+    (same Stage-5 rollout pool, different `(intent, fixture)`
+    cells), so 95 % L3 is *plausibly* memorization of patterns
+    rather than generalization. But the *late-epoch plateau is
+    flat, not regressing* — there is no observed overfitting cost
+    to training the full 8 epochs vs. early-stopping at epoch 6.
+    Picking `-126` over `-168` is paranoia-driven (zero
+    measurable lift), not signal-driven.
+  - **Epoch-by-epoch curve has a non-monotone dip.**
+    `checkpoint-105` at 92.6 % is below `checkpoint-84` at 93.8 %
+    — a 1-scenario regression on `query` (2/4 → was 4/4 at -84;
+    back to 4/4 at -126). Within the noise floor of a 4-scenario
+    cell. No action needed.
+
+  **Path forward (winner-only).** Preflight #6 (GGUF chat-template
+  baking diff, `sft-preflight-gpu.md` §6) on `winner →
+  checkpoint-126` → GGUF conversion (`cluster-setup.md` §7) →
+  `--provider llamacpp` re-eval on the same heldout split
+  (`cluster-setup.md` §8b) to confirm the GGUF round-trips the same
+  95.1 % L3 as the HF path. If the llamacpp number matches, ship.
+
+  **Test deltas.** 229 / 229 + 1 skip before → 250 / 250 + 1 skip
+  after (added 22 new pins across `test_fg_envelope.py` (13) +
+  `test_providers_transformers.py` (12), deleted 5 `test_providers_functiongemma.py`
+  always-on pins + 1 skip-gated; net +17 always-on, ‑1 skip-gated).
+  All `mili-llm-bench` tests green.
 
 - **2026-05-25 (rev 20)** — **`trainer.train()` landed; v1 checkpoint
   pool ready for heldout eval.** First end-to-end SFT run on

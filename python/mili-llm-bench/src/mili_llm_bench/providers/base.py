@@ -46,7 +46,7 @@ class ProviderOutput:
     # exposes it (Anthropic does — input_tokens / output_tokens /
     # cache_read_input_tokens / cache_creation_input_tokens). Stage 5
     # cost telemetry sums these for the budget gate; other providers
-    # (mock, replay, llamacpp, functiongemma) leave it ``None``.
+    # (mock, replay, llamacpp, transformers) leave it ``None``.
     usage: dict[str, int] | None = None
     raw: Any = field(default=None, repr=False)
 

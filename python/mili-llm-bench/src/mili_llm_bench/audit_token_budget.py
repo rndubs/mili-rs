@@ -80,8 +80,7 @@ def _load_tokenizer(tokenizer_id: str) -> Any:
     except ImportError as exc:
         raise ImportError(
             "audit_token_budget requires the `transformers` package. "
-            "Install with `uv sync --directory python --extra train` "
-            "(or `--extra functiongemma`)."
+            "Install with `uv sync --directory python --extra train`."
         ) from exc
     return AutoTokenizer.from_pretrained(tokenizer_id)
 

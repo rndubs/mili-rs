@@ -1116,11 +1116,6 @@ anthropic = [
 dev = [
     { name = "pytest" },
 ]
-functiongemma = [
-    { name = "accelerate" },
-    { name = "torch" },
-    { name = "transformers" },
-]
 gepa = [
     { name = "gepa" },
     { name = "litellm" },
@@ -1142,7 +1137,6 @@ train = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate", marker = "extra == 'functiongemma'", specifier = ">=0.30" },
     { name = "accelerate", marker = "extra == 'train'", specifier = ">=0.34,<2" },
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
     { name = "datasets", marker = "extra == 'train'", specifier = ">=3.0,<5" },
@@ -1155,14 +1149,12 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "requests", marker = "extra == 'llamacpp'", specifier = ">=2.31" },
     { name = "sentencepiece", marker = "extra == 'train'", specifier = ">=0.2.1" },
-    { name = "torch", marker = "extra == 'functiongemma'", specifier = ">=2.2" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.6,<3" },
     { name = "tqdm", specifier = ">=4.66" },
-    { name = "transformers", marker = "extra == 'functiongemma'", specifier = ">=4.50" },
     { name = "transformers", marker = "extra == 'train'", specifier = ">=4.50,<5" },
     { name = "trl", marker = "extra == 'train'", specifier = ">=1.0,<2" },
 ]
-provides-extras = ["dev", "gepa", "pygriz", "functiongemma", "anthropic", "llamacpp", "train"]
+provides-extras = ["dev", "gepa", "pygriz", "anthropic", "llamacpp", "train"]
 
 [[package]]
 name = "mpmath"
