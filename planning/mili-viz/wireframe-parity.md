@@ -95,7 +95,7 @@ unchanged.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | Command line (Layer-0 verbatim, transcript) | ✅ done | — | status 17 |
-| Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). Forward path: a `pip install`ed managed venv + `attach()`-into-*this*-GUI (the latter gated on Phase 5 M5 remote mode — the in-process client writes no session file) | client.md dec 3 / phase-6-m2 / status 18–20, 23 |
+| Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). `attach()`-into-*this*-GUI also works now (the in-process arm publishes a UDS-backed session file with the new `transport: "in-process"` discriminator — see [`wireframe-parity-5.md`](wireframe-parity-5.md)). Forward path: a `pip install`ed managed venv | client.md dec 3 / phase-6-m2 / wireframe-parity-5 / status 18–20, 23 |
 | Time-history plot | ✅ done (text-input **and** picking-driven variants) | fed by `ResultState` min/max envelope **plus** per-element `Query`-fed lines. Server `Query` RPC dispatches `Database::query_full` for primal svars (`InlineTable` carrier with `[states × labels × components]` row-major shape; out-of-range / no-run-loaded surface as typed `ok=false` errors; derived results route to "not yet supported" until the geometry-path derived dispatch is replicated). Plot tab body renders each series as its own line (round-robin palette, distinct from the envelope colours); input row carries `class · id · svar · comp` fields + `+series` button → `UiAction::QueryElementSeries`, plus a sibling `+ pick` button that consumes the last-resolved `picked_element` (from #6's `Pick::member_id` + `ResultCatalog::resolve_member`) and the currently-shown `ResultInfo::{name, component}` — one click on a picked element plots its time-history line for whatever svar/component is on screen. The button greys out (self-diagnosing hover text) when either half is missing (no resolved pick, or no `show <svar>` active). `app.rs` lowering issues the request over all states the run advertises, parses the inline reply, and pushes samples back via `ShellState::push_element_series`; failures drop the placeholder so the legend never accumulates empty rows | phase-5-m3.5 Dec 50 |
 | Whole-region hide (tweak) | ✅ done | `Preferences → Show bottom tabs` checkbox suppresses the whole `tabs` panel (strip + body) via `ShellState::show_bottom_tabs` (default `true` → L1 byte-stable) → `UiAction::SetShowBottomTabs` → persisted in `tweaks.json`. The per-tab `▾ hide` still collapses the body only (its own runtime mode). Regression-tested by `m3_5_bottom_tabs::show_bottom_tabs_false_suppresses_the_panel` | — |
 
@@ -202,12 +202,17 @@ leverage, ordered "ship-blocking first":
    idempotent re-click). `tests/picking.rs` extends the two
    `apply_pick` cases to assert `picked_element` lights and clears
    in lockstep with the status-bar readout.
-5. **Scripting tab — managed venv + attach-into-*this*-GUI**
-   (`shell.rs:1012`, the `venv: starting · attach: launch` line).
-   Runner works; the `pip install`ed managed venv and
-   `attach()`-into-this-GUI (the latter requires the in-process
-   client to write a session file — a small but design-first
-   change) remain. Self-contained UX improvement.
+5. **Scripting tab — `attach()`-into-this-GUI** — ✅ done
+   (managed venv is the remaining sliver, tracked below). The
+   in-process arm now publishes `~/.griz/sessions/<id>.json` next
+   to a UDS at `/tmp/griz-<id>.sock` and the same `VizService` that
+   backs the in-memory client is side-bound on it via
+   `mili_viz_server::serve_uds`. `SessionInfo` grows two optional
+   fields (`transport`, `socket_path`); `attach()` dispatches on
+   `transport == "in-process"` to a unix-socket gRPC channel.
+   Decisions 109–111 in [`wireframe-parity-5.md`](wireframe-parity-5.md).
+   Remaining sub-item: a `pip install`ed managed venv for the Run
+   button — independent track, design-first when picked up.
 6. **Picking class-N label** — ✅ done. Per-tri owner id
    `(class_idx, elem_row)` rides MVG3's new `flags_mask` bit 4
    column; the small class-membership table rides the catalog

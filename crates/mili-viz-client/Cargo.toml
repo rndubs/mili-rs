@@ -33,7 +33,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 glam = "0.32"
 egui = "0.34.2"
 mili-viz-proto = { path = "../mili-viz-proto" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+# Decision 109 publisher tests dial the UDS the client just published.
+hyper-util = "0.1"
+tower = "0.5"
 
 [lints]
 workspace = true

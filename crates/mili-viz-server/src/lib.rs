@@ -1541,6 +1541,57 @@ pub async fn serve_tcp(
     Ok((local, handle))
 }
 
+/// Serve `MiliViz` **and** the Arrow Flight `FlightService` over a
+/// Unix domain socket at `path` — the same router as [`serve_tcp`],
+/// just a different transport (`wireframe-parity-5.md` Decision 109).
+///
+/// Used by the windowed client's in-process arm to publish a socket a
+/// **sibling** `pygriz` script can connect to (`attach()` reads the
+/// session file's new `transport: "in-process"` + `socket_path` fields
+/// and connects over `unix:<path>`). The frozen wire contract is
+/// untouched — the bytes on the UDS are the same MiliViz/Flight
+/// HTTP/2 a client would speak over TCP.
+///
+/// `path` is the absolute filesystem path the listener binds. Any
+/// stale file at that path is removed first (best-effort; a `bind`
+/// failure surfaces verbatim).
+///
+/// # Errors
+/// Returns an error if the UDS listener cannot bind `path`.
+#[cfg(unix)]
+pub async fn serve_uds(
+    svc: VizService,
+    path: &std::path::Path,
+) -> Result<
+    (std::path::PathBuf, tokio::task::JoinHandle<()>),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    use mili_viz_proto::flight::flight_service_server::FlightServiceServer;
+    use tokio_stream::wrappers::UnixListenerStream;
+    use tonic::transport::Server;
+
+    // Stale-socket guard: a previous run that crashed without Drop
+    // running leaves a file behind that `bind` would reject with
+    // EADDRINUSE. Removing it is safe — only this process is about
+    // to publish a session file pointing at this path.
+    let _ = std::fs::remove_file(path);
+
+    let listener = tokio::net::UnixListener::bind(path)?;
+    let flight = svc.flight_service();
+    let bound = path.to_path_buf();
+
+    let handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(MiliVizServer::new(svc))
+            .add_service(FlightServiceServer::new(flight))
+            .serve_with_incoming(UnixListenerStream::new(listener))
+            .await
+            .expect("uds server terminated with error");
+    });
+
+    Ok((bound, handle))
+}
+
 /// Bind a server on an ephemeral `127.0.0.1` TCP port and return
 /// connected real `MiliViz` **and** Flight clients over that TCP
 /// transport, plus the bound address and the server task handle. The

@@ -85,6 +85,13 @@ struct App {
     /// Once a second is fast enough for an agent that already has to
     /// wait for the PNG to land.
     last_trigger_poll: Instant,
+    /// Holds the in-process session file + UDS lifetime
+    /// (`wireframe-parity-5.md` Decision 109). `None` for the remote
+    /// / `--attach` arms (they consume an external server's session
+    /// file rather than publishing one). Drop removes the JSON +
+    /// socket on a clean GUI exit.
+    #[cfg(unix)]
+    _session_guard: Option<crate::session::InProcessSessionGuard>,
 }
 
 /// A message from the scripting-runner worker thread.
@@ -1376,6 +1383,8 @@ pub fn run(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use crate::cli::TransportChoice;
     let rt = tokio::runtime::Runtime::new()?;
+    #[cfg(unix)]
+    let mut session_guard: Option<crate::session::InProcessSessionGuard> = None;
     let session = match transport {
         None => {
             // Phase 5 M6 — the windowed in-process arm plugs in a
@@ -1386,6 +1395,19 @@ pub fn run(
             let svc = mili_viz_server::VizService::builder()
                 .agent_backend(mili_viz_server::MockAgent)
                 .build();
+            // wireframe-parity-5 Decision 109: also side-bind the same
+            // VizService on a UDS and publish a session file so a
+            // sibling `pygriz` script (the scripting-tab Run button or
+            // any standalone process) can `attach()` into *this*
+            // running GUI. Failure here is non-fatal — the GUI still
+            // works for the local user; pygriz attach is the loss.
+            #[cfg(unix)]
+            match rt.block_on(crate::session::publish_in_process_session(svc.clone())) {
+                Ok(g) => session_guard = Some(g),
+                Err(e) => eprintln!(
+                    "mili-viz-client: could not publish in-process session file: {e}"
+                ),
+            }
             rt.block_on(Session::connect_in_process_with(svc, root.as_deref()))?
         }
         Some(TransportChoice::Remote(endpoint)) => {
@@ -1427,6 +1449,8 @@ pub fn run(
         cut_throttle: CutThrottle::new(),
         pending_capture: None,
         last_trigger_poll: Instant::now() - Duration::from_secs(10),
+        #[cfg(unix)]
+        _session_guard: session_guard,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

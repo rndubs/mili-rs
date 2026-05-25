@@ -515,6 +515,203 @@ async fn flight_get(flight: &mut FlightClient, ticket: &[u8]) -> Result<Vec<u8>,
 }
 
 // ──────────────────────────────────────────────────────────────────────
+// In-process session/connection-file publisher
+// (`wireframe-parity-5.md` Decisions 109–111). The default windowed
+// GUI runs an in-process server (no TCP socket) — without this writer
+// no `~/.griz/sessions/<id>.json` exists for a sibling `pygriz` script
+// to `attach()` against. We extend the Decision-56 session file with
+// two new optional fields (`transport` + `socket_path`) and publish a
+// UDS the in-process server side-binds; pygriz reads the discriminator
+// and connects over `unix:<socket_path>` instead of TCP. The frozen
+// wire contract is untouched — the bytes on the UDS are the same
+// MiliViz/Flight HTTP/2 frames a TCP client sees.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Guards the lifetime of an in-process session file + UDS socket
+/// file: on Drop, removes both best-effort so a normal GUI exit leaves
+/// `~/.griz/sessions/` clean. A force-killed GUI leaves the JSON
+/// behind; the read side filters by pid-liveness (Decision 57) so a
+/// stale entry does not poison `attach()`.
+#[cfg(unix)]
+pub(crate) struct InProcessSessionGuard {
+    json_path: PathBuf,
+    socket_path: PathBuf,
+    /// Kept alive so the UDS listener task runs as long as the guard.
+    /// Dropped on shutdown — tokio detaches the task, which then exits
+    /// when its listener (held by the spawned future) goes away with
+    /// the runtime. We never join it: the GUI's tokio runtime is
+    /// torn down before Drop runs anyway.
+    _server: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl Drop for InProcessSessionGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.json_path);
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+/// Pick the UDS path the in-process server will publish at.
+/// Constraints (per Decision 110):
+///   * absolute & short — macOS `sun_path` caps at 104 bytes,
+///   * unique-per-process — id encodes pid+nanos so concurrent GUIs
+///     never collide,
+///   * tmpdir-resident so the OS reclaims it on reboot if a force-kill
+///     skipped Drop.
+/// `/tmp` is preferred over `$TMPDIR` (the macOS `/var/folders/...`
+/// path is often >80 bytes and crowds the sun_path budget).
+#[cfg(unix)]
+fn pick_uds_path(id: &str) -> PathBuf {
+    let dir = if std::path::Path::new("/tmp").is_dir() {
+        PathBuf::from("/tmp")
+    } else {
+        std::env::temp_dir()
+    };
+    dir.join(format!("griz-{id}.sock"))
+}
+
+/// Generate a session id and a token — same `{:08x}` / `{:016x}` shape
+/// the server binary's `main.rs` uses (Decision 56) so a session file
+/// the GUI writes is byte-shape-identical to one the binary writes,
+/// modulo the two new optional `transport`/`socket_path` fields.
+#[cfg(unix)]
+fn fresh_id_and_token() -> (String, String) {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let id = format!("{:08x}", mix(u128::from(pid), nanos));
+    let token = format!(
+        "{:016x}",
+        mix(nanos, u128::from(pid).wrapping_mul(0x9E37_79B9))
+    );
+    (id, token)
+}
+
+#[cfg(unix)]
+fn mix(a: u128, b: u128) -> u64 {
+    let mut x = a
+        .wrapping_mul(0x2545_F491_4F6C_DD1D)
+        .wrapping_add(b.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    x ^= x >> 33;
+    (x & u128::from(u64::MAX)) as u64
+}
+
+/// Write a session JSON (atomic temp+rename, the Jupyter pattern the
+/// server binary already uses) with the new in-process discriminator.
+/// `socket_path` is the UDS already bound by `serve_uds`.
+#[cfg(unix)]
+fn write_in_process_session_file(
+    id: &str,
+    token: &str,
+    socket_path: &std::path::Path,
+) -> std::io::Result<PathBuf> {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+
+    let dir = sessions_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{id}.json"));
+
+    let pid = std::process::id();
+    let mut json = String::new();
+    json.push_str("{\n");
+    let _ = writeln!(json, "  \"id\": \"{}\",", json_escape(id));
+    let _ = writeln!(json, "  \"pid\": {pid},");
+    // `host`/`port` are kept (existing field shape — pygriz/Rust
+    // readers may parse them eagerly) but set to the in-process
+    // sentinels so an older client that ignores `transport` and tries
+    // to TCP-connect fails loud (`connect 127.0.0.1:0` → error) rather
+    // than silently landing on the wrong server.
+    let _ = writeln!(json, "  \"host\": \"127.0.0.1\",");
+    let _ = writeln!(json, "  \"port\": 0,");
+    let _ = writeln!(json, "  \"token\": \"{}\",", json_escape(token));
+    let _ = writeln!(
+        json,
+        "  \"protocol_version\": \"{}\",",
+        json_escape(mili_viz_proto::v1::PROTOCOL_VERSION)
+    );
+    let _ = writeln!(json, "  \"transport\": \"in-process\",");
+    let _ = writeln!(
+        json,
+        "  \"socket_path\": \"{}\",",
+        json_escape(&socket_path.display().to_string())
+    );
+    let _ = writeln!(json, "  \"db\": \"\"");
+    json.push_str("}\n");
+
+    let tmp = dir.join(format!(".{id}.json.{pid}.tmp"));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    Ok(path)
+}
+
+/// Minimal JSON string escaper for the handful of fields above.
+/// Mirrors the server binary's `escape` (Decision 56) so the two
+/// writers produce byte-compatible output for the shared fields.
+#[cfg(unix)]
+fn json_escape(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Publish the in-process session: bind a UDS on the same `VizService`
+/// the in-process client speaks to, then write `<sessions_dir>/<id>.json`
+/// pointing at it. Called from the windowed shell's default-transport
+/// path (the only arm that has no other session file source).
+///
+/// Returns a guard whose `Drop` removes both files on a clean GUI
+/// exit.
+///
+/// # Errors
+/// Returns an error if the UDS cannot bind (path-length collision /
+/// permission) or the session file cannot be written.
+#[cfg(unix)]
+pub(crate) async fn publish_in_process_session(
+    svc: mili_viz_server::VizService,
+) -> Result<InProcessSessionGuard, BoxErr> {
+    let (id, token) = fresh_id_and_token();
+    let socket_path = pick_uds_path(&id);
+    let (bound, server) = mili_viz_server::serve_uds(svc, &socket_path).await?;
+    let json_path = write_in_process_session_file(&id, &token, &bound)?;
+    eprintln!(
+        "mili-viz-client: in-process session file {} (uds {})",
+        json_path.display(),
+        bound.display()
+    );
+    Ok(InProcessSessionGuard {
+        json_path,
+        socket_path: bound,
+        _server: server,
+    })
+}
+
+#[cfg(not(unix))]
+pub(crate) struct InProcessSessionGuard;
+
+// ──────────────────────────────────────────────────────────────────────
 // `--attach` session-file resolver (mirrors python/pygriz/.../attach()).
 // ──────────────────────────────────────────────────────────────────────
 
@@ -680,6 +877,13 @@ fn resolve_session(id: Option<&str>) -> Result<SessionInfo, BoxErr> {
 mod tests {
     use super::*;
 
+    /// Serialise the cases that mutate `GRIZ_SESSIONS_DIR`. Cargo runs
+    /// tests in this binary in parallel; without this lock, the env
+    /// var two cases set independently race and the wrong tmp dir is
+    /// observed (the bug surfaced when combining the client and
+    /// server test runs increased the cargo-wide parallelism).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn write_session_json(
         dir: &Path,
         id: &str,
@@ -738,6 +942,7 @@ mod tests {
 
     #[test]
     fn resolve_session_missing_id_is_a_clear_error() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp =
             std::env::temp_dir().join(format!("mili-viz-client-resolve-id-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -759,6 +964,7 @@ mod tests {
 
     #[test]
     fn resolve_session_empty_dir_errors() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "mili-viz-client-resolve-empty-{}",
             std::process::id()
@@ -777,6 +983,108 @@ mod tests {
             e.contains("no live griz sessions"),
             "empty sessions dir surfaces clearly: {e}"
         );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // In-process publisher (`wireframe-parity-5.md` Decisions 109–111).
+    // ─────────────────────────────────────────────────────────────
+
+    /// One combined test for the publisher: file shape + live UDS +
+    /// Drop cleanup. Combined because `cargo test` runs cases in
+    /// parallel and they share the `GRIZ_SESSIONS_DIR` env var — a
+    /// split case would race the env stomping of the other.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn publish_in_process_session_round_trip() {
+        use hyper_util::rt::TokioIo;
+        use tonic::transport::{Endpoint, Uri};
+        use tower::service_fn;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "mili-viz-client-publish-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev = std::env::var_os("GRIZ_SESSIONS_DIR");
+        std::env::set_var("GRIZ_SESSIONS_DIR", &tmp);
+
+        let svc = mili_viz_server::VizService::builder().build();
+        let guard = publish_in_process_session(svc).await.unwrap();
+
+        // Exactly one *.json with the new discriminator + legacy
+        // fields. host/port are written as `127.0.0.1`/`0` so a
+        // pre-Decision-109 reader that ignores `transport` fails loud
+        // on TCP-connect (Decision 110) rather than landing somewhere
+        // wrong by silent mis-route.
+        let jsons: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+            })
+            .collect();
+        assert_eq!(jsons.len(), 1, "exactly one session file published");
+        let json_path = jsons[0].path();
+        let text = std::fs::read_to_string(&json_path).unwrap();
+        assert!(
+            text.contains("\"transport\": \"in-process\""),
+            "missing transport discriminator:\n{text}"
+        );
+        assert!(text.contains("\"socket_path\":"));
+        assert!(text.contains("\"host\": \"127.0.0.1\""));
+        assert!(text.contains("\"port\": 0"));
+        assert_eq!(json_str(&text, "transport").as_deref(), Some("in-process"));
+
+        // The advertised UDS exists and the router is alive on it.
+        let socket = json_str(&text, "socket_path").unwrap();
+        assert!(
+            std::fs::metadata(&socket).is_ok(),
+            "uds socket_path {socket} not present on disk"
+        );
+        let socket_owned = std::path::PathBuf::from(&socket);
+        let channel = Endpoint::try_from("http://uds.invalid")
+            .unwrap()
+            .connect_with_connector(service_fn(move |_: Uri| {
+                let path = socket_owned.clone();
+                async move {
+                    let io = tokio::net::UnixStream::connect(&path).await?;
+                    Ok::<_, std::io::Error>(TokioIo::new(io))
+                }
+            }))
+            .await
+            .expect("uds dial");
+        let mut client = pb::mili_viz_client::MiliVizClient::new(channel);
+        let reply = client
+            .hello(tonic::Request::new(pb::HelloRequest {
+                protocol_version: pb::PROTOCOL_VERSION.to_string(),
+                client_id: "publish-test".into(),
+                ..Default::default()
+            }))
+            .await
+            .expect("hello rpc")
+            .into_inner();
+        assert!(reply.compatible, "published UDS speaks the same router");
+
+        // Drop → both files cleaned (Decision 111: clean exit leaves
+        // nothing behind; a force-killed GUI leaves the JSON which
+        // the read-side pid-liveness filters out).
+        drop(guard);
+        assert!(!json_path.exists(), "Drop removes the session JSON");
+        assert!(
+            !std::path::Path::new(&socket).exists(),
+            "Drop removes the UDS socket file ({socket})"
+        );
+
+        if let Some(p) = prev {
+            std::env::set_var("GRIZ_SESSIONS_DIR", p);
+        } else {
+            std::env::remove_var("GRIZ_SESSIONS_DIR");
+        }
         std::fs::remove_dir_all(&tmp).ok();
     }
 }

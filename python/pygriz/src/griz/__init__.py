@@ -725,6 +725,39 @@ class _View:
         self._named(pb.NamedView.LIST)
 
 
+def _handshake(
+    channel,
+    *,
+    token: str,
+    client_id: str | None,
+    protocol_version: str,
+    timeout: float,
+) -> Session:
+    """Run the ``Hello`` handshake on an already-built gRPC channel
+    (TCP or UDS) and wrap the result in a :class:`Session`. Factored so
+    :func:`connect` (TCP) and :func:`_connect_uds` (in-process Unix
+    socket — Decision 109) share the post-handshake path."""
+    pb, pb_grpc = _stubs()
+    stub = pb_grpc.MiliVizStub(channel)
+    request = pb.HelloRequest(
+        protocol_version=protocol_version,
+        session_token=token,
+        client_id=client_id or f"griz-py/{__version__}",
+    )
+    reply = stub.Hello(request, timeout=timeout)
+    if not reply.compatible:
+        warnings.warn(
+            "mili-viz protocol mismatch (client "
+            f"{protocol_version} vs server "
+            f"{reply.server_protocol_version}): "
+            f"{reply.mismatch_detail or 'no detail'}. "
+            "Proceeding; behavior may be undefined.",
+            ProtocolMismatchWarning,
+            stacklevel=3,
+        )
+    return Session(channel, stub, reply)
+
+
 def connect(
     host: str,
     port: int,
@@ -747,26 +780,40 @@ def connect(
     """
     import grpc
 
-    pb, pb_grpc = _stubs()
     channel = grpc.insecure_channel(f"{host}:{port}")
-    stub = pb_grpc.MiliVizStub(channel)
-    request = pb.HelloRequest(
+    return _handshake(
+        channel,
+        token=token,
+        client_id=client_id,
         protocol_version=protocol_version,
-        session_token=token,
-        client_id=client_id or f"griz-py/{__version__}",
+        timeout=timeout,
     )
-    reply = stub.Hello(request, timeout=timeout)
-    if not reply.compatible:
-        warnings.warn(
-            "mili-viz protocol mismatch (client "
-            f"{protocol_version} vs server "
-            f"{reply.server_protocol_version}): "
-            f"{reply.mismatch_detail or 'no detail'}. "
-            "Proceeding; behavior may be undefined.",
-            ProtocolMismatchWarning,
-            stacklevel=2,
-        )
-    return Session(channel, stub, reply)
+
+
+def _connect_uds(
+    socket_path: str,
+    token: str = "",
+    *,
+    client_id: str | None = None,
+    protocol_version: str = PROTOCOL_VERSION,
+    timeout: float = 10.0,
+) -> Session:
+    """Connect over a Unix domain socket (``wireframe-parity-5.md``
+    Decision 109). The in-process branch of :func:`attach`: when the
+    session file's ``transport == "in-process"``, the windowed GUI
+    bound its in-process server on this UDS so a sibling script attaches
+    without a TCP hop. Wire format is identical (HTTP/2 over UDS), so
+    the same proto stubs work — only the channel URL changes."""
+    import grpc
+
+    channel = grpc.insecure_channel(f"unix:{socket_path}")
+    return _handshake(
+        channel,
+        token=token,
+        client_id=client_id,
+        protocol_version=protocol_version,
+        timeout=timeout,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -779,7 +826,13 @@ class SessionInfo:
     """One parsed ``~/.griz/sessions/<id>.json`` session/connection
     file (the Jupyter-connection-file pattern; scripting.md). Written
     by the ``mili-viz-server`` binary on startup (phase-6-m2.md
-    Decision 56)."""
+    Decision 56) or by the windowed client's in-process arm
+    (``wireframe-parity-5.md`` Decision 109).
+
+    The TCP arm leaves ``transport``/``socket_path`` empty; the
+    in-process arm sets ``transport == "in-process"`` and points
+    ``socket_path`` at a Unix domain socket the same-host pygriz
+    connects to over ``unix:`` instead of TCP."""
 
     id: str
     pid: int
@@ -792,6 +845,12 @@ class SessionInfo:
     path: pathlib.Path
     #: The file's mtime — "newest" for ``attach()`` is the max of this.
     mtime: float
+    #: Discriminator (Decision 109). ``""`` ⇒ TCP (the Decision-56
+    #: default); ``"in-process"`` ⇒ same-host UDS via ``socket_path``.
+    transport: str = ""
+    #: Absolute filesystem path to the UDS the in-process server bound
+    #: on. Empty for the TCP arm.
+    socket_path: str = ""
 
 
 def _sessions_dir() -> pathlib.Path:
@@ -807,7 +866,10 @@ def _parse_session_file(path: pathlib.Path) -> SessionInfo | None:
     """Parse one session file, returning ``None`` (never raising) for a
     missing/partial/malformed file so a stale or half-written sibling
     can never break ``list_sessions()``/``attach()`` (Decision 56:
-    staleness is handled read-side)."""
+    staleness is handled read-side).
+
+    ``transport``/``socket_path`` are optional (default ``""``) —
+    pre-Decision-109 session files (TCP-only) parse unchanged."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return SessionInfo(
@@ -820,6 +882,8 @@ def _parse_session_file(path: pathlib.Path) -> SessionInfo | None:
             db=str(raw.get("db", "")),
             path=path,
             mtime=path.stat().st_mtime,
+            transport=str(raw.get("transport", "")),
+            socket_path=str(raw.get("socket_path", "")),
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -873,8 +937,14 @@ def attach(
     2. ``id`` → ``<sessions dir>/<id>.json``;
     3. otherwise → the **newest live** local session file.
 
-    Every branch lowers to the one M1 :func:`connect` transport — this
-    is a session-file resolver, not a parallel client."""
+    When the resolved session file's ``transport == "in-process"``
+    (``wireframe-parity-5.md`` Decision 109 — the windowed GUI's
+    same-host UDS arm), this dispatches to a Unix-socket gRPC channel
+    instead of TCP. Every branch still lowers to the one ``Hello``
+    handshake — this is a transport-dispatcher, not a parallel client.
+
+    Explicit ``host``/``port`` always forces the TCP path (an escape
+    hatch for forwarding the GUI's UDS over SSH `-L unix:...` etc.)."""
     if host is not None and port is not None:
         return connect(host, port, token or "", **connect_kwargs)
 
@@ -897,6 +967,21 @@ def attach(
                 "explicit host/port (attach(host=..., port=...))."
             )
         info = live[0]
+
+    if info.transport == "in-process":
+        if not info.socket_path:
+            raise RuntimeError(
+                f"session {info.id!r} declares transport=in-process "
+                "but carries no socket_path — refusing to fall back to "
+                f"host/port (the file would race a real TCP listener). "
+                f"Restart the windowed mili-viz-client to rewrite "
+                f"{info.path}."
+            )
+        return _connect_uds(
+            info.socket_path,
+            token if token is not None else info.token,
+            **connect_kwargs,
+        )
 
     return connect(
         info.host,
