@@ -25,7 +25,7 @@ an early check invalidates everything below it.
 |---|---|---|---|---|
 | 1 | HF login + model fetch | ✅ 2026-05-24 | All training | 5 min |
 | 2 | Train-vs-inference chat-template parity (the big one) | ✅ 2026-05-24 — Path A (rev 8, prompt side) + option (b) (rev 10, response side); see §2 "Resolved via option (b)" | All post-SFT eval | 30 min |
-| 3 | SFTTrainer + `tools` field test | pending `sft/train.jsonl` (Stage 6) | Stage 6 → training | 15 min |
+| 3 | SFTTrainer + `tools` field test | ✅ 2026-05-25 — PASS with `formatting_func`; mandatory (without it TRL 0.12.1 raises `KeyError: 'text'`). Report: `data/posttraining/sft/preflight-3-tokenized-batch.md` | Stage 6 → training | 15 min |
 | 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
 | 5 | `max_length=512` audit | ✅ 2026-05-25 — PASS at max=3341 / gate=4096 (off-GPU, login-safe; m5-sft-pipeline.md rev 14) | Training data integrity | 10 min |
 | 6 | GGUF chat-template baking | pending trained checkpoint | Post-SFT eval | 15 min |
@@ -244,6 +244,22 @@ three sample rows (pick one single-step, one multi-step, one with
 ---
 
 ## 3. SFTTrainer + `tools` field test
+
+**Status (2026-05-25):** ✅ PASS — with `formatting_func`. The `tools`
+array reaches the tokenized training batch through
+`apply_chat_template(messages, tools=tools, …)`; `(1, 3311)` token
+shape matches the preflight #5 distribution; 18 tool declarations
+plus assistant `<start_function_call>` envelope all present in
+`decoded[0]`. Without `formatting_func`, TRL 0.12.1's
+`_prepare_non_packed_dataloader` raises `KeyError: 'text'` (the
+`dataset_text_field` default), so `formatting_func` is **mandatory**.
+Two API drifts from this file's §3 / cluster-setup.md §6 recipe
+surfaced and recorded in the report:
+`SFTConfig.max_length` → `max_seq_length` in trl 0.12.x; and
+`SFTConfig.assistant_only_loss` doesn't exist on trl 0.12.1 (added
+in 0.20+) — decision queued for preflight #4. Report:
+`data/posttraining/sft/preflight-3-tokenized-batch.md`. Runnable
+script: `python/scripts/sft_dump_one_batch.py`.
 
 TRL's default collator may drop non-`messages` columns. If `tools` is
 dropped, the model trains without ever seeing the

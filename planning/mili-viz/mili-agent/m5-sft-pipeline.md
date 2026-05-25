@@ -1,8 +1,10 @@
 # M5 — SFT pipeline (live tracker)
 
 **Status (2026-05-25):** Stages 2, 3, 5, 6, 6.5 cleared; preflight
-#1, #2, #4, **#5** cleared (#2 via Path A rev 8; #4 = config seam
-landed pre-rev 12; #5 cleared off-GPU in rev 14 — see below); rev-9
+#1, #2, **#3**, #4, **#5** cleared (#2 via Path A rev 8; **#3
+cleared on `matrix41` H100 in rev 15 — `formatting_func` is
+mandatory**; #4 = config seam landed pre-rev 12, GPU compat check
+still pending; #5 cleared off-GPU in rev 14 — see below); rev-9
 parser gap resolved via **option (b)** in rev 10 — a client-side
 `content → tool_calls` fallback inside `LlamaCppProvider.generate`,
 gated on `/props` `chat_template_caps.supports_tool_calls = false`.
@@ -289,6 +291,57 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 15)** — **Preflight #3 cleared on `matrix41`
+  H100.** New runbook script `python/scripts/sft_dump_one_batch.py`
+  builds an `SFTTrainer` over `data/posttraining/sft/sft/train.jsonl`,
+  pulls the first batch via `get_train_dataloader()`, and asserts
+  the `<start_function_declaration>` token block reaches the
+  tokenized batch. Result with `formatting_func`: **PASS** — 18 tool
+  declarations + the assistant `<start_function_call>` envelope
+  land verbatim in `decoded[0]`; `input_ids.shape = (1, 3311)`
+  (mid-band per the preflight #5 audit, `max=3341` overall).
+  Result without `formatting_func`: hard failure — TRL 0.12.1's
+  `_prepare_non_packed_dataloader` defaults
+  `dataset_text_field="text"` and raises `KeyError: 'text'`.
+  **Decision: `formatting_func` is mandatory** in the v1
+  `trainer.train()` recipe; pin the
+  `tokenizer.apply_chat_template(messages, tools=tools, …)` form
+  used by the script. Report:
+  `data/posttraining/sft/preflight-3-tokenized-batch.md`.
+
+  **Two API drifts in the `cluster-setup.md` §6 recipe surfaced
+  and recorded (not fixed here):** (a) `SFTConfig(max_length=…)`
+  doesn't exist on TRL 0.12.1 — the 0.12.x spelling is
+  `max_seq_length` (renamed `max_length` in trl 0.13+). (b)
+  `SFTConfig(assistant_only_loss=True)` doesn't exist on TRL
+  0.12.1 either; the kwarg was added in trl 0.20+. The "config
+  seam" that already landed pre-rev 12 is presumably a custom
+  data-collator path that drops non-assistant labels to `-100`
+  server-side — to be verified during preflight #4. **Path
+  forward:** before `trainer.train()` we either (a) lift the
+  trl pin to ≥ 0.20 in the `train` extra and use the native
+  `assistant_only_loss=True`, or (b) keep the custom collator
+  and ship trl 0.12.1. Preflight #4 picks the path.
+
+  Two other small findings in the script:
+  - The §3 recipe's `model=None` shortcut is stale —
+    transformers 4.57's `Trainer.__init__` rejects it with
+    "requires either a `model` or `model_init`". The script
+    loads `google/functiongemma-270m-it` (already cached from
+    preflight #1) on CPU in BF16; ~540MB, no forward/backward
+    run.
+  - Padding-side warning: TRL warns
+    `processing_class.padding_side` is not `"right"`. Cosmetic
+    for a dump-only pass; recipe-side fix is to set
+    `tokenizer.padding_side = "right"` before constructing the
+    trainer.
+
+  **Path forward.** Preflight #4
+  (`assistant_only_loss=True` mask check / TRL version
+  decision) is unblocked. #6 (GGUF chat-template baking) still
+  gates on a trained checkpoint. Stage 8 (pre-experiment gate)
+  is also runnable and should land before `trainer.train()`.
 
 - **2026-05-25 (rev 14)** — **Stage 7 loader + preflight #5
   cleared.** Three landing changes:
