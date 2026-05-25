@@ -23,6 +23,15 @@ Derived 2026-05-18 by reading `crates/mili-viz-client/src/{shell,app,renderer}.r
 against the wireframe README. Phase 5 M1–M4 + M3.5 landed; M5/M6 not
 started.
 
+Refreshed 2026-05-24 against the same files. Phase 5 M5 (remote mode),
+M6 (agent integration polish), M7 (render modes consuming `MVG3`),
+M8 (cut-plane gizmo), and M9 (slice gizmo) have **all** landed since
+the derive date — most "⬜ missing" / "🔴 placeholder" rows below for
+those features have been flipped. The genuinely-still-stub rows
+(empty `Results`/`Time`/`Plot`/`Help` menus, Surfaces, time-indep
+results catalog, `Query`-fed time-history, scripting `venv:`/`attach:`
+indicators, File→Open, picking class-N label) are unchanged.
+
 ---
 
 ## Window shape & layout
@@ -30,14 +39,14 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | L1 default layout (6 regions, egui panel mapping, default sizes) | ✅ done | `build_shell_ui` | status 16 |
-| L2 — AI panel expanded (28 px rail → 340 px dock) | ⬜ missing | right panel is a hard 28 px rail, no expand path | M6 |
+| L2 — AI panel expanded (28 px rail → 340 px dock) | ✅ done | `ai_dock` paints the 340 px expanded panel (header + transcript + composer + Send/Stop + revert) when `state.ai.expanded`; collapsed 28 px rail with expand caret is the default. Capability-gated on `state.ai.cap_agent` so the no-backend composite gate stays byte-stable (VB-001) | status 25 / phase-5-m6 |
 | L3 — focus mode (dock→icon rail, AI/tabs hidden, `Ctrl+\`) | ✅ done | `Ctrl+\` toggles `focus_mode` (`set_focus_mode` also collapses the dock to the R/M/S/P rail); the AI rail + bottom tabs are hidden; a rail glyph or a second `Ctrl+\` restores full L1. Default off → byte-stable | status 23 |
 
 ## Menu bar
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| `Results · Time · Plot · Help` items | 🔴 placeholder | the other 4 are still `ui.menu_button(m, |_| {})` — open but empty | — |
+| `Results · Time · Plot · Help` items | 🔴 placeholder | still `ui.menu_button(m, \|_\| {})` empty bodies (`shell.rs:1234-1236`) — open but empty. No spec yet for what verbs these surface beyond the toolbar/left-dock duplicates the `Control` menu already covers | — |
 | `Control` menu (session-control verbs) | ✅ done | hosts the already-lowered transport / animate-stop / view-reset-fit `UiAction`s (`control_menu_items`), greyed when not attached; griz idiom of menus duplicating the toolbar/`Time` menu. No proto change, no new `UiAction` | status 23 |
 | `Rendering` menu (wireframe/edge toggles) | ✅ done | real three-way `shaded / shaded+edges / wireframe` toggle → `UiAction::SetRenderMode`. The `LineList` edge pipeline carried an illegal non-zero depth bias that aborted startup on a real device — fixed (zero bias + `LessEqual`), now device-verified by `tests/vb004_edge_pipeline_validation.rs` | VB-003 / VB-004 / status 23 |
 | `Picking` menu (enable client-side picking) | ✅ done | `enable picking` toggle → `UiAction::TogglePicking`; ray-cast vs. cached hull | status 23 |
@@ -70,14 +79,14 @@ started.
 | axes gizmo | ✅ done | world X/Y/Z projected through the live camera basis (tracks orbit); static triad only on the headless/not-attached fallback | status 23 |
 | bbox | ✅ done | real per-state world AABB projected through the live camera (12 edges, tracks orbit/pan/zoom + deform); placeholder inset only when no live camera | status 23 |
 | Pick highlight glyph | ✅ done | ring+crosshair over the last ray-cast hit, projected through the live camera (tracks orbit/pan/zoom + deform); only when picking on + a cached hit + a live camera, so the headless/off default is byte-stable | status 23 |
-| Multi-client peer banner | ⬜ missing | — | M6 |
+| Multi-client peer banner | 🟡 partial | status-bar peer count is **live** off `AgentStatus.detail = "peers=N"` when `CAP_AGENT` advertised (`shell.rs:1819-1837`); honest `(1 peer)` default when not. A dedicated viewport peer **banner** with peer-name list is still missing — the count rides the status bar | status 25 / phase-5-m6 Dec 99 |
 | Not-attached card | ✅ done | — | status 16 |
 
 ## AI Assistant panel
 
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
-| Collapsed rail / expand / transcript / composer / status pill / provenance | 🔴 placeholder | renders only the text `"AI"` in a 28 px rail | M6 / client.md |
+| Collapsed rail / expand / transcript / composer / status pill / provenance | ✅ done | full chrome lives in `ai_panel.rs` + `shell.rs::ai_dock`: 28 px collapsed rail with vertical `AI ASSISTANT` label + status word + expand caret; 340 px expanded panel with header, scroll transcript (`User`/`Assistant`/`Tool`/`TurnBoundary`/`Interrupted` rows), composer with `📷 attach frame` toggle, `Send` / `⏹ Stop` swap on in-flight, `↶ revert to here` lowers to typed `SetState`/`Show`/`View(SetCamera)` (never `raw`). Capability-gated; default `MockAgent` lights it up on a vanilla `cargo run` — real LLM backend is a separate Cargo-feature follow-up | status 25 / phase-5-m6 Dec 94–99 |
 
 ## Bottom tabs
 
@@ -105,10 +114,10 @@ started.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | Filled `TriangleList` pass | ✅ done | `renderer.rs:149` | status 15 |
-| Wireframe / element-edge / hidden-line mode | 🟡 partial | `LineList` edge pass via `Mesh::edge_indices`; `Renderer::set_mode` → `Shaded` (default, byte-stable) / `Edges` (hidden-line overlay) / `Wireframe` lands. Remaining gap: `Mesh::edge_indices` derives from the triangle list, so hex/quad/pyramid/wedge per-face triangulation diagonals leak into the wireframe (`bar71.pltA` reads as a triangulated soup). Fixed once `MVG3` element-edge buffer ships: prefer server-supplied `Mesh::element_edges`, fall back to the extractor (byte-stable for older servers) | VB-003 / VB-005 / status 23 / phase-4-m7 Dec 73 / phase-5-m7 Dec 82 |
-| Translucent whole-mesh / X-ray (see internal element structure) | ⬜ missing | needs server-side interior triangles (`MVG3` interior flag) + client `Translucent`/`Xray` render modes; opt-in via the reserved `MaterialVisibility{ material: u32::MAX }` sentinel (no proto change) | phase-4-m7 Dec 74 / phase-5-m7 Dec 81 / 83 |
-| `Rendering → Cut` (cut-plane operator) | ⬜ missing | `Cmd::Cutplane` typed-frozen since `phase-4-m1.md` Δ1; server arm has been a no-op stub at `crates/mili-viz-server/src/lib.rs:528`; closed-hull clip (kept-side ∪ cap), session-state, composes with `show`/state-step | phase-4-m8 Dec 75 / 76 / 77 / phase-5-m8 |
-| `Rendering → Slice` (2-D cross-section operator) | ⬜ missing | griz/VisIt verb sister to cut; reuses M8 cap machinery, emits cap-only; additive `slice_only: bool` on `CutPlane` (the **second** post-M1 proto change after the catalog side-channel) | phase-4-m9 Dec 78 / 79 / 80 / phase-5-m9 |
+| Wireframe / element-edge / hidden-line mode | ✅ done | `Renderer::set_mode` covers `Shaded` (default, byte-stable) / `Edges` (hidden-line overlay) / `Wireframe` / `FeatureEdges` plus the M7 `Translucent`/`Xray` arms. VB-005 face-diagonal regression is closed: the server promoted `MVG3` to the only production layout so the per-element edge buffer ships on every blob; the client prefers `Mesh::element_edges` and only falls back to the triangle-extractor for un-upgraded servers | VB-003 / VB-005 / status 23 / phase-4-m7 Dec 73 / phase-5-m7 Dec 82 |
+| Translucent whole-mesh / X-ray (see internal element structure) | ✅ done | `RenderMode::{Translucent, Xray}` arms shipped: alpha-blended fill pipeline with depth-test on / depth-write off; `Xray` additionally overlays element-edges. `Interior` is a separate `ShellState::interior_on` toggle lowered to `Cmd::Material` with the reserved `material: Some(u32::MAX)` sentinel so the server re-emits an `MVG3` blob carrying interior triangles. All compose with cut/slice | status 25 / phase-4-m7 Dec 74 / phase-5-m7 Dec 81 / 83 |
+| `Rendering → Cut` (cut-plane operator) | ✅ done | `egui`-overlay gizmo (origin disc + normal arrow as additional egui shapes, no new `wgpu` pipeline — M3 additive seam untouched per VB-001), 30 Hz wall-clock-throttled preview + un-throttled drag-end commit, Rendering → Cut menu (show-gizmo toggle, clear-cut emits zero-normal `Cmd::Cutplane`), `Preferences → Interactive clip` low-bandwidth suppress (persisted via `tweaks.json`), status-bar `cut: o=(...) n=(...)` readout. Server arm at `crates/mili-viz-server/src/lib.rs:528` is now real (rayon per-element Sutherland–Hodgman clip; cap triangles tagged `tri_material == u32::MAX - 1`) | status 24 / phase-4-m8 / phase-5-m8 |
+| `Rendering → Slice` (2-D cross-section operator) | ✅ done | thin sibling of Cut: shared gizmo machinery with distinct cyan colour, shared `CutThrottle` (one drag at a time), independent `ShellState::slice_plane` composing with `cut_plane`, Rendering → Slice menu (show-gizmo / clear-slice), distinct `slice: o=(...) n=(...)` status-bar readout. `slice_cmd` lowers to `Cmd::Cutplane { slice_only: Some(true) }` (the one additive post-M1 proto field). Slice always opaque by default — translucency is the `RenderMode` lever | status 24 / phase-4-m9 / phase-5-m9 |
 
 ## Cross-cutting gaps
 
@@ -116,47 +125,89 @@ started.
 | ---- | ------ | ----- | --- |
 | File → Open / `rfd` picker | ⏸️ deferred | own milestone (maintainer decision); load via CLI `-i` / Layer-0 `load` only | status 21 |
 | Picking (client-side from cached `GeometryRef`) | 🟡 partial | ray-cast vs. cached hull → live status-bar readout (node/tri/scalar) **+ viewport highlight glyph** (ring+crosshair over the cached hit, projected through the live camera so it tracks orbit/pan/zoom + deform; off-by-default/no-camera → no glyph, byte-stable). Remaining: the frozen proto has no label catalog, so still no `class N` mapping (design-first, deferred) | status 23 |
-| Agent / multi-client session states | ⬜ missing | thinking/running/interrupted/peer | M6 |
-| Remote mode (gRPC+Flight wired to `connect`/`attach`) | ⏸️ deferred | server transport done (status 11); client wiring is Phase 5 M5 | status 22 |
+| Agent / multi-client session states | ✅ done | `AgentStatus::{Thinking, Idle, Interrupted, Error}` ingested by `AiPanelState` → drives the panel status pill + ⏹ Stop swap; `Interrupted` rows are typed transcript entries; peer count rides `Status.detail = "peers=N"` (see "Multi-client peer banner") | status 25 / phase-5-m6 |
+| Remote mode (gRPC+Flight wired to `connect`/`attach`) | ✅ done | `Session::connect_tcp` + `Session::attach` over the Phase 4 M6 wire — one tuned `tonic::Channel` cloned for `MiliVizClient` + `FlightServiceClient`, Flight `DoGet` streams the byte-identical M2/M3 blob; CLI `-r`/`--remote <host:port>` + `--attach [<id>]` (mutually exclusive); `--attach` reuses the same `~/.griz/sessions/<id>.json` resolver pygriz uses (newest-live pid liveness via `kill(pid, 0)`). HPC-latency tuning: `tcp_nodelay`, TCP + HTTP/2 keep-alives, 10 s `connect_timeout` | status 22 / phase-5-m5 |
 
 ---
 
-## MVP cut (no AI, no remote)
+## What's still left (post Phase 5 M5/M6/M7/M8/M9)
 
-The maintainer-scoped MVP excludes the AI panel (M6) and remote mode
-(Phase 5 M5). The parity gaps that remain in-scope for MVP, roughly by
-leverage:
+With every Phase 5 milestone landed, the remaining stub/placeholder
+inventory is **substantially smaller** than the May-18 MVP cut. By
+leverage, ordered "ship-blocking first":
 
-1. **Menu bar** — 🟡 `Rendering` (VB-003), `Picking`, and `Control`
-   (session-control verbs, reusing the already-lowered
-   transport/animate/view `UiAction`s) are now wired; still to do:
-   the View/Preferences host.
-2. ✅ **Wireframe / element-edge render mode** (VB-003) + its
-   `Rendering` toggle — done.
-3. ✅ **Materials enable/disable affordance** (server side already
-   done, status 8 — GUI only) — done.
-4. 🟡 **Picking** + live status-bar readout — ray-cast, readout
-   **and the viewport highlight glyph** landed; only the
-   label-catalog `class N` mapping remains (needs a non-frozen-proto
-   catalog path — design-first, deferred).
+1. **`Results` / `Time` / `Plot` / `Help` empty menus**
+   (`shell.rs:1234-1236`) — four `|_| {}` bodies. Cheapest win is
+   either (a) populate them with verbs the wireframe spec already
+   names, or (b) drop them entirely and let `Control` /
+   `Rendering` / `Picking` / `Preferences` carry the menu bar. No
+   spec exists for (a) — needs design first.
+2. **Surfaces section** (`shell.rs:1588-1592`) — literal
+   `(surfaces: M4+)` string. No surfaces data model yet; needs a
+   server-side surface catalog (sibling to the M4 primal/derived
+   catalog side-channel) **and** a UI affordance to toggle / hide.
+   Substantial work — likely its own milestone.
+3. **Time-indep results catalog** (`shell.rs:1499-1507`) — honest
+   `(time-indep: no catalog path yet)` label. Blocked on a `mili-rs`
+   core TI-results accessor + a `mili` Python oracle to gate parity
+   (`TI_PARAM` is a junk-drawer, needs a TI-name grammar +
+   TI-type-aware `ParamTable`). The reserved `T` tag in the catalog
+   blob is the zero-proto-change forward seam. Substantial — `mili-rs`
+   core first.
+4. **Time-history plot fed by `Query` per-element series**
+   (`shell.rs:1735-1762`) — currently the `ResultState` min/max
+   envelope. The forward path is `Query`-over-state-range; the server
+   `Query` RPC is a shape-only stub. Needs server `Query` arm wired,
+   then client per-element series.
+5. **Scripting tab — managed venv + attach-into-*this*-GUI**
+   (`shell.rs:1012`, the `venv: starting · attach: launch` line).
+   Runner works; the `pip install`ed managed venv and
+   `attach()`-into-this-GUI (the latter requires the in-process
+   client to write a session file — a small but design-first
+   change) remain. Self-contained UX improvement.
+6. **Picking class-N label** — picking ray-cast, status-bar readout,
+   and viewport highlight glyph all landed; only the `class N`
+   mapping is missing (frozen proto has no label catalog, so this
+   needs a new catalog side-channel tag or a `Query` round-trip).
+   Small UX gain; design-first.
+7. **Bottom-tabs whole-region hide** — `▾ hide` collapses the body
+   but the 22 px strip persists. Adding a `Preferences → Show
+   bottom tabs` toggle is a one-line client change. Trivial.
+8. **File → Open / `rfd` picker** — intentionally deferred
+   (maintainer decision, own milestone). Lift if needed.
+9. **VB-006 (open bug)** — `Theme` switch is invisible in
+   single-frame headless renders. `egui::Context::set_visuals`
+   takes effect on the *next* `begin_pass`, but `render_shell_to_image`
+   runs a single `run_ui`. Fix: apply visuals **before** `run_ui` in
+   the headless path. See `bug-tracker.md`. Small.
+10. **Phase 6 `pygriz` M4 / M5 / M6** — out of the client crate
+    proper, but the scripting tab's "attach into this GUI" and the
+    AI panel's future `Query`-driven analysis depend on Phase 6 M5
+    (`query`/`to_dataframe` over Flight) and Phase 6 M4 (live
+    subscribe → `@s.on(...)` callbacks). Independent track.
+
+## MVP cut (historical — superseded by the section above)
+
+The maintainer-scoped MVP excluded the AI panel (M6) and remote mode
+(Phase 5 M5). All MVP rows are now ✅ done; this section is preserved
+for the audit trail.
+
+1. ✅ **Menu bar** — `Control` / `Rendering` / `Picking` /
+   `Preferences` wired; `Results` / `Time` / `Plot` / `Help`
+   intentional empty stubs.
+2. ✅ **Wireframe / element-edge render mode** (VB-003) — done; VB-005
+   diagonals closed by always-on `MVG3`.
+3. ✅ **Materials enable/disable affordance** — done.
+4. 🟡 **Picking** — ray-cast, status-bar readout, and viewport
+   highlight glyph landed; only the `class N` label mapping remains.
 5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
-6. **File → Open** (lift the deferral if MVP needs it).
-7. ✅ **L3 focus mode + theme/tweaks surface** — the `Preferences`
-   menu + Theme + Left-dock-collapse, the R/M/S/P icon rail, full L3
-   focus mode (`Ctrl+\` → dock rail + AI/tabs hidden), and
-   cross-session tweak persistence (the `serde` `PersistedTweaks`
-   config, replacing the `app.rs` hook) all landed.
-8. 🟡 **Primal / time-indep result catalog** — `primal` landed: the
-   maintainer-approved Flight catalog side-channel (`phase-5-m4.md`
-   Decision 67, no `.proto` change) enumerates `queriable_svars` into
-   a real, selectable left-dock list. `time-indep` remains a labelled
-   placeholder (mili-rs has no TI accessor — follow-up).
-9. 🟡 **Wire the scripting tab** — done as a `launch()`-based
-   `pygriz` subprocess runner (enabled editor + Run + streamed
-   output + venv/attach indicator). Remaining: a `pip install`ed
-   managed venv and `attach()`-into-*this*-GUI (the latter needs
-   Phase 5 M5 remote mode; the in-process client has no session
-   file).
+6. ⏸️ **File → Open** — deferred.
+7. ✅ **L3 focus mode + theme/tweaks surface** — done.
+8. 🟡 **Primal / time-indep result catalog** — primal/derived done;
+   time-indep remains a labelled placeholder (mili-rs TI accessor +
+   oracle blocker).
+9. 🟡 **Scripting tab** — runner enabled; managed venv + attach-into-
+   this-GUI remain.
 
 ## Update protocol
 

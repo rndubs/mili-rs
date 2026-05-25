@@ -1618,13 +1618,68 @@ fn bottom_tabs(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
         });
         if let Some(tab) = state.bottom_tab {
             ui.separator();
-            match tab {
-                BottomTab::CommandLine => cmdline_tab(ui, state, actions),
-                BottomTab::Scripting => scripting_tab(ui, state, actions),
-                BottomTab::TimeHistory => time_history_tab(ui, state),
-            }
+            tab_body(ui, state, actions, tab);
         }
     });
+}
+
+/// Unified tab body shape (VB-007 fix): every tab is a fixed-height
+/// **body** chunk that fills `available_height - INPUT_ROW_H`, plus a
+/// fixed 22 px **input row** at the bottom. Both chunks are allocated
+/// via [`egui::Ui::allocate_ui_with_layout`] so the inner layout
+/// **cannot push the panel rect** — switching tabs no longer drifts
+/// the panel top edge up/down because every tab presents the same
+/// inherent vertical demand to the resizable panel's
+/// `set_min_height(max_rect().height())` invariant (egui-0.34.2
+/// `containers/panel.rs:680`). The previous per-tab shapes diverged
+/// (`cmdline` ≈ 22 px min, `scripting` ≈ 158 px min, `time_history`
+/// ≈ Plot min) which let egui's stored `PanelState` rect ratchet up
+/// or down on switch.
+const INPUT_ROW_H: f32 = 22.0;
+
+fn tab_body(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>, tab: BottomTab) {
+    let avail = ui.available_size();
+    // VB-007: the parent placer inserts `item_spacing.y` between the
+    // body and the input-row chunks. If we don't subtract it from
+    // `body_h`, the cumulative claimed height is `body + spacing +
+    // row = avail + spacing`, which overshoots the panel's
+    // `set_min_height(max_rect.height())` invariant and the inner
+    // response rect grows by `spacing` per paint. Since the next
+    // frame reads the inflated `PanelState.rect.height` as the new
+    // panel size, this ratchets the panel by ~3 px per paint —
+    // visible as the cross-tab drift the bug report describes.
+    let gap_y = ui.spacing().item_spacing.y;
+    let row_h = INPUT_ROW_H.min(avail.y);
+    let body_h = (avail.y - row_h - gap_y).max(0.0);
+    let body_size = egui::vec2(avail.x, body_h);
+    let row_size = egui::vec2(avail.x, row_h);
+
+    ui.allocate_ui_with_layout(
+        body_size,
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_min_size(body_size);
+            ui.set_max_size(body_size);
+            match tab {
+                BottomTab::CommandLine => cmdline_body(ui, state),
+                BottomTab::Scripting => scripting_body(ui, state),
+                BottomTab::TimeHistory => time_history_body(ui, state),
+            }
+        },
+    );
+    ui.allocate_ui_with_layout(
+        row_size,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(row_size);
+            ui.set_max_size(row_size);
+            match tab {
+                BottomTab::CommandLine => cmdline_input(ui, state, actions),
+                BottomTab::Scripting => scripting_input(ui, state, actions),
+                BottomTab::TimeHistory => time_history_input(ui, state),
+            }
+        },
+    );
 }
 
 fn tab_button(
@@ -1640,21 +1695,20 @@ fn tab_button(
     }
 }
 
-/// Layer-0 command line (`phase-5-m3.5.md` Decision 48): green
-/// `griz>` prompt, echoed commands, dim responses. The input lowers
-/// verbatim to `Command{ raw }`; nothing is re-parsed client-side.
-fn cmdline_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+/// Layer-0 command-line body (`phase-5-m3.5.md` Decision 48): green
+/// `griz>` prompt, echoed commands, dim responses. The body is the
+/// transcript [`egui::ScrollArea`]; the input row hosts the
+/// `griz>` prompt + `TextEdit::singleline`. Both live inside the
+/// unified [`tab_body`] allocation so the panel cannot drift on
+/// switch (VB-007).
+fn cmdline_body(ui: &mut egui::Ui, state: &ShellState) {
     let green = egui::Color32::from_rgb(120, 200, 120);
     let dim = egui::Color32::from_gray(150);
     let danger = egui::Color32::from_rgb(220, 110, 100);
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
-
-    let row_h = 22.0;
-    let scroll_h = (ui.available_height() - row_h).max(0.0);
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .max_height(scroll_h)
         .show(ui, |ui| {
             for line in &state.transcript {
                 let (txt, col) = match line.kind {
@@ -1665,78 +1719,90 @@ fn cmdline_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
                 ui.label(egui::RichText::new(txt).color(col).font(mono.clone()));
             }
         });
-
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("griz>").color(green).font(mono.clone()));
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut state.cmdline_input)
-                .font(mono.clone())
-                .desired_width(f32::INFINITY)
-                .hint_text("raw griz / grizinit line"),
-        );
-        let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if submit {
-            if let Some(a) = state.submit_command() {
-                actions.push(a);
-            }
-            resp.request_focus();
-        }
-    });
 }
 
-/// Scripting runner (`client.md` decision 3, `phase-6-m2.md`): a
-/// monospace editor, a Run button, a streamed output pane, and the
-/// `venv: … · attach: …` indicator. Run emits [`UiAction::RunScript`];
-/// the windowed app spawns a managed `pygriz` subprocess and streams
-/// its output back. The subprocess path is windowed-only — the
-/// gating test exercises the pure [`ShellState`] logic, not the child
-/// (not headlessly verifiable in CI).
-fn scripting_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+fn cmdline_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let green = egui::Color32::from_rgb(120, 200, 120);
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
-
-    ui.add(
-        egui::TextEdit::multiline(&mut state.script)
-            .code_editor()
+    ui.label(egui::RichText::new("griz>").color(green).font(mono.clone()));
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut state.cmdline_input)
             .font(mono.clone())
-            .desired_rows(4)
-            .desired_width(f32::INFINITY),
+            .desired_width(f32::INFINITY)
+            .hint_text("raw griz / grizinit line"),
     );
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!state.script_running, egui::Button::new("▶ Run"))
-            .clicked()
-        {
-            if let Some(a) = state.run_script() {
-                actions.push(a);
-            }
+    let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if submit {
+        if let Some(a) = state.submit_command() {
+            actions.push(a);
         }
-        if state.script_running {
-            ui.spinner();
-            ui.weak("running…");
-        }
-    });
+        resp.request_focus();
+    }
+}
 
-    let foot = 20.0;
-    let scroll_h = (ui.available_height() - foot).max(40.0);
+/// Scripting runner (`client.md` decision 3, `phase-6-m2.md`).
+/// Under the unified [`tab_body`] shape (VB-007 fix), the body is a
+/// single [`egui::ScrollArea`] hosting **editor → separator →
+/// output**, and the input row at the bottom carries the `Run`
+/// button, spinner, and `venv: … · attach: …` status. The fix
+/// sketch in `bug-tracker.md` VB-007 calls out moving the
+/// `desired_rows(4)` `TextEdit` into the body's ScrollArea — that
+/// is what removes the ~158 px inherent vertical demand that used
+/// to dominate over the `command line` tab's ~22 px demand and let
+/// egui's panel rect drift on switch. The subprocess path is
+/// windowed-only — the gating test exercises the pure
+/// [`ShellState`] logic, not the child (not headlessly verifiable
+/// in CI).
+fn scripting_body(ui: &mut egui::Ui, state: &mut ShellState) {
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .max_height(scroll_h)
         .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut state.script)
+                    .code_editor()
+                    .font(mono.clone())
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.separator();
             if state.script_output.is_empty() {
                 ui.weak("(no output)");
             } else {
                 ui.label(egui::RichText::new(&state.script_output).font(mono.clone()));
             }
         });
-    ui.weak(&state.script_status);
+}
+
+fn scripting_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    if ui
+        .add_enabled(!state.script_running, egui::Button::new("▶ Run"))
+        .clicked()
+    {
+        if let Some(a) = state.run_script() {
+            actions.push(a);
+        }
+    }
+    if state.script_running {
+        ui.spinner();
+    }
+    ui.with_layout(
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.weak(&state.script_status);
+        },
+    );
 }
 
 /// Time-history plot (`phase-5-m3.5.md` Decision 50): an `egui_plot`
 /// host of the active result's data-range envelope vs. simulation
 /// time, accumulated from the broadcast `Subscribe`/`ResultState`
 /// stream. The `Query`-fed per-element series is the forward path.
-fn time_history_tab(ui: &mut egui::Ui, state: &ShellState) {
+/// The body fills the unified [`tab_body`] allocation; the input
+/// row is intentionally empty so all three tabs present the same
+/// inherent vertical demand to the resizable panel (VB-007).
+fn time_history_body(ui: &mut egui::Ui, state: &ShellState) {
     if state.time_history.is_empty() {
         ui.weak("no series yet — select a result and step through states");
         return;
@@ -1759,6 +1825,10 @@ fn time_history_tab(ui: &mut egui::Ui, state: &ShellState) {
                     .color(egui::Color32::from_rgb(110, 160, 220)),
             );
         });
+}
+
+fn time_history_input(_ui: &mut egui::Ui, _state: &ShellState) {
+    // Intentionally empty — see [`tab_body`] / VB-007.
 }
 
 /// Spec status-bar protocol cell. The frozen contract's identity is

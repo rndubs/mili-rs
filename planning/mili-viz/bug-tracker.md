@@ -20,6 +20,60 @@ Conventions:
 
 ---
 
+## VB-007 — bottom-tabs panel drifts vertically on tab switch
+
+- **Status:** **fixed** · **commit** branch:refine-griz-client-features
+- **Reported:** 2026-05-24 (maintainer feedback while exercising the
+  windowed client)
+- **Symptom:** With the bottom tabs panel open, clicking between the
+  `command line` ("griz native") and `scripting` ("python chat")
+  tab buttons made the panel's **top edge** drift: every switch
+  walked the seam by a few px in the direction of the new tab's
+  inherent vertical demand. The user's resized panel height was
+  not preserved across tab switches.
+- **Root cause:** two layered defects in
+  `crates/mili-viz-client/src/shell.rs`. The proximate cause was
+  that the three tab body functions had divergent inherent
+  vertical demand at the inner layout (≈22 px for `command line`,
+  ≈158 px for `scripting`, Plot-min for `time-history`), and
+  `egui::Panel::bottom("tabs").resizable(true)`
+  (`shell.rs:1601-1606`) honors inner content min-height by
+  bumping the stored `PanelState.rect` each frame — so each switch
+  ratcheted the panel toward the new tab's demand. The deeper
+  cause exposed by the first cut at a fix (a unified
+  `tab_body(body, input_row)` shape) was that the parent placer
+  inserts `Spacing::item_spacing.y` (= 3 px) between the body and
+  input-row chunks; if `body_h` isn't pre-decremented by that gap,
+  the total claimed height is `body + 3 + row = avail + 3`, which
+  again ratchets the panel by 3 px per paint. The drift is the
+  sum of these effects.
+- **Fix (landed):** replaced `cmdline_tab` / `scripting_tab` /
+  `time_history_tab` with a unified [`tab_body`] shape: a
+  fixed-size body chunk (`avail.y - INPUT_ROW_H - item_spacing.y`)
+  + a fixed 22 px input row, both allocated via
+  `egui::Ui::allocate_ui_with_layout` with strict
+  `set_min_size` / `set_max_size`. Per-tab body/input fns
+  (`cmdline_body`/`cmdline_input` + `scripting_body`/
+  `scripting_input` + `time_history_body`/`time_history_input`)
+  drop into those chunks. Scripting's `TextEdit::multiline` now
+  lives **inside the body's `ScrollArea`** (as the VB-007 fix
+  sketch called for), and its `Run` button + spinner + status
+  string moved to the input row — both visually conventional and
+  structurally bound. The `item_spacing.y` accounting is the
+  load-bearing line:
+  `body_h = (avail.y - row_h - gap_y).max(0.0)`.
+- **Coverage:** new headless regression test
+  `crates/mili-viz-client/tests/m3_5_bottom_tabs.rs::tab_switch_does_not_drift_panel_height`
+  paints `CommandLine → Scripting → TimeHistory → CommandLine`
+  with the panel id constant and asserts `egui::PanelState::load`
+  rect height stays the same (≤ 0.5 px) across switches.
+  Pre-fix this would have walked by ≈18 px; post-fix it locks at
+  200 ± 0 px. Live verification: four snapshots taken with each
+  tab open (`/tmp/vb007-{1..4}-*.png` during the verification
+  session) showed the panel strip at the same y in every shot.
+
+---
+
 ## VB-006 — `Theme` switch is invisible in single-frame headless renders
 
 - **Status:** **open** · **commit** branch:claude/fervent-lamport-3VUck
