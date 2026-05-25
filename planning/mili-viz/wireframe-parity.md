@@ -176,11 +176,13 @@ leverage, ordered "ship-blocking first":
    its runtime body-only collapse.
 8. **File → Open / `rfd` picker** — intentionally deferred
    (maintainer decision, own milestone). Lift if needed.
-9. **VB-006 (open bug)** — `Theme` switch is invisible in
-   single-frame headless renders. `egui::Context::set_visuals`
-   takes effect on the *next* `begin_pass`, but `render_shell_to_image`
-   runs a single `run_ui`. Fix: apply visuals **before** `run_ui` in
-   the headless path. See `bug-tracker.md`. Small.
+9. **VB-006** — ✅ fixed. `EguiPaint::set_visuals` pre-applies the
+   theme's visuals on the paint context before `run_ui`, and
+   `render_shell_to_image` calls it from `state.theme.visuals()`
+   ahead of `egui.paint`. The menu-chrome relight assertion in
+   both `preferences_tweaks::composite_render` and
+   `tweaks_persistence::composite_render` is re-enabled, sampling
+   mean grey-chrome luminance in the top 26 px menu-bar band.
 10. **Phase 6 `pygriz` M4 / M5 / M6** — out of the client crate
     proper, but the scripting tab's "attach into this GUI" and the
     AI panel's future `Query`-driven analysis depend on Phase 6 M5

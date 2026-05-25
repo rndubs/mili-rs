@@ -76,35 +76,38 @@ Conventions:
 
 ## VB-006 — `Theme` switch is invisible in single-frame headless renders
 
-- **Status:** **open** · **commit** branch:claude/fervent-lamport-3VUck
-  (regression test surfaced, fix deferred)
-- **Symptom:** `preferences_tweaks::composite_render` was the
-  always-skip-on-absent gate that "light theme relights the menu
-  chrome". With lavapipe live (the SessionStart hook now installs
-  `mesa-vulkan-drivers`) the test actually runs — and
-  `render_shell_to_image` produces **byte-identical** output for
+- **Status:** **fixed** — fix option (a) landed:
+  `EguiPaint::set_visuals` pre-applies the theme's visuals on the
+  paint context before `run_ui` enters the closure, and
+  `render_shell_to_image` now calls it from
+  `state.theme.visuals()` ahead of `egui.paint`. The in-`run_ui`
+  `ui.ctx().set_visuals(...)` line in `build_shell_ui` remains —
+  it's the windowed app's natural re-apply seam, and now redundant
+  but harmless in the headless path.
+- **Symptom (pre-fix):** `preferences_tweaks::composite_render` was
+  the always-skip-on-absent gate that "light theme relights the
+  menu chrome". With lavapipe live (the SessionStart hook now
+  installs `mesa-vulkan-drivers`) the test actually runs — and
+  `render_shell_to_image` produced **byte-identical** output for
   `Theme::Dark` and `Theme::Light` (verified: 0 differing bytes out
   of 614400 in a 480×320 RGBA8 frame).
 - **Root cause:** `build_shell_ui` calls
-  `ui.ctx().set_visuals(state.theme.visuals())` (`shell.rs:1047`)
-  *inside* the same `Context::run_ui` invocation that already
-  captured the previous frame's visuals. `egui::Context::set_visuals`
-  only takes effect on the **next** frame's `begin_pass`, so a
-  one-shot headless paint (`egui_layer::EguiPaint::paint` is a
-  single `run_ui`/`tessellate`/render cycle) silently ignores the
-  switch. In the windowed app the next redraw picks the new theme
-  up, so the bug is invisible at runtime.
-- **Fix sketch:** either (a) call `set_visuals` on the `EguiPaint`'s
-  context **before** `run_ui` enters the closure — e.g. add a
-  `EguiPaint::set_theme(visuals)` and have `render_shell_to_image`
-  apply it from the `ShellState` before calling `paint`; or (b) run
-  two passes in `render_shell_to_image` (set_visuals on pass 1, paint
-  on pass 2, discard pass 1's pixels). (a) is cheaper and explicit.
-- **Coverage:** the brittle menu-chrome assertion in
-  `preferences_tweaks::composite_render` is temporarily disabled
-  with an inline `TODO(VB-006)` so the rest of the test (mesh
-  visibility, action emission) keeps running; re-enable it once the
-  fix lands and the assertion actually exercises the relight.
+  `ui.ctx().set_visuals(state.theme.visuals())` *inside* the same
+  `Context::run_ui` invocation that already captured the previous
+  frame's visuals. `egui::Context::set_visuals` only takes effect on
+  the **next** frame's `begin_pass`, so a one-shot headless paint
+  (`egui_layer::EguiPaint::paint` is a single
+  `run_ui`/`tessellate`/render cycle) silently ignored the switch.
+  In the windowed app the next redraw picks the new theme up, so
+  the bug is invisible at runtime.
+- **Coverage:** the menu-chrome assertion in
+  `preferences_tweaks::composite_render` and
+  `tweaks_persistence::composite_render` is **re-enabled** — both
+  sample mean grey-chrome luminance in the top 26 px band
+  (`tests/common/mod.rs::mean_chrome_luminance_top`) and assert
+  `light - dark > 100`. The single-pixel sample would have been
+  brittle (text glyphs land at unpredictable offsets across
+  egui versions); a banded mean is robust.
 
 ---
 

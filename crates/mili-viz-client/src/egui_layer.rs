@@ -42,6 +42,20 @@ impl EguiPaint {
         self.ctx.clone()
     }
 
+    /// Apply `visuals` to the context **before** the next [`paint`]'s
+    /// `run_ui`, so a single-frame headless render uses them
+    /// (`bug-tracker.md` VB-006). `egui::Context::set_visuals` only
+    /// takes effect on the next `begin_pass`; calling it from *inside*
+    /// `run_ui` (as `build_shell_ui` does for the windowed app's
+    /// multi-frame loop) is silently a no-op for the one-shot
+    /// [`crate::render_shell_to_image`] path. Pre-setting here is the
+    /// cheap fix (option (a) in the bug entry).
+    ///
+    /// [`paint`]: Self::paint
+    pub fn set_visuals(&self, visuals: egui::Visuals) {
+        self.ctx.set_visuals(visuals);
+    }
+
     /// Run `run_ui` against `raw_input` and composite the result onto
     /// `view` (load, no clear, no depth). `screen` carries the
     /// physical target size + DPI scale.

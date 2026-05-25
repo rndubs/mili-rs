@@ -264,10 +264,18 @@ async fn composite_render() {
     let lpx = render_shell_to_image(w, h, &camera, &mesh, None, &mut light)
         .expect("adapter was present for render (a)");
     common::assert_mesh_visible(&lpx, 20, "light: viewport centre should still be the mesh");
-    // TODO(VB-006): the menu-chrome relight assertion is disabled —
-    // `Theme` switching is a no-op in single-frame headless renders
-    // (`egui::Context::set_visuals` only takes effect on the next
-    // frame's `begin_pass`, but `render_shell_to_image` runs one).
-    // See `planning/mili-viz/bug-tracker.md` VB-006.
-    let _ = (dpx, lpx);
+    // VB-006: the menu-chrome relight assertion (re-enabled). Pre-fix,
+    // a JSON-roundtripped Light config still composed byte-identical to
+    // Dark because the in-`run_ui` `set_visuals` queued for the next
+    // frame that never happens. The fix pre-applies visuals on the
+    // `EguiPaint` context before `run_ui` (see
+    // `crate::render_shell_to_image`).
+    let dark_lum = common::mean_chrome_luminance_top(&dpx, w, 26);
+    let light_lum = common::mean_chrome_luminance_top(&lpx, w, 26);
+    assert!(
+        light_lum - dark_lum > 100.0,
+        "VB-006: roundtripped Light config should relight menu chrome \
+         (dark mean luminance {dark_lum:.1}, light mean luminance \
+         {light_lum:.1} — expected light - dark > 100)"
+    );
 }

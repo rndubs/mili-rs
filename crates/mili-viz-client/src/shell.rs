@@ -301,7 +301,13 @@ impl Theme {
             Theme::Light => "light",
         }
     }
-    fn visuals(self) -> egui::Visuals {
+    /// The egui visuals this theme maps to. `pub(crate)` because
+    /// [`crate::render_shell_to_image`] pre-applies them on the
+    /// [`crate::egui_layer::EguiPaint`] context before the headless
+    /// `run_ui` (`bug-tracker.md` VB-006 — single-frame headless renders
+    /// can't pick up an in-`run_ui` `set_visuals` queued for the next
+    /// frame).
+    pub(crate) fn visuals(self) -> egui::Visuals {
         match self {
             Theme::Dark => egui::Visuals::dark(),
             Theme::Light => egui::Visuals::light(),

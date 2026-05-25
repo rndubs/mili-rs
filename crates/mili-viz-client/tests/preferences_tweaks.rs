@@ -183,16 +183,21 @@ async fn composite_render() {
     let lpx = render_shell_to_image(w, h, &camera, &mesh, None, &mut light)
         .expect("adapter was present for render (a)");
     common::assert_mesh_visible(&lpx, 20, "light: viewport centre should still be the mesh");
-    // TODO(VB-006): the menu-chrome relight assertion is disabled
-    // because `Theme` switching is a no-op in single-frame headless
-    // renders — `egui::Context::set_visuals` only takes effect on the
-    // *next* frame's `begin_pass`, but `render_shell_to_image` runs
-    // exactly one `run_ui`/tessellate/paint pass. Verified: Dark and
-    // Light compose to byte-identical frames. See
-    // `planning/mili-viz/bug-tracker.md` VB-006 for the fix sketch.
-    // Until VB-006 lands the right invariant for this test is the
-    // mesh-visibility check above (it actually exercises the
-    // composite seam end-to-end); keep the dark/light frames around
-    // so the silenced channel is obvious when re-enabling.
-    let _ = (dpx, lpx);
+    // VB-006: the menu-chrome relight assertion (re-enabled). Pre-fix,
+    // Dark and Light composed to byte-identical frames because
+    // `set_visuals` only takes effect on the next `begin_pass` and the
+    // headless path runs exactly one. The fix pre-applies visuals on
+    // the `EguiPaint` context before `run_ui` (see
+    // `crate::render_shell_to_image`). Sampling mean grey-chrome
+    // luminance in the top 26 px band (the menu bar) discriminates
+    // dark (~27) vs light (~240) without depending on a particular
+    // pixel landing on text.
+    let dark_lum = common::mean_chrome_luminance_top(&dpx, w, 26);
+    let light_lum = common::mean_chrome_luminance_top(&lpx, w, 26);
+    assert!(
+        light_lum - dark_lum > 100.0,
+        "VB-006: menu-chrome should be visibly relit when Theme switches \
+         (dark mean luminance {dark_lum:.1}, light mean luminance \
+         {light_lum:.1} — expected light - dark > 100)"
+    );
 }
