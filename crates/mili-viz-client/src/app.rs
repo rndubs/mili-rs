@@ -26,7 +26,10 @@ use crate::egui_layer::EguiPaint;
 use crate::mesh::Mesh;
 use crate::renderer::{Renderer, OFFSCREEN_FORMAT};
 use crate::session::Session;
-use crate::shell::{build_shell_ui, CutThrottle, ResultInfo, SessionPhase, ShellState, UiAction};
+use crate::shell::{
+    build_shell_ui, CutThrottle, ElementSeriesSample, ResultInfo, SessionPhase, ShellState,
+    UiAction,
+};
 use crate::snapshot;
 
 struct WindowState {
@@ -659,6 +662,76 @@ impl App {
                 // Phase 5 M6 Decision 98 — barge-in. Empty turn_id is
                 // "current turn" per the frozen-proto convention.
                 let _ = self.rt.block_on(self.session.interrupt(turn_id.clone()));
+                None
+            }
+            UiAction::QueryElementSeries {
+                label,
+                class_name,
+                label_id,
+                svar,
+                component,
+            } => {
+                // `wireframe-parity.md` "What's still left" #4 — lower
+                // the +series row to the frozen `Query` RPC. We ask
+                // for every state the run advertises so the line
+                // covers the full simulation; an empty `states` would
+                // collapse to "current cursor only" (the server's
+                // default), which is not what a time-history plot
+                // wants. Without a run loaded the placeholder series
+                // is dropped under the user and the input row is
+                // already empty — no spurious legend entries.
+                let Some(loaded) = self.shell.loaded.as_ref() else {
+                    self.shell.drop_element_series(label);
+                    return;
+                };
+                let n = loaded.num_states.max(1);
+                let req = pb::QueryRequest {
+                    result: svar.clone(),
+                    class_name: class_name.clone(),
+                    labels: vec![*label_id],
+                    states: (1..=n).collect(),
+                    component: component.clone(),
+                };
+                let times = loaded.state_times.clone();
+                let reply = match self.rt.block_on(self.session.query(req)) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        self.shell.drop_element_series(label);
+                        return;
+                    }
+                };
+                if !reply.ok {
+                    self.shell.drop_element_series(label);
+                    return;
+                }
+                let Some(pb::query_reply::Data::Inline(table)) = reply.data else {
+                    // Future: a Flight-ticketed reply would resolve
+                    // through `fetch_blob` here. The server only emits
+                    // `Inline` today; treat anything else as an
+                    // unexpected wire-shape and drop the placeholder.
+                    self.shell.drop_element_series(label);
+                    return;
+                };
+                // Row-major [states × labels × components]. One label
+                // and (at most) one component, so the values vector
+                // length equals the state count and we can zip
+                // directly. The server echoes the resolved state list
+                // back so an empty-states request also lines up; we
+                // sent every state explicitly so they match 1:1.
+                let mut samples = Vec::with_capacity(table.states.len());
+                let comps = table.components.max(1) as usize;
+                for (i, st) in table.states.iter().enumerate() {
+                    let Some(value) = table.values.get(i * comps) else {
+                        break;
+                    };
+                    let t = times.get(*st as usize - 1).copied().unwrap_or(f64::from(*st));
+                    samples.push(ElementSeriesSample {
+                        state: *st,
+                        t,
+                        value: *value,
+                    });
+                }
+                self.shell.push_element_series(label, samples);
                 None
             }
             UiAction::AgentRevert { turn_id } => {

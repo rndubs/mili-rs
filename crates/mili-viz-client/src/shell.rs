@@ -359,6 +359,34 @@ pub struct TimeSample {
     pub max: f64,
 }
 
+/// One sample of a per-element [`ElementSeries`]
+/// (`wireframe-parity.md` "What's still left" #4): the value the
+/// `Query` RPC returned for this `(class_name, label_id, svar)` at
+/// the given state. `t` is `LoadedInfo::state_times` joined in so the
+/// plot can render against simulation time without a second lookup.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ElementSeriesSample {
+    pub state: u32,
+    pub t: f64,
+    pub value: f64,
+}
+
+/// One per-element time-history series sourced from the `Query` RPC
+/// (`wireframe-parity.md` "What's still left" #4 — client UX side of
+/// the now-real server arm). The label is the user-visible legend
+/// entry; the `(class_name, label_id, svar, component)` quadruple is
+/// the identity the +series input row submitted, kept verbatim so a
+/// later refresh can re-query without re-parsing the label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementSeries {
+    pub label: String,
+    pub class_name: String,
+    pub label_id: i64,
+    pub svar: String,
+    pub component: String,
+    pub samples: Vec<ElementSeriesSample>,
+}
+
 /// A client-side intent emitted by the shell. The windowed app lowers
 /// the transport-affecting variants to the **frozen** proto `Command`
 /// (`phase-5-m3.md` Decision 46, `phase-5-m3.5.md` Decision 48); the
@@ -518,6 +546,22 @@ pub enum UiAction {
     AgentRevert {
         turn_id: String,
     },
+    /// `wireframe-parity.md` "What's still left" #4 — request a per-
+    /// element time-history series for `(class_name, label_id, svar,
+    /// component)` over **all** states. The windowed app lowers this
+    /// to the frozen `Query` RPC and pushes the inline values back via
+    /// [`ShellState::push_element_series`]. Pure-client request shape:
+    /// the input row appended a placeholder series so the user sees
+    /// "(loading)" until the RPC returns; the action carries the same
+    /// `label` so the lowering arm can replace it on success or drop it
+    /// on failure.
+    QueryElementSeries {
+        label: String,
+        class_name: String,
+        label_id: i64,
+        svar: String,
+        component: String,
+    },
 }
 
 /// Static fallback derived-result names, shown only until a real
@@ -674,6 +718,21 @@ pub struct ShellState {
     /// Time-history series accumulated from `ResultState`
     /// (Decision 50).
     pub time_history: Vec<TimeSample>,
+    /// Per-element time-history series sourced from the `Query` RPC
+    /// (`wireframe-parity.md` "What's still left" #4). Each entry is
+    /// one line in the Plot tab body. Appended (with an empty
+    /// `samples`) when the user clicks `+series`; the windowed app's
+    /// lowering arm fills the samples in-place once the inline
+    /// `QueryReply` lands.
+    pub element_series: Vec<ElementSeries>,
+    /// Plot-tab input buffers: the `class.label_id.svar` fields the
+    /// `+series` button consumes. Kept on [`ShellState`] for the same
+    /// reason `cmdline_input` lives here — the `egui::TextEdit` needs
+    /// a `&mut String` anchored across frames.
+    pub plot_class_input: String,
+    pub plot_label_input: String,
+    pub plot_svar_input: String,
+    pub plot_component_input: String,
     /// Active colormap name (`phase-5-m4.md` Decision 66); one of
     /// [`crate::colormap::NAMES`], default `cool`.
     pub colormap: String,
@@ -796,6 +855,11 @@ impl Default for ShellState {
             script_running: false,
             script_status: "venv: — · attach: —".to_string(),
             time_history: Vec::new(),
+            element_series: Vec::new(),
+            plot_class_input: String::new(),
+            plot_label_input: String::new(),
+            plot_svar_input: String::new(),
+            plot_component_input: String::new(),
             colormap: "cool".to_string(),
             legend_min: None,
             legend_max: None,
@@ -1106,6 +1170,77 @@ impl ShellState {
             self.time_history.push(sample);
             self.time_history.sort_by_key(|s| s.state);
         }
+    }
+
+    /// `wireframe-parity.md` #4 — submit the Plot tab's
+    /// `class.label_id.svar` row as a [`UiAction::QueryElementSeries`]
+    /// the windowed app lowers to the frozen `Query` RPC. `None`
+    /// when the inputs are missing the three mandatory fields or
+    /// `label_id` does not parse. On success the inputs are cleared
+    /// and a placeholder [`ElementSeries`] is appended so the user
+    /// immediately sees the legend entry (the app fills the samples
+    /// in-place once the reply lands). Idempotent: re-submitting the
+    /// same `(class, id, svar, component)` replaces the existing
+    /// series in place instead of stacking duplicates.
+    pub fn submit_element_query(&mut self) -> Option<UiAction> {
+        let class_name = self.plot_class_input.trim().to_string();
+        let svar = self.plot_svar_input.trim().to_string();
+        let label_id_text = self.plot_label_input.trim();
+        if class_name.is_empty() || svar.is_empty() || label_id_text.is_empty() {
+            return None;
+        }
+        let label_id: i64 = label_id_text.parse().ok()?;
+        let component = self.plot_component_input.trim().to_string();
+        let label = if component.is_empty() {
+            format!("{svar} [{class_name} {label_id}]")
+        } else {
+            format!("{svar}[{component}] [{class_name} {label_id}]")
+        };
+        let placeholder = ElementSeries {
+            label: label.clone(),
+            class_name: class_name.clone(),
+            label_id,
+            svar: svar.clone(),
+            component: component.clone(),
+            samples: Vec::new(),
+        };
+        if let Some(existing) = self
+            .element_series
+            .iter_mut()
+            .find(|s| s.label == placeholder.label)
+        {
+            existing.samples.clear();
+        } else {
+            self.element_series.push(placeholder);
+        }
+        self.plot_class_input.clear();
+        self.plot_label_input.clear();
+        self.plot_svar_input.clear();
+        self.plot_component_input.clear();
+        Some(UiAction::QueryElementSeries {
+            label,
+            class_name,
+            label_id,
+            svar,
+            component,
+        })
+    }
+
+    /// Replace the samples on the [`ElementSeries`] with `label`. No-op
+    /// when no matching placeholder exists — the windowed app's
+    /// lowering arm dropped the entry on a `QueryReply.ok == false`,
+    /// so we don't want to re-create it under the user.
+    pub fn push_element_series(&mut self, label: &str, samples: Vec<ElementSeriesSample>) {
+        if let Some(s) = self.element_series.iter_mut().find(|s| s.label == label) {
+            s.samples = samples;
+        }
+    }
+
+    /// Drop the [`ElementSeries`] matching `label`. Used by the
+    /// lowering arm to clean up the placeholder when the RPC fails so
+    /// the legend doesn't accumulate empty entries.
+    pub fn drop_element_series(&mut self, label: &str) {
+        self.element_series.retain(|s| s.label != label);
     }
 
     /// The colour-mapping range the renderer and legend use
@@ -1826,7 +1961,7 @@ fn tab_body(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiActio
             match tab {
                 BottomTab::CommandLine => cmdline_input(ui, state, actions),
                 BottomTab::Scripting => scripting_input(ui, state, actions),
-                BottomTab::TimeHistory => time_history_input(ui, state),
+                BottomTab::TimeHistory => time_history_input(ui, state, actions),
             }
         },
     );
@@ -1948,37 +2083,96 @@ fn scripting_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<
 /// Time-history plot (`phase-5-m3.5.md` Decision 50): an `egui_plot`
 /// host of the active result's data-range envelope vs. simulation
 /// time, accumulated from the broadcast `Subscribe`/`ResultState`
-/// stream. The `Query`-fed per-element series is the forward path.
-/// The body fills the unified [`tab_body`] allocation; the input
-/// row is intentionally empty so all three tabs present the same
-/// inherent vertical demand to the resizable panel (VB-007).
+/// stream, plus the per-element series the Plot tab's input row
+/// loaded over the frozen `Query` RPC (`wireframe-parity.md` "What's
+/// still left" #4). The body fills the unified [`tab_body`]
+/// allocation; the input row hosts the `+series` form (post-#4 the
+/// row is no longer empty — both tabs already had real rows, so the
+/// inherent-vertical-demand argument that motivated the VB-007 empty
+/// stub no longer holds; the unified shape pins panel height
+/// regardless).
 fn time_history_body(ui: &mut egui::Ui, state: &ShellState) {
-    if state.time_history.is_empty() {
-        ui.weak("no series yet — select a result and step through states");
+    if state.time_history.is_empty() && state.element_series.iter().all(|s| s.samples.is_empty()) {
+        ui.weak(
+            "no series yet — select a result and step through states, \
+             or add a per-element series below",
+        );
         return;
     }
-    let mins: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.min]).collect();
-    let maxs: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.max]).collect();
-    let label = state
+    let envelope_label = state
         .result
         .as_ref()
         .map_or_else(|| "result".to_string(), |r| r.name.clone());
     egui_plot::Plot::new("time_history")
         .legend(egui_plot::Legend::default())
         .show(ui, |p| {
-            p.line(
-                egui_plot::Line::new(format!("{label} max"), maxs)
-                    .color(egui::Color32::from_rgb(220, 110, 100)),
-            );
-            p.line(
-                egui_plot::Line::new(format!("{label} min"), mins)
-                    .color(egui::Color32::from_rgb(110, 160, 220)),
-            );
+            if !state.time_history.is_empty() {
+                let mins: Vec<[f64; 2]> =
+                    state.time_history.iter().map(|s| [s.t, s.min]).collect();
+                let maxs: Vec<[f64; 2]> =
+                    state.time_history.iter().map(|s| [s.t, s.max]).collect();
+                p.line(
+                    egui_plot::Line::new(format!("{envelope_label} max"), maxs)
+                        .color(egui::Color32::from_rgb(220, 110, 100)),
+                );
+                p.line(
+                    egui_plot::Line::new(format!("{envelope_label} min"), mins)
+                        .color(egui::Color32::from_rgb(110, 160, 220)),
+                );
+            }
+            for (idx, series) in state.element_series.iter().enumerate() {
+                if series.samples.is_empty() {
+                    continue;
+                }
+                let pts: Vec<[f64; 2]> =
+                    series.samples.iter().map(|s| [s.t, s.value]).collect();
+                p.line(
+                    egui_plot::Line::new(series.label.clone(), pts)
+                        .color(ELEMENT_SERIES_PALETTE[idx % ELEMENT_SERIES_PALETTE.len()]),
+                );
+            }
         });
 }
 
-fn time_history_input(_ui: &mut egui::Ui, _state: &ShellState) {
-    // Intentionally empty — see [`tab_body`] / VB-007.
+/// Round-robin palette for the per-element [`ElementSeries`] lines.
+/// Deliberately disjoint from the min/max envelope colours so the
+/// envelope stays visually distinct from a query result.
+const ELEMENT_SERIES_PALETTE: [egui::Color32; 6] = [
+    egui::Color32::from_rgb(150, 200, 110),
+    egui::Color32::from_rgb(200, 160, 90),
+    egui::Color32::from_rgb(170, 130, 220),
+    egui::Color32::from_rgb(110, 200, 200),
+    egui::Color32::from_rgb(220, 150, 200),
+    egui::Color32::from_rgb(190, 190, 110),
+];
+
+/// Plot-tab input row: small `class · id · svar · component`
+/// text-edits + a `+series` button that lowers to
+/// [`UiAction::QueryElementSeries`] (`wireframe-parity.md` #4 — the
+/// text-input entry point variant the punch list called out as the
+/// non-design-first path). The fields are deliberately tiny so the
+/// row stays within the 22 px [`INPUT_ROW_H`] shared with the other
+/// tabs' inputs (VB-007 panel-height invariant).
+fn time_history_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
+    let field = |ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32| {
+        ui.add(
+            egui::TextEdit::singleline(buf)
+                .font(mono.clone())
+                .desired_width(width)
+                .hint_text(hint),
+        )
+    };
+    field(ui, &mut state.plot_class_input, "class", 80.0);
+    field(ui, &mut state.plot_label_input, "id", 60.0);
+    field(ui, &mut state.plot_svar_input, "svar", 100.0);
+    field(ui, &mut state.plot_component_input, "comp", 60.0);
+    let click = ui.button("+series").clicked();
+    if click {
+        if let Some(a) = state.submit_element_query() {
+            actions.push(a);
+        }
+    }
 }
 
 /// Spec status-bar protocol cell. The frozen contract's identity is
