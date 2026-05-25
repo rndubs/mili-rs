@@ -109,8 +109,13 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
 - [x] **Stage 2** — Intent catalog `data/posttraining/intents/catalog.yaml`
       (11 atomic + 3 compound; closed-7 postcondition kinds; Risk #2
       resolved by keeping the set closed — see changelog rev 4).
-- [ ] **Stage 3** — Scenario synthesis (~200 records, multi-step
-      ratio ≥ 20 %). **Active next.** Blocked on nothing.
+- [x] **Stage 3** — Scenario synthesis. `data/posttraining/scenarios/synth.jsonl`
+      lands 163 scenarios (41 compound, 25.15% ratio — clears the ≥20%
+      gate) under `mili_llm_bench.synth` (see changelog rev 5). Round-trip
+      pinned by `test_synth_round_trip.py` (8 tests). Two dispatcher gaps
+      surfaced under live pygriz and parked in catalog `todo_v2`:
+      `selection.clear_all()` (clrsel) and `Session.query` (query) — both
+      missing on `crates/mili-viz-server` / `pygriz` today.
 - [ ] **Stage 4** — Verifier (already exists at
       `python/mili-llm-bench/src/mili_llm_bench/verifier.py`; L0–L3,
       closed failure-mode taxonomy). Reuse, do not rebuild.
@@ -208,6 +213,27 @@ them here too so the live tracker shows the live unknowns.
 
 ## Changelog
 
+- **2026-05-24 (rev 5)** — Stage 3 landed.
+  `data/posttraining/scenarios/synth.jsonl` (163 scenarios, 41 compound,
+  25.15% ratio, deterministic at `seed=42`) plus its
+  `synth.report.md` audit. Implementation in
+  `python/mili-llm-bench/src/mili_llm_bench/synth/` — `catalog.py` parses
+  + validates `data/posttraining/intents/catalog.yaml`, `slots.py`
+  resolves `<param:>` / `<derived:>` tokens, `sample.py` holds the
+  per-intent tuple generators + per-cell quotas, `run.py` orchestrates
+  the pass and writes the report; surfaced via `mili-llm-bench synth`
+  (login-node safe, no GPU). `Scenario` extended with optional
+  `instruction_source` field (template / manual-paraphrase) so the W4b
+  rollout writer stamps the tag through verbatim. Round-trip and
+  compound-ratio pins live in
+  `python/mili-llm-bench/tests/test_synth_round_trip.py` (8 tests,
+  passes against the full always-on suite). Two pre-existing
+  dispatcher gaps surfaced during the live oracle pass and are parked
+  in catalog `todo_v2`: `selection.clear_all()` (the same gap as
+  bootstrap's 2× clrsel `dispatch_error`) and `Session.query` —
+  Stage 3 emits class-only `clrsel` and drops every `query` row.
+  Risk #1 (held-out fixture) still pending; Stage 3 binds only against
+  `d3samp6` + `cylinder`, which is the cell-pair Stage 6 will split.
 - **2026-05-24 (rev 4)** — Stage 2 landed.
   `data/posttraining/intents/catalog.yaml` written with 11 atomic intents
   (`load, set-state, step, select, clrsel, show-primal, show-derived,

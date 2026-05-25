@@ -30,6 +30,9 @@ python/**/src/griz/_proto/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-data/posttraining/
-!data/posttraining/baselines/
-!data/posttraining/baselines/**
+# Large per-run artifacts: GEPA optimization sweeps and bench eval
+# runs. Everything else under data/posttraining/ (catalog.yaml, eval
+# scenarios, grammar/tools.json, synthesized scenarios, dataset_card.md,
+# baselines, etc.) tracks normally.
+data/posttraining/gepa-runs/
+data/posttraining/runs/

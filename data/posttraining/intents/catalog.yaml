@@ -194,6 +194,13 @@ intents:
       - "deselect everything"
       - "clear all selections"
     bootstrap_eval_rows: [bs-012, bs-013, bs-036, bs-037]
+    todo_v2:
+      - "Stage 3 only synthesizes class-set variants of clrsel; the
+         'deselect everything' / 'clear all selections' paraphrases hit
+         the missing pygriz `selection.clear_all()` path (same gap as
+         the bootstrap Claude 2× clrsel dispatch_error in
+         posttraining-dataset.md §5). Wire `clear_all()` in pygriz
+         before re-enabling those seeds in synth."
 
   show-primal:
     shape: atomic
@@ -367,6 +374,11 @@ intents:
          parity suite has pinned values for those derived fields per
          (fixture, class, label, state)."
       - "Add multi-state and 'all labels' (labels=null) query variants."
+      - "Stage 3 drops every query row because pygriz `Session.query`
+         is not implemented today (AttributeError on the live oracle
+         call). Wire the read path in pygriz + the typed-tool dispatcher
+         in `dispatchers/pygriz.py:query` before query rows can rejoin
+         the synth corpus."
 
   # ========== COMPOUND ==========
 

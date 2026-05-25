@@ -590,6 +590,47 @@ def _default_tools_path() -> Path:
     return default_artifact_path()
 
 
+def _cmd_synth(args: argparse.Namespace) -> int:
+    """Stage 3 of the M5 SFT pipeline.
+
+    Reads ``data/posttraining/intents/catalog.yaml`` and writes a
+    JSONL scenario corpus + Markdown report to ``--out``. Login-node
+    safe; no GPU / no Anthropic API. See
+    ``planning/mili-viz/mili-agent/m5-sft-pipeline.md`` Stage 3 row.
+    """
+    from .synth import run_synth
+
+    catalog_path = _resolve_path(args.catalog)
+    out_path = _resolve_path(args.out)
+    report_path = (
+        _resolve_path(args.report) if args.report else out_path.with_suffix(".report.md")
+    )
+
+    try:
+        report = run_synth(
+            catalog_path=catalog_path,
+            out_path=out_path,
+            report_path=report_path,
+            seed=args.seed if args.seed is not None else 42,
+            target_total=args.target_total,
+            compound_ratio=args.compound_ratio,
+            confirm_fixtures=not args.no_confirm_fixtures,
+        )
+    except Exception as exc:
+        sys.stderr.write(f"synth failed: {exc!r}\n")
+        return 1
+
+    print(
+        f"synth complete: {report.total} scenarios "
+        f"({report.compound_count} compound, "
+        f"ratio {report.compound_ratio:.2%}); "
+        f"wrote {out_path} + {report_path}"
+    )
+    if report.skipped:
+        print(f"  skipped {len(report.skipped)} rows; see report for details")
+    return 0
+
+
 def _cmd_run_gepa(args: argparse.Namespace) -> int:
     """Run GEPA optimization loop on artifact (prompt + step_cap + tools).
 
@@ -752,6 +793,57 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--out", required=True, help="Output directory for re-graded artifacts.")
     _add_run_common_flags(replay)
     replay.set_defaults(func=_cmd_replay)
+
+    synth = subs.add_parser(
+        "synth",
+        help=(
+            "Stage 3 scenario synthesis. Reads data/posttraining/intents/"
+            "catalog.yaml; writes data/posttraining/scenarios/synth.jsonl "
+            "+ synth.report.md. Login-node safe."
+        ),
+    )
+    synth.add_argument(
+        "--catalog",
+        default="data/posttraining/intents/catalog.yaml",
+        help="Path to the intent catalog (default: data/posttraining/intents/catalog.yaml).",
+    )
+    synth.add_argument(
+        "--out",
+        default="data/posttraining/scenarios/synth.jsonl",
+        help="Output JSONL path (default: data/posttraining/scenarios/synth.jsonl).",
+    )
+    synth.add_argument(
+        "--report",
+        default=None,
+        help="Output report path (default: <out>.report.md).",
+    )
+    synth.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Sampler RNG seed (default: 42).",
+    )
+    synth.add_argument(
+        "--target-total",
+        type=int,
+        default=200,
+        help="Informational target for total scenario count (default: 200).",
+    )
+    synth.add_argument(
+        "--compound-ratio",
+        type=float,
+        default=0.20,
+        help="Minimum compound ratio gate (default: 0.20).",
+    )
+    synth.add_argument(
+        "--no-confirm-fixtures",
+        action="store_true",
+        help=(
+            "Skip the pygriz fixture-fact confirmation pass. Use this "
+            "when pygriz is not installed or mili-viz-server isn't built."
+        ),
+    )
+    synth.set_defaults(func=_cmd_synth)
 
     gepa = subs.add_parser(
         "run-gepa",

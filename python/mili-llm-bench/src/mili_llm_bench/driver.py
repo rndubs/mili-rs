@@ -311,7 +311,7 @@ def write_rollout_record(
         "fixture": scenario.fixture,
         "intent_id": scenario.intent_id,
         "instruction": scenario.instruction,
-        "instruction_source": INSTRUCTION_SOURCE_V0,
+        "instruction_source": scenario.instruction_source or INSTRUCTION_SOURCE_V0,
         "tools": tool_names,
         "messages": messages,
         "tool_calls_flat": extract_tool_calls_flat(messages),

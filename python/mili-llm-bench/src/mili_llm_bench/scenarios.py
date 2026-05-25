@@ -52,15 +52,24 @@ class Scenario:
     intent_id: str
     instruction: str
     postcondition: Postcondition
+    # Stage 3 records carry their paraphrase tag here so the W4b
+    # rollout writer can stamp it through verbatim (template /
+    # manual-paraphrase / teacher-paraphrase). ``None`` for legacy
+    # bootstrap rows; the rollout writer falls back to
+    # ``INSTRUCTION_SOURCE_V0`` in that case.
+    instruction_source: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "id": self.id,
             "fixture": self.fixture,
             "intent_id": self.intent_id,
             "instruction": self.instruction,
             "postcondition": self.postcondition.to_json(),
         }
+        if self.instruction_source is not None:
+            out["instruction_source"] = self.instruction_source
+        return out
 
 
 def _parse_scenario(obj: dict[str, Any]) -> Scenario:
@@ -85,6 +94,7 @@ def _parse_scenario(obj: dict[str, Any]) -> Scenario:
         intent_id=obj["intent_id"],
         instruction=obj["instruction"],
         postcondition=Postcondition(kind=kind, expect=dict(expect)),
+        instruction_source=obj.get("instruction_source"),
     )
 
 
