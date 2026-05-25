@@ -56,6 +56,7 @@ fn quad() -> Mesh {
         scalars: Some(vec![10.0, 20.0, 30.0, 40.0]),
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     }
 }
 

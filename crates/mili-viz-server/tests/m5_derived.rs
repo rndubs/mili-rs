@@ -58,11 +58,14 @@ fn decode(blob: &[u8], layout: &str) -> Geom {
             .map(|i| f32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
             .collect();
         off += n_verts * 4;
-        assert_eq!(off, blob.len(), "blob fully consumed");
         s
     } else {
         Vec::new()
     };
+    if magic == b"MVG3" && flags_mask & 16 != 0 {
+        off += n_tri * 4; // tri_member_id (wireframe-parity #6 path (a))
+    }
+    assert_eq!(off, blob.len(), "blob fully consumed");
     Geom {
         layout: layout.to_string(),
         verts: n_verts,

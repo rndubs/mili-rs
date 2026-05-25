@@ -76,3 +76,47 @@ pub fn assert_mesh_visible(px: &[u8], min_pixels: usize, label: &str) {
          regression."
     );
 }
+
+/// `true` for a low-saturation grey pixel — egui chrome (menu bar bg,
+/// panel bg, status bar). Excludes mesh pixels (`is_mesh_pixel` —
+/// `(b - r) > 5`) and lit colormap results.
+#[inline]
+pub fn is_grey_chrome_pixel(c: &[u8]) -> bool {
+    let r = i32::from(c[0]);
+    let g = i32::from(c[1]);
+    let b = i32::from(c[2]);
+    (b - r).abs() < 6 && (g - r).abs() < 6
+}
+
+/// Mean luminance (max-channel) of the grey-chrome pixels inside the
+/// top `band_h` rows of an `RGBA8`, row-major, top-left-origin frame of
+/// width `w`. The top band carries the menu bar + toolbar — the
+/// region most visibly relit by a Theme switch. Returns `0.0` if no
+/// chrome pixels are detected (e.g. degenerate width/height).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+// `sum`/`n` are bounded by `band_h * w * 255` (a few million for any
+// realistic test image); well below f32's 24-bit mantissa, so the
+// precision warning is theoretical here.
+pub fn mean_chrome_luminance_top(px: &[u8], w: u32, band_h: u32) -> f32 {
+    let w = w as usize;
+    let band_h = band_h as usize;
+    let row_bytes = w * 4;
+    let mut sum: u64 = 0;
+    let mut n: u64 = 0;
+    for y in 0..band_h {
+        let row = &px[y * row_bytes..(y + 1) * row_bytes];
+        for c in row.chunks_exact(4) {
+            if is_grey_chrome_pixel(c) {
+                let max = u32::from(c[0]).max(u32::from(c[1])).max(u32::from(c[2]));
+                sum += u64::from(max);
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        sum as f32 / n as f32
+    }
+}

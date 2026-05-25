@@ -40,12 +40,14 @@ __all__ = [
     "PROTOCOL_VERSION",
     "ProtocolMismatchWarning",
     "GuiUnavailableWarning",
+    "QueryError",
     "Session",
     "SessionInfo",
     "Database",
     "Result",
     "Isosurface",
     "Contour",
+    "QueryResult",
     "connect",
     "attach",
     "launch",
@@ -69,6 +71,15 @@ class GuiUnavailableWarning(UserWarning):
     not spawn (phase-6-m2.md Decision 58). The signature is preserved;
     ``launch`` proceeds headless rather than silently ignoring the flag.
     """
+
+
+class QueryError(RuntimeError):
+    """Server-rejected ``Query`` RPC. Carries the verbatim
+    ``QueryReply.error`` so callers can branch on the typed message
+    (unknown svar, no run loaded, derived-result deferred, etc.) — the
+    server returns ``ok=false`` with a typed string rather than a
+    transport-level ``Status``, matching the M1 wire-surface shape
+    (phase-6-m5.md Decision 67)."""
 
 
 def _stubs():
@@ -317,6 +328,65 @@ class Session:
         — M3 does not predict (that is Phase 5 M4)."""
         return _View(self)
 
+    # --- Layer-1 query (phase-6-m5.md Decisions 67–69) ---------------
+    #
+    # The Phase 6 "real payoff" (scripting.md "data back into Python").
+    # Mirrors the Rust `Session::query` wrapper (server arm landed —
+    # wireframe-parity.md #4) one-for-one: build the typed
+    # `QueryRequest`, dispatch over the in-band `Query` RPC, surface a
+    # server-rejected reply as `QueryError`, hand the inline carrier to
+    # `QueryResult` for numpy/pandas conversion. No griz string is
+    # formatted (M3's "no second emitter" invariant); empty `labels`/
+    # `states` are passed verbatim so the server fills them in (all
+    # labels / current state cursor — see `proto/mili_viz.proto:379`).
+    # Only the inline carrier is implemented today; the
+    # `flight_ticket` arm of the proto's `oneof` raises until the
+    # Arrow-Flight path lands (Decision 68).
+    def query(
+        self,
+        result: str,
+        class_name: str,
+        *,
+        labels=None,
+        states=None,
+        component: str = "",
+    ) -> "QueryResult":
+        """Run one ``Query`` RPC and return a :class:`QueryResult` (raw
+        labels/states/values + ``to_dataframe()``). Empty ``labels``
+        ⇒ all labels for the class; empty ``states`` ⇒ current state."""
+        pb, _ = _stubs()
+        req = pb.QueryRequest(
+            result=str(result),
+            class_name=str(class_name),
+            component=str(component),
+        )
+        if labels:
+            req.labels.extend(int(l) for l in labels)
+        if states:
+            req.states.extend(int(s) for s in states)
+        reply = self._stub.Query(req)
+        if not reply.ok:
+            raise QueryError(reply.error)
+        which = reply.WhichOneof("data")
+        if which == "inline":
+            t = reply.inline
+            return QueryResult(
+                result=str(result),
+                class_name=str(class_name),
+                component=str(component),
+                labels=list(t.labels),
+                states=list(t.states),
+                values=list(t.values),
+                components=int(t.components),
+            )
+        if which == "flight_ticket":
+            raise QueryError(
+                "query: server returned a Flight ticket (large-result "
+                "path), not implemented in pygriz M5 yet — pin the "
+                "request smaller until the Arrow-Flight client lands"
+            )
+        raise QueryError("query: server reply carries no data")
+
     # --- lifecycle ---------------------------------------------------
     def close(self) -> None:
         if self._channel is not None:
@@ -348,15 +418,111 @@ class Session:
 
 
 class Database:
-    """The loaded run (``s.open(root)``). M3 carries only ``.root``;
-    ``db.query(...)`` is the Phase 6 M5 payoff."""
+    """The loaded run (``s.open(root)``). M5: :meth:`query` delegates
+    to the owning :meth:`Session.query` so the ``scripting.md`` sketch
+    (``db.query("sx", "brick", labels=[1,2,3], states=[10,20])``) and
+    the Rust-side ``Session::query`` parity shape are both spelled the
+    same way."""
 
     def __init__(self, session: "Session", root: str):
         self._session = session
         self.root = root
 
+    def query(
+        self,
+        result: str,
+        class_name: str,
+        *,
+        labels=None,
+        states=None,
+        component: str = "",
+    ) -> "QueryResult":
+        """Alias for :meth:`Session.query` — scoped to this loaded run
+        for readability in scripts (``db.query`` reads more obviously
+        than ``s.query`` once ``s.open(...)`` returned the handle)."""
+        return self._session.query(
+            result,
+            class_name,
+            labels=labels,
+            states=states,
+            component=component,
+        )
+
     def __repr__(self) -> str:
         return f"Database({self.root!r})"
+
+
+@dataclass(frozen=True)
+class QueryResult:
+    """One ``Query`` RPC reply, with the milox/``mili.utils``
+    DataFrame shape one method-call away (``to_dataframe()``).
+
+    The proto's ``InlineTable`` is row-major
+    ``[len(states) × len(labels) × components]`` — preserved verbatim
+    so callers can reshape on numpy if the pandas default doesn't fit
+    (multi-component results, for example, are exposed as one-cell
+    arrays in the DataFrame and a 3-D ndarray on ``.values_3d``).
+    """
+
+    result: str
+    class_name: str
+    component: str
+    labels: list  # int (server returns int64)
+    states: list  # int (1-based, server-resolved)
+    values: list  # float (row-major [states × labels × components])
+    components: int
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    @property
+    def values_3d(self):
+        """The values reshaped to ``(len(states), len(labels), components)``
+        as a ``numpy.ndarray`` of ``float64`` — the milox `Query`
+        layout (``query_data_to_dataframe`` expects this exact shape).
+        Empty when any axis is zero."""
+        import numpy as np
+
+        arr = np.asarray(self.values, dtype=np.float64)
+        ns = len(self.states)
+        nl = len(self.labels)
+        nc = max(int(self.components), 1)
+        if ns == 0 or nl == 0:
+            return arr.reshape((ns, nl, nc))
+        return arr.reshape((ns, nl, nc))
+
+    def to_dataframe(self):
+        """``pandas.DataFrame`` shaped like
+        ``mili.utils.query_data_to_dataframe`` — index = states,
+        columns = labels. Scalar (``components==1``) results lay flat
+        ``(states × labels)``; multi-component results put a 1-D
+        ``ndarray`` of length ``components`` in each cell (matches
+        mili-python's ``DataFrame.from_records`` arm — same types so
+        viz and analysis mix freely, ``scripting.md`` "the real
+        payoff")."""
+        import numpy as np
+        import pandas as pd
+
+        a = self.values_3d
+        if a.shape[2] == 1:
+            return pd.DataFrame(
+                a.reshape(a.shape[:-1]),
+                index=np.asarray(self.states),
+                columns=np.asarray(self.labels),
+            )
+        # Multi-component: one ndarray per cell. mili-python's
+        # `from_records` arm builds a DataFrame whose cells each hold
+        # the per-component vector; preserve that exact shape.
+        records = [
+            [a[i, j, :].copy() for j in range(a.shape[1])]
+            for i in range(a.shape[0])
+        ]
+        df = pd.DataFrame(
+            records,
+            index=np.asarray(self.states),
+            columns=np.asarray(self.labels),
+        )
+        return df
 
 
 class Result:
@@ -559,6 +725,39 @@ class _View:
         self._named(pb.NamedView.LIST)
 
 
+def _handshake(
+    channel,
+    *,
+    token: str,
+    client_id: str | None,
+    protocol_version: str,
+    timeout: float,
+) -> Session:
+    """Run the ``Hello`` handshake on an already-built gRPC channel
+    (TCP or UDS) and wrap the result in a :class:`Session`. Factored so
+    :func:`connect` (TCP) and :func:`_connect_uds` (in-process Unix
+    socket — Decision 109) share the post-handshake path."""
+    pb, pb_grpc = _stubs()
+    stub = pb_grpc.MiliVizStub(channel)
+    request = pb.HelloRequest(
+        protocol_version=protocol_version,
+        session_token=token,
+        client_id=client_id or f"griz-py/{__version__}",
+    )
+    reply = stub.Hello(request, timeout=timeout)
+    if not reply.compatible:
+        warnings.warn(
+            "mili-viz protocol mismatch (client "
+            f"{protocol_version} vs server "
+            f"{reply.server_protocol_version}): "
+            f"{reply.mismatch_detail or 'no detail'}. "
+            "Proceeding; behavior may be undefined.",
+            ProtocolMismatchWarning,
+            stacklevel=3,
+        )
+    return Session(channel, stub, reply)
+
+
 def connect(
     host: str,
     port: int,
@@ -581,26 +780,50 @@ def connect(
     """
     import grpc
 
-    pb, pb_grpc = _stubs()
     channel = grpc.insecure_channel(f"{host}:{port}")
-    stub = pb_grpc.MiliVizStub(channel)
-    request = pb.HelloRequest(
+    return _handshake(
+        channel,
+        token=token,
+        client_id=client_id,
         protocol_version=protocol_version,
-        session_token=token,
-        client_id=client_id or f"griz-py/{__version__}",
+        timeout=timeout,
     )
-    reply = stub.Hello(request, timeout=timeout)
-    if not reply.compatible:
-        warnings.warn(
-            "mili-viz protocol mismatch (client "
-            f"{protocol_version} vs server "
-            f"{reply.server_protocol_version}): "
-            f"{reply.mismatch_detail or 'no detail'}. "
-            "Proceeding; behavior may be undefined.",
-            ProtocolMismatchWarning,
-            stacklevel=2,
-        )
-    return Session(channel, stub, reply)
+
+
+def _connect_uds(
+    socket_path: str,
+    token: str = "",
+    *,
+    client_id: str | None = None,
+    protocol_version: str = PROTOCOL_VERSION,
+    timeout: float = 10.0,
+) -> Session:
+    """Connect over a Unix domain socket (``wireframe-parity-5.md``
+    Decision 109). The in-process branch of :func:`attach`: when the
+    session file's ``transport == "in-process"``, the windowed GUI
+    bound its in-process server on this UDS so a sibling script attaches
+    without a TCP hop. Wire format is identical (HTTP/2 over UDS), so
+    the same proto stubs work — only the channel URL changes.
+
+    ``grpc.default_authority`` is pinned to ``"localhost"`` because
+    tonic 0.14 (the server side) rejects the ``:authority: unix:<path>``
+    header grpcio synthesises by default for ``unix:`` URLs, replying
+    with HTTP/2 RST_STREAM PROTOCOL_ERROR before Hello ever returns.
+    A literal ``localhost`` is a valid HTTP/2 authority on a UDS hop
+    (no DNS resolution happens — the socket file is the destination)."""
+    import grpc
+
+    channel = grpc.insecure_channel(
+        f"unix:{socket_path}",
+        options=[("grpc.default_authority", "localhost")],
+    )
+    return _handshake(
+        channel,
+        token=token,
+        client_id=client_id,
+        protocol_version=protocol_version,
+        timeout=timeout,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -613,7 +836,13 @@ class SessionInfo:
     """One parsed ``~/.griz/sessions/<id>.json`` session/connection
     file (the Jupyter-connection-file pattern; scripting.md). Written
     by the ``mili-viz-server`` binary on startup (phase-6-m2.md
-    Decision 56)."""
+    Decision 56) or by the windowed client's in-process arm
+    (``wireframe-parity-5.md`` Decision 109).
+
+    The TCP arm leaves ``transport``/``socket_path`` empty; the
+    in-process arm sets ``transport == "in-process"`` and points
+    ``socket_path`` at a Unix domain socket the same-host pygriz
+    connects to over ``unix:`` instead of TCP."""
 
     id: str
     pid: int
@@ -626,6 +855,12 @@ class SessionInfo:
     path: pathlib.Path
     #: The file's mtime — "newest" for ``attach()`` is the max of this.
     mtime: float
+    #: Discriminator (Decision 109). ``""`` ⇒ TCP (the Decision-56
+    #: default); ``"in-process"`` ⇒ same-host UDS via ``socket_path``.
+    transport: str = ""
+    #: Absolute filesystem path to the UDS the in-process server bound
+    #: on. Empty for the TCP arm.
+    socket_path: str = ""
 
 
 def _sessions_dir() -> pathlib.Path:
@@ -641,7 +876,10 @@ def _parse_session_file(path: pathlib.Path) -> SessionInfo | None:
     """Parse one session file, returning ``None`` (never raising) for a
     missing/partial/malformed file so a stale or half-written sibling
     can never break ``list_sessions()``/``attach()`` (Decision 56:
-    staleness is handled read-side)."""
+    staleness is handled read-side).
+
+    ``transport``/``socket_path`` are optional (default ``""``) —
+    pre-Decision-109 session files (TCP-only) parse unchanged."""
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return SessionInfo(
@@ -654,6 +892,8 @@ def _parse_session_file(path: pathlib.Path) -> SessionInfo | None:
             db=str(raw.get("db", "")),
             path=path,
             mtime=path.stat().st_mtime,
+            transport=str(raw.get("transport", "")),
+            socket_path=str(raw.get("socket_path", "")),
         )
     except (OSError, ValueError, KeyError, TypeError):
         return None
@@ -707,8 +947,14 @@ def attach(
     2. ``id`` → ``<sessions dir>/<id>.json``;
     3. otherwise → the **newest live** local session file.
 
-    Every branch lowers to the one M1 :func:`connect` transport — this
-    is a session-file resolver, not a parallel client."""
+    When the resolved session file's ``transport == "in-process"``
+    (``wireframe-parity-5.md`` Decision 109 — the windowed GUI's
+    same-host UDS arm), this dispatches to a Unix-socket gRPC channel
+    instead of TCP. Every branch still lowers to the one ``Hello``
+    handshake — this is a transport-dispatcher, not a parallel client.
+
+    Explicit ``host``/``port`` always forces the TCP path (an escape
+    hatch for forwarding the GUI's UDS over SSH `-L unix:...` etc.)."""
     if host is not None and port is not None:
         return connect(host, port, token or "", **connect_kwargs)
 
@@ -731,6 +977,21 @@ def attach(
                 "explicit host/port (attach(host=..., port=...))."
             )
         info = live[0]
+
+    if info.transport == "in-process":
+        if not info.socket_path:
+            raise RuntimeError(
+                f"session {info.id!r} declares transport=in-process "
+                "but carries no socket_path — refusing to fall back to "
+                f"host/port (the file would race a real TCP listener). "
+                f"Restart the windowed mili-viz-client to rewrite "
+                f"{info.path}."
+            )
+        return _connect_uds(
+            info.socket_path,
+            token if token is not None else info.token,
+            **connect_kwargs,
+        )
 
     return connect(
         info.host,

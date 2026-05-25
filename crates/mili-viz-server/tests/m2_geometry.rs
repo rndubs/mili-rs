@@ -184,8 +184,9 @@ async fn load_state_nav_and_real_geometry() {
     };
     let gref = res.geometry.expect("M2 show carries a real GeometryRef");
     assert_eq!(
-        gref.layout, "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32",
-        "default emit is MVG3 since the VB-005 promotion"
+        gref.layout,
+        "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32+member_u32",
+        "default emit is MVG3 with the wireframe-parity #6 member column"
     );
     assert!(gref.num_vertices > 0, "mesh has vertices");
     assert!(gref.num_indices > 0 && gref.num_indices % 3 == 0);

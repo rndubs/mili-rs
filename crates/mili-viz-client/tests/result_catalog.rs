@@ -111,6 +111,7 @@ fn wired_shell_paints_input_free_with_and_without_catalog() {
         catalog: Some(ResultCatalog {
             primal: vec!["sx".into(), "sy".into(), "eps".into()],
             derived: vec!["eff_stress".into(), "pressure".into()],
+            classes: Vec::new(),
         }),
         ..ShellState::default()
     };

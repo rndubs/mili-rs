@@ -250,6 +250,7 @@ fn render_modes_differ_translucent_and_xray() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);

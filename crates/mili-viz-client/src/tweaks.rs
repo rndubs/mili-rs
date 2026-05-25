@@ -50,6 +50,11 @@ pub struct PersistedTweaks {
     pub overlay_bbox: bool,
     pub theme: ThemePref,
     pub dock_collapsed: bool,
+    /// Wireframes §"Tweaks": *Show bottom tabs* — region-level hide so
+    /// the 22 px tab strip and the body both disappear. Default `true`
+    /// matches the default-shell L1 chrome (byte-stable composite gate);
+    /// `false` suppresses the panel entirely for clean screenshots.
+    pub show_bottom_tabs: bool,
     /// Phase 5 M8 Decision 86: whether drag-time `Cmd::Cutplane`
     /// previews are emitted. Default `true` matches griz's `cutpln`
     /// live-feel; `false` suppresses preview emits for low-bandwidth
@@ -80,6 +85,7 @@ impl PersistedTweaks {
                 Theme::Light => ThemePref::Light,
             },
             dock_collapsed: s.dock_collapsed,
+            show_bottom_tabs: s.show_bottom_tabs,
             interactive_clip: s.interactive_clip,
         }
     }
@@ -99,6 +105,7 @@ impl PersistedTweaks {
             ThemePref::Light => Theme::Light,
         };
         s.dock_collapsed = self.dock_collapsed;
+        s.show_bottom_tabs = self.show_bottom_tabs;
         s.interactive_clip = self.interactive_clip;
     }
 
@@ -150,6 +157,7 @@ pub fn is_persisted_action(a: &UiAction) -> bool {
         UiAction::ToggleOverlay(_)
             | UiAction::SetTheme(_)
             | UiAction::SetDockCollapsed(_)
+            | UiAction::SetShowBottomTabs(_)
             | UiAction::SetInteractiveClip(_)
     )
 }

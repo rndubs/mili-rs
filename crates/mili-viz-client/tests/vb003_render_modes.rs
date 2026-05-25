@@ -81,6 +81,7 @@ fn edge_indices_are_unique_undirected() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     let e = quad.edge_indices();
     assert_eq!(e.len(), 5 * 2, "shared diagonal is deduped: {e:?}");
@@ -104,6 +105,7 @@ fn render_modes_differ() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     let (center, radius) = mesh.bounds();
     let camera = Camera::looking_at(center, radius);

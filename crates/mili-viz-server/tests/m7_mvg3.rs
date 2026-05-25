@@ -60,6 +60,9 @@ struct Mvg3 {
     tri_flags: Vec<u32>,
     edges: Vec<u32>,
     scalar: Vec<f32>,
+    /// Wireframe-parity #6 path (a): per-tri packed `(class_idx,
+    /// elem_row)`. Empty when bit 4 of `flags_mask` is unset.
+    tri_member_id: Vec<u32>,
 }
 
 fn decode_mvg3(blob: &[u8]) -> Mvg3 {
@@ -106,6 +109,15 @@ fn decode_mvg3(blob: &[u8]) -> Mvg3 {
     } else {
         Vec::new()
     };
+    let tri_member_id: Vec<u32> = if flags_mask & 16 != 0 {
+        let v = (0..n_tri)
+            .map(|i| u32::from_le_bytes(blob[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
+            .collect();
+        off += n_tri * 4;
+        v
+    } else {
+        Vec::new()
+    };
     assert_eq!(off, blob.len(), "MVG3 blob fully consumed");
     Mvg3 {
         n_verts,
@@ -116,6 +128,7 @@ fn decode_mvg3(blob: &[u8]) -> Mvg3 {
         tri_flags,
         edges,
         scalar,
+        tri_member_id,
     }
 }
 
@@ -275,6 +288,31 @@ async fn volumetric_geometry_contract() {
     // Scalar is absent (no result selected).
     assert_eq!(v.scalar.len(), 0, "no result → no scalar section");
     assert_eq!(v.flags_mask & 1, 0, "scalar bit unset");
+
+    // ── (d) tri_member_id column (wireframe-parity #6 path (a)) ────
+    // Bit 4 of `flags_mask` flips on the per-tri packed (class_idx,
+    // elem_row) column. Every triangle carries a valid packed id
+    // (high 8 bits ≤ 255 by construction; sentinel u32::MAX is
+    // reserved for cut/slice cap tris, which the base hull has none
+    // of).
+    assert_ne!(v.flags_mask & 16, 0, "tri_member_id bit set on base hull");
+    assert_eq!(
+        v.tri_member_id.len(),
+        v.n_idx / 3,
+        "tri_member_id parallel to triangles"
+    );
+    assert!(
+        v.tri_member_id.iter().all(|m| *m != u32::MAX),
+        "base hull has no cap sentinels"
+    );
+    // class_idx is dense from 0 across the included classes.
+    let mut class_indices: Vec<u32> = v.tri_member_id.iter().map(|m| m >> 24).collect();
+    class_indices.sort_unstable();
+    class_indices.dedup();
+    assert_eq!(
+        class_indices[0], 0,
+        "first encountered class_idx starts at 0"
+    );
 
     // ── (a) round-trip all four flag bits via the typed result show ─
     // Show *with* a primal result so the scalar bit is set too. The
