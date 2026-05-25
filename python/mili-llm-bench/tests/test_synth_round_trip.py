@@ -160,6 +160,48 @@ def test_every_catalog_intent_has_at_least_one_row(synth_run):
     )
 
 
+def test_no_unsubstituted_param_tokens_anywhere(synth_run):
+    """A synthesized record must not carry literal ``<param:name>``
+    tokens. They are template placeholders; any that survive into the
+    JSONL mean the resolver missed a position.
+
+    Stage 6.5 (2026-05-24) caught 16 unsubstituted ``<param:class>``
+    tokens in atomic ``select`` postconditions because the resolver
+    walked dict *values* but not dict *keys*. Pin the broader invariant
+    here so future template positions can't reintroduce the same shape
+    of bug without the always-on suite failing.
+    """
+    out_path, _report = synth_run
+    text = Path(out_path).read_text()
+    # Match the synth-side token shape, not just <param:...> — the
+    # catalog also uses <int:...>, <str:...>, <bool:...>, <enum:...>,
+    # <list[int]:...>, and <derived:...> placeholders.
+    import re
+    pattern = re.compile(r"<(?:param|int|str|bool|enum|list\[int\]|derived):[A-Za-z_][A-Za-z0-9_]*>")
+    leaks = pattern.findall(text)
+    assert not leaks, (
+        f"{len(leaks)} unsubstituted template tokens leaked into "
+        f"{out_path}: {sorted(set(leaks))[:10]}"
+    )
+
+
+def test_substitute_resolves_dict_keys():
+    """Unit-level pin: ``substitute()`` resolves ``<param:name>`` tokens
+    that appear as dict keys, not only as dict values.
+
+    Catalog templates encode "the param value names the bucket key" via
+    constructs like ``{"selection": {"<param:class>": "<param:range>"}}``.
+    The resolver's prior implementation walked values only, so the key
+    stayed literal and the verifier compared against ``"<param:class>"``
+    instead of e.g. ``"brick"``.
+    """
+    from mili_llm_bench.synth.slots import substitute
+
+    tree = {"selection": {"<param:class>": "<param:range>"}}
+    out = substitute(tree, {"class": "brick", "range": "1-10"})
+    assert out == {"selection": {"brick": "1-10"}}, out
+
+
 def test_deterministic_at_fixed_seed(tmp_path: Path):
     out_a = tmp_path / "a.jsonl"
     out_b = tmp_path / "b.jsonl"

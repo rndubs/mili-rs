@@ -1,8 +1,11 @@
 # M5 — SFT pipeline (live tracker)
 
-**Status (2026-05-24):** Stage 2 about to start. Floor 40% L3
-(FunctionGemma-270M + GEPA-promoted tools), ceiling 92% L3 (Claude
-Sonnet 4.5). SFT must close the 52-point gap.
+**Status (2026-05-24):** Stages 2, 3, and 6.5 cleared. Floor 40% L3
+(FunctionGemma-270M + GEPA-promoted tools on bootstrap eval),
+matched-tools ceiling 97.71% L3 (Claude Sonnet 4.5 on synth.jsonl;
+rev 7). SFT must close the gap to that ceiling — next stages are
+preflight check #2 (chat-template parity) or Stage 5 (teacher
+rollouts).
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -26,7 +29,8 @@ canonical harness config (`step_cap=8`, `temperature=0.0`,
 | --------------------------------------------------------- | ----------------------------- | -------- | ------------ | ------------------------------------------------ |
 | **v5 floor** (`v5-llamacpp-promoted-tools`)               | llamacpp / FunctionGemma-270M | **40 %** | `27ffbd0e…`  | Current default; reproduces GEPA-promoted tools  |
 | v4 floor (`v4-llamacpp-realfixtures-fullresolve`)         | llamacpp / FunctionGemma-270M | 32 %     | `cdda3677…`  | Pre-GEPA-promotion; historical                   |
-| **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools — re-measure planned         |
+| **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools, bootstrap eval; re-measured |
+| **v7 ceiling** (`v7-stage65-anthropic-smoke-…`)           | anthropic / claude-sonnet-4-5 | **98 %** | (synth)      | Post-promotion tools on `synth.jsonl` (175 rows) |
 
 Earlier runs (`v0…v3`) ran against the empty M1 stub corpus before the
 fixture-resolver landed; their absolute numbers are not comparable —
@@ -119,11 +123,15 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
 - [ ] **Stage 4** — Verifier (already exists at
       `python/mili-llm-bench/src/mili_llm_bench/verifier.py`; L0–L3,
       closed failure-mode taxonomy). Reuse, do not rebuild.
-- [ ] **Stage 6.5** — Claude data smoke test. **Runs immediately
-      after Stage 3 produces the first batch**, not after Stage 5.
-      Catches data bugs before they look like model bugs. Gate: ≥85 %
-      L3 under Claude with native tool-use (no GBNF qualifier — Claude
-      doesn't support grammar-constrained decoding).
+- [x] **Stage 6.5** — Claude data smoke test. Cleared the ≥85 % gate
+      at **97.71 % L3 (171 / 175)** on synth.jsonl against Claude
+      Sonnet 4.5 with native tool-use (no GBNF qualifier — Claude
+      doesn't support grammar-constrained decoding). First pass
+      (`v6-stage65-anthropic-smoke-20260524-191418`) failed the
+      per-intent gate on a synth bug (`select` at 0/16 because
+      `<param:class>` keys were not resolved); fix landed in
+      `slots.py`, corpus regenerated deterministically, second pass
+      cleared. See changelog rev 7.
 - [ ] **Stage 5** — Teacher rollouts. Burns Anthropic API on every
       scenario; deliberately last among data stages. Pilot the first
       ~50 scenarios before committing to the full sweep.
@@ -185,9 +193,15 @@ them here too so the live tracker shows the live unknowns.
 2. **Postcondition kinds for compound intents.** Closed set today is 7;
    may need `state_sequence` or a thin `composite` kind. Decide in
    Stage 2 with the catalog, not later.
-3. **Re-measure Claude ceiling on promoted tools.** Current 92 % was
+3. **Re-measure Claude ceiling on promoted tools.** ~~Current 92 % was
    on pre-promotion `tools.json`. Re-run is cheap; queue it before
-   Stage 5 so the gap measurement is matched-tools.
+   Stage 5 so the gap measurement is matched-tools.~~ **Resolved
+   2026-05-24 (rev 7).** Stage 6.5 on `synth.jsonl` (post-promotion
+   `tools.json`, system_prompt_sha256 `9f36d0deb5e98a89`) measured
+   Claude at **97.71 % L3 (171 / 175)**. The matched-tools ceiling
+   for the SFT corpus is therefore ~98 %, not 92 %. The 92 % number
+   on the 50-row bootstrap eval stands as a separate pinned baseline;
+   they are different corpora, not directly comparable.
 4. **Paraphrase diversity.** Stage-8 has a diversity check — if v1
    paraphrases collapse stylistically, that invalidates the corpus
    regardless of L3 numbers.
@@ -212,6 +226,55 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-24 (rev 7)** — Stage 6.5 cleared. Claude Sonnet 4.5
+  smoke test on `synth.jsonl` (175 scenarios, post-promotion
+  `tools.json`, system_prompt_sha256 `9f36d0deb5e98a89`, step_cap=8,
+  temperature=0.0) measured **97.71 % L3 (171 / 175)** — above the
+  ≥85 % gate, no intent at 0 %. Per-intent: 13 / 14 intents at
+  100 %; `query` at 8 / 12 (66.7 %, all 4 misses `wrong_final_state`,
+  same scenario IDs in both v6 and v7 — model retries without
+  `states=[1]`, postcondition exact-matches). Artifacts:
+  `data/posttraining/runs/v7-stage65-anthropic-smoke-20260524-193008/`.
+  Risk #3 (re-measure Claude ceiling on promoted tools) resolved —
+  the matched-tools ceiling for the SFT corpus is ~98 %, not the 92 %
+  pre-promotion number on the 50-row bootstrap eval.
+
+  **First-pass blocker found and fixed.** v6 run
+  (`v6-stage65-anthropic-smoke-20260524-191418`) hit 88.6 % overall
+  but failed the per-intent gate at **`select` = 0 / 16**: every
+  atomic `select` postcondition carried a literal `<param:class>`
+  dict key because the synth slot resolver
+  (`python/mili-llm-bench/src/mili_llm_bench/synth/slots.py`) walked
+  dict *values* but not dict *keys*. Catalog templates encode the
+  selection bucket as `{"selection": {"<param:class>": "<param:range>"}}`,
+  so the value got resolved (`"1-10"`) while the key stayed literal,
+  and the verifier compared `{"<param:class>": "1-10"}` against the
+  live `{"brick": "1-10"}` — never matched. Fix factored the token
+  resolver out and applied it to keys in both `substitute()` and
+  `resolve_expect.walk()`. Two new pins in
+  `python/mili-llm-bench/tests/test_synth_round_trip.py`:
+  `test_substitute_resolves_dict_keys` (unit) and
+  `test_no_unsubstituted_param_tokens_anywhere` (broader invariant —
+  catches any future template token leaking into synth.jsonl, not
+  just `<param:>` in keys). 11 / 11 synth tests pass.
+  `data/posttraining/scenarios/synth.jsonl` regenerated
+  deterministically at `seed=42`: still 175 scenarios, 41 compound
+  (23.43 %), zero `<param:…>` tokens. `compound-select-then-show`
+  passed 14 / 14 in *both* v6 and v7 because the compound
+  postcondition checks the final `show`, not selection, so the bug
+  was invisible in the compound rows — exactly the failure mode
+  Stage 6.5 is designed to catch.
+
+  `query` weakness parked, **not** patched in this rev. Top-3 of 4
+  failures (synth-00124, 00127, 00130, 00133) all have the model
+  emit `query(...)` once with `states="null"` (string), then retry
+  without `states`; postcondition expects `states=[1]`. Three
+  possible fixes (verifier leniency on default state, instruction
+  pinning `state 1`, tool-schema default) — none decided. Tracked
+  in catalog `query.todo_v2` for the next pass (do not gate Stage 5
+  on this; 66.7 % is below 0 % only by definition, and the corpus
+  clears 85 % overall + has no zero-rate intents).
 
 - **2026-05-24 (rev 6)** — Stage 3 query read-path wired end-to-end.
   `mili-viz-server`'s `Query` RPC, frozen as an M1 shape-only stub

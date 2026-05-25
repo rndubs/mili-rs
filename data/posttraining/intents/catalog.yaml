@@ -374,6 +374,18 @@ intents:
          parity suite has pinned values for those derived fields per
          (fixture, class, label, state)."
       - "Add multi-state and 'all labels' (labels=null) query variants."
+      - "Stage 6.5 (2026-05-24, rev 7): 4 / 12 query rows graded
+         wrong_final_state under Claude (synth-00124, 00127, 00130,
+         00133 — paraphrases that name a label but not a state). The
+         model first calls query(...) with states=\"null\" (string),
+         the dispatcher errors, the retry drops `states` entirely; the
+         postcondition exact-matches on states=[1]. Three options for
+         v2: (a) make the verifier lenient on default state when the
+         instruction omits one, (b) pin states=1 explicitly in the
+         atomic-query paraphrase seeds, or (c) ship a tool-schema
+         default (`states: default current`) so the model never has to
+         emit `null`. No fix in v1; Stage 5 is unaffected because
+         this miss is post-condition, not parse/dispatch."
 
   # ========== COMPOUND ==========
 

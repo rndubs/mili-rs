@@ -52,19 +52,10 @@ class ResolvedScenario:
     steps: tuple[dict[str, Any], ...] = field(default_factory=tuple)
 
 
-def substitute(tree: Any, bound: dict[str, Any]) -> Any:
-    """Walk a template tree, substituting ``<param:name>``-style tokens.
-
-    Leaves non-token strings untouched and recurses into nested
-    dicts/lists. ``<derived:...>`` tokens are *not* resolved here —
-    callers route those through ``resolve_derived``.
-    """
-    if isinstance(tree, dict):
-        return {k: substitute(v, bound) for k, v in tree.items()}
-    if isinstance(tree, list):
-        return [substitute(v, bound) for v in tree]
-    if not isinstance(tree, str):
-        return tree
+def _resolve_param_token(tree: str, bound: dict[str, Any]) -> Any:
+    """Resolve one ``<param:name>``-style string in isolation. Non-tokens
+    pass through unchanged. Tokens whose ``name`` is unbound raise
+    ``KeyError`` so a malformed template fails loudly at synth time."""
     m = _PARAM_TOKEN.match(tree)
     if m is None:
         return tree
@@ -72,6 +63,35 @@ def substitute(tree: Any, bound: dict[str, Any]) -> Any:
     if name not in bound:
         raise KeyError(f"slot {tree!r} requires bound[{name!r}] which is unset")
     return bound[name]
+
+
+def _resolve_key(key: Any, bound: dict[str, Any]) -> Any:
+    """Substitute a dict key. Catalog templates use keys like
+    ``"<param:class>"`` to express "the value of this param names the
+    selection-set bucket" — without resolving keys, the select
+    postcondition would compare against literal ``"<param:class>"``
+    instead of e.g. ``"brick"`` (Stage 6.5, 2026-05-24)."""
+    if not isinstance(key, str):
+        return key
+    return _resolve_param_token(key, bound)
+
+
+def substitute(tree: Any, bound: dict[str, Any]) -> Any:
+    """Walk a template tree, substituting ``<param:name>``-style tokens.
+
+    Leaves non-token strings untouched and recurses into nested
+    dicts/lists. Dict *keys* are substituted too, not only values:
+    catalog templates use keys like ``"<param:class>"`` to bind the
+    map slot itself. ``<derived:...>`` tokens are *not* resolved here —
+    callers route those through ``resolve_derived``.
+    """
+    if isinstance(tree, dict):
+        return {_resolve_key(k, bound): substitute(v, bound) for k, v in tree.items()}
+    if isinstance(tree, list):
+        return [substitute(v, bound) for v in tree]
+    if not isinstance(tree, str):
+        return tree
+    return _resolve_param_token(tree, bound)
 
 
 def resolve_derived(
@@ -122,7 +142,7 @@ def resolve_expect(
 
     def walk(node: Any) -> Any:
         if isinstance(node, dict):
-            return {k: walk(v) for k, v in node.items()}
+            return {_resolve_key(k, bound): walk(v) for k, v in node.items()}
         if isinstance(node, list):
             return [walk(v) for v in node]
         if not isinstance(node, str):
