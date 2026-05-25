@@ -182,6 +182,7 @@ impl Session {
                     tri_flags: Vec::new(),
                     edges: Vec::new(),
                     scalar: scalar_in.clone(),
+                    tri_member_id: Vec::new(),
                 }
             };
             let cb = if let Some(plane) = &self.slice {
@@ -201,6 +202,7 @@ impl Session {
                 &cb.tri_flags,
                 &cb.edges,
                 cb.scalar.as_deref(),
+                Some(&cb.tri_member_id),
             );
             (buf, geometry::LAYOUT_VOL, n_idx, nv)
         } else {
@@ -270,6 +272,36 @@ impl Session {
                         seen.push(d);
                     }
                 }
+            }
+        }
+        // Wireframe-parity #6 path (a): emit per-class membership rows
+        // so a `Pick::member_id` lifted off the geometry blob's bit-4
+        // column resolves locally to (class_name, label) without a
+        // Query round-trip. `class_idx` matches the high 8 bits of the
+        // `tri_member_id` packing because both walks iterate
+        // `MeshTopology::elem_classes` in the same order. Unknown to
+        // older clients (skipped by the existing `decode_catalog`
+        // tag-tolerance loop).
+        if let Some(topo) = self.topo.as_ref() {
+            for (ci, summary) in topo.elem_class_summary().iter().enumerate() {
+                if summary.elements == 0 {
+                    continue;
+                }
+                let ec = topo.elem_class_at(ci);
+                blob.extend_from_slice(b"M\t");
+                blob.extend_from_slice(ci.to_string().as_bytes());
+                blob.push(b'\t');
+                blob.extend_from_slice(ec.name.as_bytes());
+                blob.push(b'\t');
+                let mut first = true;
+                for label in &ec.labels {
+                    if !first {
+                        blob.push(b',');
+                    }
+                    blob.extend_from_slice(label.to_string().as_bytes());
+                    first = false;
+                }
+                blob.push(b'\n');
             }
         }
         Some(blob)

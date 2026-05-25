@@ -25,6 +25,7 @@ use mili_viz_server::{spawn_in_process, VizService, CLIENT_ID_HEADER};
 use tonic::Request;
 
 const CAP_MATERIAL: u32 = u32::MAX - 1;
+const TRI_MEMBER_NONE: u32 = u32::MAX;
 
 fn corpus_path(rel: &[&str]) -> PathBuf {
     let mut p = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -54,6 +55,9 @@ struct Blob {
     verts: Vec<f32>,
     indices: Vec<u32>,
     tri_material: Vec<u32>,
+    /// Wireframe-parity #6 path (a): per-tri packed `(class_idx,
+    /// elem_row)`. Cap tris carry [`TRI_MEMBER_NONE`].
+    tri_member_id: Vec<u32>,
 }
 
 fn decode(layout: &str, raw: Vec<u8>) -> Blob {
@@ -62,9 +66,13 @@ fn decode(layout: &str, raw: Vec<u8>) -> Blob {
     assert_eq!(dims, 3);
     let n_verts = u64::from_le_bytes(raw[8..16].try_into().unwrap()) as usize;
     let n_idx = u64::from_le_bytes(raw[16..24].try_into().unwrap()) as usize;
-    let header = match magic {
-        b"MVG1" | b"MVG2" => 24,
-        b"MVG3" => 36,
+    let (header, n_edges, flags_mask) = match magic {
+        b"MVG1" | b"MVG2" => (24, 0, u32::from(magic == b"MVG2")),
+        b"MVG3" => (
+            36,
+            u64::from_le_bytes(raw[24..32].try_into().unwrap()) as usize,
+            u32::from_le_bytes(raw[32..36].try_into().unwrap()),
+        ),
         _ => panic!("unknown magic {magic:?}"),
     };
     let n_tri = n_idx / 3;
@@ -91,6 +99,24 @@ fn decode(layout: &str, raw: Vec<u8>) -> Blob {
             )
         })
         .collect();
+    // Walk past optional MVG3 columns to land on tri_member_id.
+    let mut off = trimat_off + n_tri * 4;
+    if magic == b"MVG3" && flags_mask & 2 != 0 {
+        off += n_tri * 4;
+    }
+    if magic == b"MVG3" && flags_mask & 4 != 0 {
+        off += n_edges * 4;
+    }
+    if flags_mask & 1 != 0 {
+        off += n_verts * 4;
+    }
+    let tri_member_id: Vec<u32> = if magic == b"MVG3" && flags_mask & 16 != 0 {
+        (0..n_tri)
+            .map(|i| u32::from_le_bytes(raw[off + i * 4..off + i * 4 + 4].try_into().unwrap()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Blob {
         layout: layout.to_string(),
         raw,
@@ -98,6 +124,7 @@ fn decode(layout: &str, raw: Vec<u8>) -> Blob {
         verts,
         indices,
         tri_material,
+        tri_member_id,
     }
 }
 
@@ -227,6 +254,35 @@ async fn cutplane_operator() {
         n_cap > 0,
         "interior cut produces cap triangles (got {n_cap})"
     );
+
+    // (b') wireframe-parity #6 path (a): every cap tri carries the
+    // `TRI_MEMBER_NONE` sentinel (caps are geometric intersections
+    // without a single owning element); every kept tri carries a
+    // valid packed (class_idx, elem_row) member id.
+    assert!(
+        !cut.tri_member_id.is_empty(),
+        "MVG3 cut blob carries tri_member_id column"
+    );
+    assert_eq!(
+        cut.tri_member_id.len(),
+        cut.tri_material.len(),
+        "tri_member_id parallel to tri_material"
+    );
+    for (i, (&mat, &mem)) in cut
+        .tri_material
+        .iter()
+        .zip(cut.tri_member_id.iter())
+        .enumerate()
+    {
+        if mat == CAP_MATERIAL {
+            assert_eq!(
+                mem, TRI_MEMBER_NONE,
+                "cap tri {i} must carry the no-member sentinel"
+            );
+        } else {
+            assert_ne!(mem, TRI_MEMBER_NONE, "kept tri {i} must carry a real member id");
+        }
+    }
 
     // (c) every cap vertex lies on the plane within tolerance.
     // (d) every non-cap (kept-side) vertex has signed_distance >= -eps.

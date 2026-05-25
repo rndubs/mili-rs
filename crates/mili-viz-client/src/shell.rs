@@ -963,17 +963,26 @@ impl ShellState {
         UiAction::TogglePicking
     }
 
-    /// Fold a ray-cast result into the status-bar readout. The frozen
-    /// proto has no label catalog, so a hit shows the node/triangle
-    /// indices the cached hull actually carries (plus the `MVG2`
-    /// scalar when present); a miss reads `(no hit)`.
+    /// Fold a ray-cast result into the status-bar readout. When the
+    /// catalog side-channel carried per-class membership rows
+    /// (wireframe-parity #6 path (a)) AND the hit triangle's
+    /// `tri_member_id` resolves, the readout is the legacy griz
+    /// `<class> <label>` form (`brick 42 · v=…`); otherwise it falls
+    /// back to the `tri T · node N` form. A miss reads `(no hit)`.
     pub fn apply_pick(&mut self, hit: Option<&crate::mesh::Pick>) {
         self.pick = match hit {
             None => "(no hit)".to_string(),
-            Some(p) => match p.scalar {
-                Some(v) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
-                None => format!("node {} · tri {}", p.node, p.tri),
-            },
+            Some(p) => {
+                let resolved = p.member_id.and_then(|id| {
+                    self.catalog.as_ref().and_then(|c| c.resolve_member(id))
+                });
+                match (resolved, p.scalar) {
+                    (Some((name, label)), Some(v)) => format!("{name} {label} · v={v:.3e}"),
+                    (Some((name, label)), None) => format!("{name} {label}"),
+                    (None, Some(v)) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
+                    (None, None) => format!("node {} · tri {}", p.node, p.tri),
+                }
+            }
         };
         // Remember the hit point for the viewport highlight glyph; a
         // miss clears it so a stale marker never lingers (MVP-cut 4).

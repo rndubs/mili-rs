@@ -27,10 +27,12 @@ Refreshed 2026-05-24 against the same files. Phase 5 M5 (remote mode),
 M6 (agent integration polish), M7 (render modes consuming `MVG3`),
 M8 (cut-plane gizmo), and M9 (slice gizmo) have **all** landed since
 the derive date — most "⬜ missing" / "🔴 placeholder" rows below for
-those features have been flipped. The genuinely-still-stub rows
-(empty `Results`/`Time`/`Plot`/`Help` menus, Surfaces, time-indep
-results catalog, `Query`-fed time-history, scripting `venv:`/`attach:`
-indicators, File→Open, picking class-N label) are unchanged.
+those features have been flipped. Picking class-N label has also
+landed (path (a) — per-tri MVG3 column + catalog `M` tag; see
+[`wireframe-parity-6.md`](wireframe-parity-6.md)). The
+genuinely-still-stub rows (Surfaces, time-indep results catalog,
+scripting managed-venv + `attach`-into-this-GUI, File→Open) are
+unchanged.
 
 ---
 
@@ -94,7 +96,7 @@ indicators, File→Open, picking class-N label) are unchanged.
 | ---- | ------ | ----- | --- |
 | Command line (Layer-0 verbatim, transcript) | ✅ done | — | status 17 |
 | Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). Forward path: a `pip install`ed managed venv + `attach()`-into-*this*-GUI (the latter gated on Phase 5 M5 remote mode — the in-process client writes no session file) | client.md dec 3 / phase-6-m2 / status 18–20, 23 |
-| Time-history plot | ✅ done (text-input variant) | fed by `ResultState` min/max envelope **plus** per-element `Query`-fed lines. Server `Query` RPC dispatches `Database::query_full` for primal svars (`InlineTable` carrier with `[states × labels × components]` row-major shape; out-of-range / no-run-loaded surface as typed `ok=false` errors; derived results route to "not yet supported" until the geometry-path derived dispatch is replicated). Plot tab body renders each series as its own line (round-robin palette, distinct from the envelope colours); input row carries `class · id · svar · comp` fields + `+series` button → `UiAction::QueryElementSeries`. `app.rs` lowering issues the request over all states the run advertises, parses the inline reply, and pushes samples back via `ShellState::push_element_series`; failures drop the placeholder so the legend never accumulates empty rows. The picking-driven variant (click an element → plot its series) still needs the picking-class-N label catalog (punch-list item below) | phase-5-m3.5 Dec 50 |
+| Time-history plot | ✅ done (text-input variant) | fed by `ResultState` min/max envelope **plus** per-element `Query`-fed lines. Server `Query` RPC dispatches `Database::query_full` for primal svars (`InlineTable` carrier with `[states × labels × components]` row-major shape; out-of-range / no-run-loaded surface as typed `ok=false` errors; derived results route to "not yet supported" until the geometry-path derived dispatch is replicated). Plot tab body renders each series as its own line (round-robin palette, distinct from the envelope colours); input row carries `class · id · svar · comp` fields + `+series` button → `UiAction::QueryElementSeries`. `app.rs` lowering issues the request over all states the run advertises, parses the inline reply, and pushes samples back via `ShellState::push_element_series`; failures drop the placeholder so the legend never accumulates empty rows. The picking-driven variant (click an element → plot its series) is now **unblocked** — `Pick::member_id` + `ResultCatalog::resolve_member` (the path-(a) plumbing from [`wireframe-parity-6.md`](wireframe-parity-6.md)) give the (class, label) the new `+series` button needs; the UX wiring is a separate small follow-up | phase-5-m3.5 Dec 50 |
 | Whole-region hide (tweak) | ✅ done | `Preferences → Show bottom tabs` checkbox suppresses the whole `tabs` panel (strip + body) via `ShellState::show_bottom_tabs` (default `true` → L1 byte-stable) → `UiAction::SetShowBottomTabs` → persisted in `tweaks.json`. The per-tab `▾ hide` still collapses the body only (its own runtime mode). Regression-tested by `m3_5_bottom_tabs::show_bottom_tabs_false_suppresses_the_panel` | — |
 
 ## Status bar
@@ -124,7 +126,7 @@ indicators, File→Open, picking class-N label) are unchanged.
 | Item | Status | Notes | Ref |
 | ---- | ------ | ----- | --- |
 | File → Open / `rfd` picker | ⏸️ deferred | own milestone (maintainer decision); load via CLI `-i` / Layer-0 `load` only | status 21 |
-| Picking (client-side from cached `GeometryRef`) | 🟡 partial | ray-cast vs. cached hull → live status-bar readout (node/tri/scalar) **+ viewport highlight glyph** (ring+crosshair over the cached hit, projected through the live camera so it tracks orbit/pan/zoom + deform; off-by-default/no-camera → no glyph, byte-stable). Remaining: the frozen proto has no label catalog, so still no `class N` mapping (design-first, deferred) | status 23 |
+| Picking (client-side from cached `GeometryRef`) | ✅ done | ray-cast vs. cached hull → live status-bar readout (now in legacy griz `<class> <label> · v=…` form when the catalog resolves the picked tri's `member_id`; falls back to `node N · tri T · v=…` for cap tris / older servers) **+ viewport highlight glyph** (ring+crosshair over the cached hit, projected through the live camera so it tracks orbit/pan/zoom + deform; off-by-default/no-camera → no glyph, byte-stable). Per-tri owner id rides MVG3's new `flags_mask` bit 4 column (`(class_idx, elem_row)` packed `u32`); the `class_idx → (class_name, labels[])` table rides the catalog blob's new `M\t...` tag. Zero per-pick latency, no `.proto` change | status 23 / [`wireframe-parity-6.md`](wireframe-parity-6.md) Decisions 104–106 |
 | Agent / multi-client session states | ✅ done | `AgentStatus::{Thinking, Idle, Interrupted, Error}` ingested by `AiPanelState` → drives the panel status pill + ⏹ Stop swap; `Interrupted` rows are typed transcript entries; peer count rides `Status.detail = "peers=N"` (see "Multi-client peer banner") | status 25 / phase-5-m6 |
 | Remote mode (gRPC+Flight wired to `connect`/`attach`) | ✅ done | `Session::connect_tcp` + `Session::attach` over the Phase 4 M6 wire — one tuned `tonic::Channel` cloned for `MiliVizClient` + `FlightServiceClient`, Flight `DoGet` streams the byte-identical M2/M3 blob; CLI `-r`/`--remote <host:port>` + `--attach [<id>]` (mutually exclusive); `--attach` reuses the same `~/.griz/sessions/<id>.json` resolver pygriz uses (newest-live pid liveness via `kill(pid, 0)`). HPC-latency tuning: `tcp_nodelay`, TCP + HTTP/2 keep-alives, 10 s `connect_timeout` | status 22 / phase-5-m5 |
 
@@ -175,19 +177,30 @@ leverage, ordered "ship-blocking first":
    submit/clear, idempotent re-submit, component differentiates
    identical-otherwise series, push/drop round-trip, painted shell
    stays input-free). The **picking-driven** variant (click an
-   element on the hull → plot its series) is still open — blocked
-   on the picking-class-N label catalog (item #6).
+   element on the hull → plot its series) is now **unblocked** —
+   item #6 landed (path (a):
+   [`wireframe-parity-6.md`](wireframe-parity-6.md));
+   `Pick::member_id` + `ResultCatalog::resolve_member` give the
+   `(class, label)` the new `+series` button needs. Open as a small
+   UX follow-up: lower a pick to a one-click `+series` button.
 5. **Scripting tab — managed venv + attach-into-*this*-GUI**
    (`shell.rs:1012`, the `venv: starting · attach: launch` line).
    Runner works; the `pip install`ed managed venv and
    `attach()`-into-this-GUI (the latter requires the in-process
    client to write a session file — a small but design-first
    change) remain. Self-contained UX improvement.
-6. **Picking class-N label** — picking ray-cast, status-bar readout,
-   and viewport highlight glyph all landed; only the `class N`
-   mapping is missing (frozen proto has no label catalog, so this
-   needs a new catalog side-channel tag or a `Query` round-trip).
-   Small UX gain; design-first.
+6. **Picking class-N label** — ✅ done. Per-tri owner id
+   `(class_idx, elem_row)` rides MVG3's new `flags_mask` bit 4
+   column; the small class-membership table rides the catalog
+   blob's new `M\t<class_idx>\t<class_name>\t<labels.csv>` tag
+   (existing `MVCAT1` magic, unknown-tag tolerance keeps older
+   clients working). Pick readout switches to the legacy griz
+   `<class> <label> · v=…` form when the catalog resolves; cap
+   tris carry a sentinel and fall back to the legacy
+   `node N · tri T` form. Zero per-pick latency, no `.proto` /
+   ticket / RPC change. Unblocks the picking-driven variant of
+   #4 (click element → `+series` in the Plot tab — separate
+   follow-up). See [`wireframe-parity-6.md`](wireframe-parity-6.md).
 7. **Bottom-tabs whole-region hide** — ✅ done. `Preferences → Show
    bottom tabs` checkbox suppresses the whole `tabs` panel (strip +
    body); persisted via `tweaks.json`. The per-tab `▾ hide` retains
@@ -228,8 +241,10 @@ for the audit trail.
 2. ✅ **Wireframe / element-edge render mode** (VB-003) — done; VB-005
    diagonals closed by always-on `MVG3`.
 3. ✅ **Materials enable/disable affordance** — done.
-4. 🟡 **Picking** — ray-cast, status-bar readout, and viewport
-   highlight glyph landed; only the `class N` label mapping remains.
+4. ✅ **Picking** — ray-cast, status-bar readout (now legacy griz
+   `<class> <label>`), viewport highlight glyph, and the `class N`
+   label mapping all landed (path (a):
+   [`wireframe-parity-6.md`](wireframe-parity-6.md)).
 5. ✅ **Real bbox overlay + camera-tracking axes gizmo** — done.
 6. ⏸️ **File → Open** — deferred.
 7. ✅ **L3 focus mode + theme/tweaks surface** — done.

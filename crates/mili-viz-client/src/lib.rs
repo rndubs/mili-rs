@@ -40,7 +40,7 @@ pub use ai_panel::{
 };
 pub use app::run;
 pub use camera::Camera;
-pub use catalog::{decode_catalog, ResultCatalog};
+pub use catalog::{decode_catalog, ClassMembership, ResultCatalog};
 pub use cli::{parse_args, CliArgs, CliOutcome, SnapshotArgs, TransportChoice};
 pub use colormap::{
     normalize as colormap_normalize, sample as colormap_sample,

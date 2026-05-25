@@ -52,7 +52,7 @@ pub const LAYOUT_SCALAR: &str = "MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32"
 /// populated for any given blob; interior triangles ride only when
 /// the reserved `include_interior` sentinel is set (Decision 74).
 pub const LAYOUT_VOL: &str =
-    "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32";
+    "MVG3:verts_f32x3+idx_u32+trimat_u32+triflags_u32+edges_u32+scalar_f32+member_u32";
 
 /// Reserved sentinel material id for the `include_interior` viz-state
 /// toggle (phase-4-m7.md Decision 74): a `MaterialVisibility{ material:
@@ -61,11 +61,39 @@ pub const LAYOUT_VOL: &str =
 /// frozen proto.
 pub const INTERIOR_SENTINEL: u32 = u32::MAX;
 
+/// Sentinel value for the optional `tri_member_id` MVG3 column
+/// (wireframe-parity #6 path (a)): triangles with no single owning
+/// element (cut/slice cap tris). The client treats this as "no member"
+/// and falls back to the legacy `tri T  node N` status-bar readout.
+pub const TRI_MEMBER_NONE: u32 = u32::MAX;
+
+/// Pack `(class_idx, elem_row)` into the wire `tri_member_id` u32.
+/// High 8 bits = class index in `MeshTopology::elem_classes` order
+/// (matches the `M\t<class_idx>` rows on the catalog side-channel);
+/// low 24 bits = element row within that class.
+///
+/// # Panics
+/// Panics if `class_idx >= 256` or `elem_row >= 1 << 24`. Both caps
+/// are intentional — the wire format is fixed at 8/24, and exceeding
+/// either is a design break the test suite should catch.
+#[inline]
+#[must_use]
+pub fn pack_tri_member_id(class_idx: u32, elem_row: u32) -> u32 {
+    assert!(
+        class_idx < 256,
+        "class_idx {class_idx} exceeds 8-bit cap for tri_member_id packing"
+    );
+    assert!(
+        elem_row < (1 << 24),
+        "elem_row {elem_row} exceeds 24-bit cap for tri_member_id packing"
+    );
+    (class_idx << 24) | (elem_row & 0x00FF_FFFF)
+}
+
 /// One prepped element class kept for M3 nodal scatter: the element →
 /// corner-node-id rows and the parallel element label list (same row
 /// order as `connectivity_ids` / `labels`).
 pub(crate) struct ElemClass {
-    #[allow(dead_code)]
     pub(crate) name: String,
     pub(crate) n_nodes: usize,
     /// Flat `[elem * n_nodes]` 0-based node ids.
@@ -1015,14 +1043,20 @@ impl MeshTopology {
     /// `tri_flags = 0`; interior faces (count >= 2) are emitted
     /// **once** with `tri_flags = 1` so a translucent renderer can
     /// draw them without double-counting the boundary. Returns
-    /// (indices, tri_material, tri_flags). The shared face is
-    /// attributed to its **first-encountered** element's material —
-    /// well-defined and stable for the current input order.
-    fn build_volumetric_faces(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
-        // (count, attribution-material, face_nodes in walk order)
-        let mut by_key: HashMap<Vec<u32>, (usize, u32, Vec<u32>)> = HashMap::new();
+    /// (indices, tri_material, tri_flags, tri_member_id). The shared
+    /// face is attributed to its **first-encountered** element's
+    /// material and (class_idx, elem_row) — well-defined and stable
+    /// for the current input order.
+    ///
+    /// `tri_member_id` is the packed per-triangle owner id
+    /// (wireframe-parity #6 path (a)); the `class_idx` matches the
+    /// `M\t<class_idx>` rows on the catalog side-channel since both
+    /// walks iterate `self.elem_classes` in the same order.
+    fn build_volumetric_faces(&self) -> (Vec<u32>, Vec<u32>, Vec<u32>, Vec<u32>) {
+        // (count, attribution-material, attribution-member_id, face_nodes in walk order)
+        let mut by_key: HashMap<Vec<u32>, (usize, u32, u32, Vec<u32>)> = HashMap::new();
         let mut order: Vec<Vec<u32>> = Vec::new();
-        for ec in &self.elem_classes {
+        for (ci, ec) in self.elem_classes.iter().enumerate() {
             let faces = faces_table(ec.superclass);
             if faces.is_empty() {
                 continue;
@@ -1031,6 +1065,7 @@ impl MeshTopology {
             for e in 0..elems {
                 let row = &ec.conns[e * ec.n_nodes..(e + 1) * ec.n_nodes];
                 let mat = ec.materials.get(e).copied().unwrap_or(0);
+                let member_id = pack_tri_member_id(ci as u32, e as u32);
                 for face in faces {
                     if face.iter().any(|&li| li >= ec.n_nodes) {
                         continue;
@@ -1045,7 +1080,7 @@ impl MeshTopology {
                         .and_modify(|v| v.0 += 1)
                         .or_insert_with(|| {
                             order.push(key);
-                            (1, mat, face_nodes.clone())
+                            (1, mat, member_id, face_nodes.clone())
                         });
                 }
             }
@@ -1053,8 +1088,9 @@ impl MeshTopology {
         let mut indices: Vec<u32> = Vec::new();
         let mut tri_material: Vec<u32> = Vec::new();
         let mut tri_flags: Vec<u32> = Vec::new();
+        let mut tri_member_id: Vec<u32> = Vec::new();
         for key in &order {
-            let (count, mat, face_nodes) = by_key.remove(key).unwrap();
+            let (count, mat, member_id, face_nodes) = by_key.remove(key).unwrap();
             let flag = if count >= 2 { 1u32 } else { 0u32 };
             for tri in face_tri_positions(face_nodes.len()) {
                 indices.extend_from_slice(&[
@@ -1064,9 +1100,10 @@ impl MeshTopology {
                 ]);
                 tri_material.push(mat);
                 tri_flags.push(flag);
+                tri_member_id.push(member_id);
             }
         }
-        (indices, tri_material, tri_flags)
+        (indices, tri_material, tri_flags, tri_member_id)
     }
 
     /// Serialize pre-built volumetric buffers into the `MVG3` layout
@@ -1082,11 +1119,14 @@ impl MeshTopology {
         tri_flags: &[u32],
         edges: &[u32],
         scalar: Option<&[f32]>,
+        tri_member_id: Option<&[u32]>,
     ) -> Vec<u8> {
         let n_verts = (verts.len() / 3) as u64;
         let n_idx = indices.len() as u64;
+        let n_tri = (n_idx / 3) as usize;
         let n_edges = edges.len() as u64;
         let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
+        let with_member = tri_member_id.is_some_and(|m| m.len() == n_tri && n_tri > 0);
         let mut flags_mask: u32 = 2; // tri_flags always present
         if with_scalar {
             flags_mask |= 1;
@@ -1094,14 +1134,19 @@ impl MeshTopology {
         if !edges.is_empty() {
             flags_mask |= 4;
         }
+        if with_member {
+            flags_mask |= 16;
+        }
         let scalar_bytes = if with_scalar { n_verts as usize * 4 } else { 0 };
+        let member_bytes = if with_member { n_tri * 4 } else { 0 };
         let mut buf = Vec::with_capacity(
             36 + verts.len() * 4
                 + indices.len() * 4
                 + tri_material.len() * 4
                 + tri_flags.len() * 4
                 + edges.len() * 4
-                + scalar_bytes,
+                + scalar_bytes
+                + member_bytes,
         );
         buf.extend_from_slice(b"MVG3");
         buf.extend_from_slice(&3u32.to_le_bytes());
@@ -1129,6 +1174,11 @@ impl MeshTopology {
                 buf.extend_from_slice(&v.to_le_bytes());
             }
         }
+        if with_member {
+            for m in tri_member_id.unwrap() {
+                buf.extend_from_slice(&m.to_le_bytes());
+            }
+        }
         buf
     }
 
@@ -1144,7 +1194,7 @@ impl MeshTopology {
     ) -> (Vec<u8>, u64) {
         let verts = self.coords_at_state(db, state);
         let n_verts = (verts.len() / 3) as u64;
-        let (all_idx, all_mat, all_flags) = self.build_volumetric_faces();
+        let (all_idx, all_mat, all_flags, all_member) = self.build_volumetric_faces();
         let edges = self.build_element_edges();
 
         // Filter triangles by:
@@ -1153,6 +1203,7 @@ impl MeshTopology {
         let mut indices: Vec<u32> = Vec::with_capacity(all_idx.len());
         let mut tri_material: Vec<u32> = Vec::with_capacity(all_mat.len());
         let mut tri_flags: Vec<u32> = Vec::with_capacity(all_flags.len());
+        let mut tri_member_id: Vec<u32> = Vec::with_capacity(all_member.len());
         let n_tri = all_mat.len();
         for t in 0..n_tri {
             let f = all_flags[t];
@@ -1167,11 +1218,13 @@ impl MeshTopology {
             indices.extend_from_slice(&all_idx[t * 3..t * 3 + 3]);
             tri_material.push(mat);
             tri_flags.push(f);
+            tri_member_id.push(all_member[t]);
         }
         let n_idx = indices.len() as u64;
         let n_edges = edges.len() as u64;
 
         let with_scalar = scalar.is_some_and(|s| s.len() == (n_verts as usize) && n_verts > 0);
+        let with_member = !tri_member_id.is_empty();
         let mut flags_mask: u32 = 0;
         if with_scalar {
             flags_mask |= 1;
@@ -1182,6 +1235,9 @@ impl MeshTopology {
         }
         if include_interior {
             flags_mask |= 8;
+        }
+        if with_member {
+            flags_mask |= 16;
         }
 
         let mut buf = Vec::with_capacity(
@@ -1195,7 +1251,8 @@ impl MeshTopology {
                 + tri_material.len() * 4
                 + tri_flags.len() * 4
                 + (edges.len() * 4)
-                + if with_scalar { verts.len() / 3 * 4 } else { 0 },
+                + if with_scalar { verts.len() / 3 * 4 } else { 0 }
+                + if with_member { tri_member_id.len() * 4 } else { 0 },
         );
         buf.extend_from_slice(b"MVG3");
         buf.extend_from_slice(&3u32.to_le_bytes());
@@ -1221,6 +1278,11 @@ impl MeshTopology {
         if with_scalar {
             for v in scalar.unwrap() {
                 buf.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        if with_member {
+            for m in &tri_member_id {
+                buf.extend_from_slice(&m.to_le_bytes());
             }
         }
         (buf, n_idx)
@@ -1397,7 +1459,7 @@ mod tests {
             ],
             12,
         );
-        let (indices, _mat, flags) = topo.build_volumetric_faces();
+        let (indices, _mat, flags, member) = topo.build_volumetric_faces();
         // 6 faces/hex × 2 hexes = 12, dedup the shared face → 11
         // faces. 10 quad boundary + 1 quad interior; each quad = 2
         // tris. Total tris = 22; boundary = 20; interior = 2.
@@ -1406,6 +1468,17 @@ mod tests {
         let boundary: usize = flags.iter().filter(|f| **f & 1 == 0).count();
         assert_eq!(interior, 2, "shared face → one quad → two interior tris");
         assert_eq!(boundary, 20, "10 outward quads × 2 tris");
+        // Per-tri member id parallel to indices; class_idx = 0 (the
+        // single `brick` class), elem_row ∈ {0, 1} for the two hexes.
+        // First-encounter wins on the shared face — but the shared
+        // face is already one of hex 0's 6 faces, so hex 0 contributes
+        // 6 × 2 = 12 tris and hex 1 contributes its 5 unique faces ×
+        // 2 = 10 tris. Total 22. ✓
+        assert_eq!(member.len(), 22, "member id parallel to triangles");
+        let elem0_count = member.iter().filter(|m| **m == 0).count();
+        let elem1_count = member.iter().filter(|m| **m == 1).count();
+        assert_eq!(elem0_count, 12, "first hex: 6 faces × 2 tris");
+        assert_eq!(elem1_count, 10, "second hex: 5 unique faces × 2 tris (one dedup)");
     }
 
     #[test]

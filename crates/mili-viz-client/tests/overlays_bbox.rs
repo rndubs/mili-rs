@@ -19,6 +19,7 @@ fn quad() -> Mesh {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     }
 }
 

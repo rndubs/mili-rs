@@ -69,6 +69,9 @@ fn decode(blob: Vec<u8>, layout: &str) -> Geom {
     } else {
         Vec::new()
     };
+    if magic == b"MVG3" && flags_mask & 16 != 0 {
+        off += n_tri * 4; // tri_member_id (wireframe-parity #6 path (a))
+    }
     assert_eq!(off, blob.len(), "blob fully consumed");
     Geom {
         layout: layout.to_string(),

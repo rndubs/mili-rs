@@ -6,7 +6,10 @@
 //! ([`Mesh::pick`]) and the [`ShellState`] readout are tested
 //! directly, mirroring the m4 pattern.
 
-use mili_viz_client::{build_shell_ui, Camera, Mesh, ShellState, UiAction};
+use mili_viz_client::{
+    build_shell_ui, decode_catalog, decode_mvg, Camera, ClassMembership, Mesh, ResultCatalog,
+    ShellState, UiAction,
+};
 
 /// A 2×2 quad in the z=0 plane, facing -Z (so a camera on +Z sees it).
 fn quad() -> Mesh {
@@ -22,6 +25,7 @@ fn quad() -> Mesh {
         scalars: Some(vec![10.0, 20.0, 30.0, 40.0]),
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     }
 }
 
@@ -105,4 +109,217 @@ fn shell_picking_toggle_and_readout_are_pure() {
     let out = ctx.run_ui(raw, |ui| actions = build_shell_ui(ui, &mut s));
     assert!(actions.is_empty(), "no input ⇒ no actions: {actions:?}");
     assert!(!out.shapes.is_empty(), "the L1 shell must still paint");
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Wireframe-parity #6 path (a): per-tri `member_id` + catalog resolve.
+// ──────────────────────────────────────────────────────────────────────
+
+/// Same 2-tri quad as `quad()`, but with the catalog-provided
+/// per-triangle owner ids set so a pick resolves to a known
+/// (class_name, label) via `ResultCatalog::resolve_member`.
+fn quad_with_members() -> Mesh {
+    let mut m = quad();
+    // Both tris belong to class_idx=0 (`brick`), but to different
+    // element rows so the pick distinguishes them.
+    let id_tri0 = (0u32 << 24) | 0; // (brick, elem_row=0)
+    let id_tri1 = (0u32 << 24) | 1; // (brick, elem_row=1)
+    m.tri_member_id = Some(vec![id_tri0, id_tri1]);
+    m
+}
+
+fn brick_catalog() -> ResultCatalog {
+    ResultCatalog {
+        primal: Vec::new(),
+        derived: Vec::new(),
+        classes: vec![ClassMembership {
+            class_idx: 0,
+            name: "brick".to_string(),
+            // Element labels: tri 0 ⇒ row 0 ⇒ label 41; tri 1 ⇒ row 1
+            // ⇒ label 42. Picked element identity follows the label.
+            labels: vec![41, 42],
+        }],
+    }
+}
+
+#[test]
+fn pick_carries_member_id_when_geometry_blob_does() {
+    let mesh = quad_with_members();
+    // Aim at the lower-right triangle (tri 0, verts 0,1,2): hit near
+    // the (1,0) edge interior.
+    let hit = mesh
+        .pick(glam::vec3(0.6, -0.4, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .expect("centre ray hits the quad");
+    assert_eq!(hit.tri, 0, "lower-right tri");
+    assert_eq!(hit.member_id, Some(0), "carries member id of tri 0");
+
+    // Upper-left triangle (tri 1, verts 0,2,3) — y>x.
+    let hit_b = quad_with_members()
+        .pick(glam::vec3(0.0, 0.6, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .expect("upper-left tri hit");
+    assert_eq!(hit_b.tri, 1);
+    assert_eq!(hit_b.member_id, Some(1), "tri 1's member id");
+}
+
+#[test]
+fn pick_omits_member_id_when_blob_has_no_column() {
+    // The legacy `quad()` helper leaves `tri_member_id: None` — a
+    // pick must report no member id so the shell readout falls back
+    // to the `tri T · node N` form.
+    let hit = quad()
+        .pick(glam::vec3(0.6, -0.4, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .expect("hits");
+    assert!(hit.member_id.is_none(), "no column → no member");
+}
+
+#[test]
+fn pick_omits_member_id_for_cap_sentinel() {
+    let mut mesh = quad_with_members();
+    // Stamp the cap sentinel on tri 0 — pick must surface `None`
+    // (caps have no owning element).
+    if let Some(m) = mesh.tri_member_id.as_mut() {
+        m[0] = u32::MAX;
+    }
+    let hit = mesh
+        .pick(glam::vec3(0.6, -0.4, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .expect("hits");
+    assert_eq!(hit.tri, 0);
+    assert!(hit.member_id.is_none(), "cap sentinel surfaces as None");
+}
+
+#[test]
+fn catalog_resolve_member_unpacks_class_and_label() {
+    let cat = brick_catalog();
+    assert_eq!(cat.resolve_member(0), Some(("brick", 41)));
+    assert_eq!(cat.resolve_member(1), Some(("brick", 42)));
+    // Out-of-range elem_row → None.
+    assert!(cat.resolve_member(99).is_none());
+    // Unknown class_idx → None.
+    assert!(cat.resolve_member((5u32 << 24) | 0).is_none());
+}
+
+#[test]
+fn shell_apply_pick_uses_catalog_when_member_resolves() {
+    let mut s = ShellState {
+        catalog: Some(brick_catalog()),
+        ..ShellState::default()
+    };
+    s.toggle_picking();
+    // Hit tri 0 → (brick, 41).
+    let hit = quad_with_members()
+        .pick(glam::vec3(0.6, -0.4, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .unwrap();
+    s.apply_pick(Some(&hit));
+    assert_eq!(s.pick, "brick 41 · v=2.000e1", "resolved member + scalar");
+
+    // Hit tri 1 → (brick, 42).
+    let hit_b = quad_with_members()
+        .pick(glam::vec3(0.0, 0.6, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .unwrap();
+    s.apply_pick(Some(&hit_b));
+    assert_eq!(s.pick, "brick 42 · v=3.000e1");
+}
+
+#[test]
+fn shell_apply_pick_falls_back_when_catalog_lacks_member() {
+    // Catalog present but no classes → member_id can't resolve →
+    // legacy `tri T · node N` readout.
+    let mut s = ShellState {
+        catalog: Some(ResultCatalog::default()),
+        ..ShellState::default()
+    };
+    s.toggle_picking();
+    let hit = quad_with_members()
+        .pick(glam::vec3(0.6, -0.4, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .unwrap();
+    s.apply_pick(Some(&hit));
+    assert!(s.pick.starts_with("node "), "fallback readout: {}", s.pick);
+}
+
+#[test]
+fn decode_catalog_parses_m_tag_and_tolerates_unknown_tags() {
+    // Hand-built blob: magic + a P, a D, an M row, and a Z unknown
+    // tag (must drop silently). The M row carries class_idx 2, name
+    // `beam`, labels 7,8,9.
+    let mut blob = b"MVCAT1\n".to_vec();
+    blob.extend_from_slice(b"P\tsx\n");
+    blob.extend_from_slice(b"D\teff_stress\n");
+    blob.extend_from_slice(b"M\t2\tbeam\t7,8,9\n");
+    blob.extend_from_slice(b"Z\tfrom_the_future\n");
+    blob.extend_from_slice(b"M\t0\tbrick\t1,2\n");
+    let cat = decode_catalog(&blob).expect("MVCAT1 blob parses");
+    assert_eq!(cat.primal, vec!["sx"]);
+    assert_eq!(cat.derived, vec!["eff_stress"]);
+    assert_eq!(cat.classes.len(), 2, "Z tag dropped, both M rows kept");
+    assert_eq!(cat.classes[0].class_idx, 2);
+    assert_eq!(cat.classes[0].name, "beam");
+    assert_eq!(cat.classes[0].labels, vec![7, 8, 9]);
+    assert_eq!(cat.classes[1].class_idx, 0);
+    assert_eq!(cat.classes[1].name, "brick");
+    assert_eq!(cat.classes[1].labels, vec![1, 2]);
+}
+
+#[test]
+fn decode_catalog_drops_malformed_m_rows() {
+    let mut blob = b"MVCAT1\n".to_vec();
+    blob.extend_from_slice(b"M\tnot_a_number\tbeam\t1,2\n"); // bad class_idx
+    blob.extend_from_slice(b"M\t1\t\t1,2\n"); // empty name
+    blob.extend_from_slice(b"M\t1\tbeam\t\n"); // empty labels
+    blob.extend_from_slice(b"M\t1\tbeam\t1,not,3\n"); // bad label
+    let cat = decode_catalog(&blob).expect("magic parses");
+    assert!(cat.classes.is_empty(), "every malformed M row dropped");
+}
+
+#[test]
+fn mvg3_blob_round_trips_member_id_column() {
+    // Hand-build a minimal MVG3 blob with bit 4 set so decode_mvg
+    // populates tri_member_id. Two-tri quad in the z=0 plane; the
+    // member id column carries two known packed values.
+    let n_verts: u64 = 4;
+    let n_idx: u64 = 6;
+    let n_edges: u64 = 0;
+    let flags_mask: u32 = 2 | 16; // tri_flags + tri_member_id (no scalar/edges)
+    let mut blob: Vec<u8> = Vec::new();
+    blob.extend_from_slice(b"MVG3");
+    blob.extend_from_slice(&3u32.to_le_bytes());
+    blob.extend_from_slice(&n_verts.to_le_bytes());
+    blob.extend_from_slice(&n_idx.to_le_bytes());
+    blob.extend_from_slice(&n_edges.to_le_bytes());
+    blob.extend_from_slice(&flags_mask.to_le_bytes());
+    for &p in &[
+        -1.0_f32, -1.0, 0.0, 1.0, -1.0, 0.0, 1.0, 1.0, 0.0, -1.0, 1.0, 0.0,
+    ] {
+        blob.extend_from_slice(&p.to_le_bytes());
+    }
+    for &i in &[0u32, 1, 2, 0, 2, 3] {
+        blob.extend_from_slice(&i.to_le_bytes());
+    }
+    for &m in &[7u32, 7] {
+        blob.extend_from_slice(&m.to_le_bytes()); // tri_material
+    }
+    for &f in &[0u32, 0] {
+        blob.extend_from_slice(&f.to_le_bytes()); // tri_flags
+    }
+    let id_tri0 = (3u32 << 24) | 11; // class_idx=3, elem_row=11
+    let id_tri1 = u32::MAX; // sentinel
+    for &id in &[id_tri0, id_tri1] {
+        blob.extend_from_slice(&id.to_le_bytes());
+    }
+    let mesh = decode_mvg(&blob).expect("MVG3 with member column decodes");
+    assert_eq!(
+        mesh.tri_member_id.as_ref().expect("column populated"),
+        &vec![id_tri0, id_tri1]
+    );
+    // Pick on tri 1 (with the sentinel) → member_id filtered to None.
+    let hit_b = mesh
+        .pick(glam::vec3(0.0, 0.6, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .unwrap();
+    assert_eq!(hit_b.tri, 1);
+    assert!(hit_b.member_id.is_none(), "sentinel pruned");
+    // Pick on tri 0 → resolves the real id.
+    let hit_a = mesh
+        .pick(glam::vec3(0.6, -0.4, 5.0), glam::vec3(0.0, 0.0, -1.0))
+        .unwrap();
+    assert_eq!(hit_a.tri, 0);
+    assert_eq!(hit_a.member_id, Some(id_tri0));
 }
