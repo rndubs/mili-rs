@@ -201,11 +201,20 @@ leverage, ordered "ship-blocking first":
    both `preferences_tweaks::composite_render` and
    `tweaks_persistence::composite_render` is re-enabled, sampling
    mean grey-chrome luminance in the top 26 px menu-bar band.
-10. **Phase 6 `pygriz` M4 / M5 / M6** — out of the client crate
-    proper, but the scripting tab's "attach into this GUI" and the
-    AI panel's future `Query`-driven analysis depend on Phase 6 M5
-    (`query`/`to_dataframe` over Flight) and Phase 6 M4 (live
-    subscribe → `@s.on(...)` callbacks). Independent track.
+10. **Phase 6 `pygriz` M4 / M6** — out of the client crate proper,
+    but the scripting tab's "attach into this GUI" and the AI
+    panel's future event-driven analysis depend on Phase 6 M4 (live
+    subscribe → `@s.on(...)` callbacks). Independent track. **M5
+    (`query`/`to_dataframe`) ✅ landed** — `Session.query` /
+    `Database.query` build the typed `QueryRequest` directly,
+    `QueryResult.to_dataframe()` returns pandas in the
+    `mili.utils.query_data_to_dataframe` shape (index=states,
+    columns=labels); the `flight_ticket` arm of the proto's `oneof`
+    raises a clear `QueryError` and lands jointly with M6's
+    `render`/`snapshot` (same Arrow-Flight plumbing). See
+    [`phase-6-m5.md`](phase-6-m5.md) — closes #4 above on the wire
+    end-to-end (server arm + Rust client arm + pygriz arm all green
+    against the same `Query` RPC).
 
 ## MVP cut (historical — superseded by the section above)
 

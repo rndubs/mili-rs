@@ -16,8 +16,8 @@
 >   The agent integration polish (M6) and the volumetric batch
 >   (M7/M8/M9) are now complete on the client side; Phase 5 itself is
 >   complete with no remaining work.
-> - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 landed;
->   M4/M5/M6 not started.**
+> - **Phase 6 (`pygriz` scripting client): 🟢 M1–M3 + M5 landed;
+>   M4 / M6 not started.**
 >
 > **Client wireframe coverage** (placeholder/partial inventory at a
 > finer grain than the milestones below) lives in its own tracker:
@@ -91,7 +91,7 @@
     `resolve_geometry`, Flight `fetch_catalog`, `attach()`
     round-trip).
 - **Phase 6 (`pygriz` scripting client): 🟢 IN PROGRESS — M1 ✅, M2 ✅,
-  M3 ✅ landed. M4/M5/M6 ⏳ not started.**
+  M3 ✅, M5 ✅ landed. M4 / M6 ⏳ not started.**
   - **M1 — scaffold + stubs + connect/handshake.**
     `griz.connect(host, port, token=...)`, `Hello` version handshake
     (mismatch → warning, never exception), Layer-0
@@ -135,6 +135,7 @@
 | [`phase-6-m1.md`](phase-6-m1.md) | Phase 6 M1: `pygriz` scaffold, gitignored stub generator, `connect()`+Hello handshake, Layer-0 `command()`/`run_script()` lowering to verbatim `Command{raw}`. Decisions 35–37 & 53–55 | ✅ pinned + landed (2026-05-17) |
 | [`phase-6-m2.md`](phase-6-m2.md) | Phase 6 M2 connection model: `attach()`/`launch()`/`list_sessions()`; the session file is written by the **binary's `main`** so the frozen library/proto/Hello echo are untouched. Discharges `phase-5-m3.5.md` Decision 49. Decisions 56–58 | ✅ pinned + landed (2026-05-18) |
 | [`phase-6-m3.md`](phase-6-m3.md) | Phase 6 M3 Layer-1 object API; every call lowers to a typed `Command` oneof (never `raw`); Layer-0 ≡ Layer-1 pinned two ways (fake-stub + identical-`DELTA_SNAPSHOT`). `crates/` byte-for-byte untouched. Decisions 59–61 | ✅ pinned + landed (2026-05-18) |
+| [`phase-6-m5.md`](phase-6-m5.md) | Phase 6 M5 `Query` payoff: `Session.query`/`Database.query` build typed `QueryRequest` directly (no griz string), `QueryResult` exposes labels/states/values/components + `to_dataframe()` matching `mili.utils.query_data_to_dataframe` (index=states, columns=labels). `ok=false` → typed `QueryError`; `flight_ticket` arm deferred to M6 (joint Arrow-Flight wiring with `render`/`snapshot`). Zero `.proto`/`crates/` edit. Decisions 67–69 | ✅ pinned + landed (2026-05-24) |
 | [`phase-5-m4.md`](phase-5-m4.md) | Phase 5 M4 local view manipulation + pre-M4 hardening: predict-and-reconcile mouse orbit, radians end-to-end, client-side colormap/legend, HiDPI fix, griz-subset CLI. Decisions 62–66 | ✅ pinned + landed (2026-05-18) |
 | [`phase-5-m5.md`](phase-5-m5.md) | Phase 5 M5 remote mode: `Session::connect_tcp`/`Session::attach` ride the Phase 4 M6 wire (one tuned `tonic::Channel` cloned for `MiliVizClient`+`FlightServiceClient`; Flight `DoGet` blob is byte-identical to in-process `fetch_geometry`); CLI `-r`/`--remote <host:port>` + `--attach [<id>]`; HPC-latency tuning (`tcp_nodelay`, TCP+HTTP/2 keep-alives, 10 s `connect_timeout`). No proto change. Decisions 90–93 | ✅ pinned + landed (2026-05-23) |
 | [`phase-5-m6.md`](phase-5-m6.md) | Phase 5 M6 agent integration polish: lights up the frozen `AgentChat`/`Interrupt`/`CaptureFrame`/`DELTA_AGENT`/`Snapshot.agent` surface with `AgentBackend` trait + always-on `MockAgent` (real LLM backend gated separately); commands flow through the existing `VizService::dispatch` seam (tagged with the agent's `origin_client_id` per `client.md` §"Design principle"); per-turn client-side snapshot for `↶ revert to here`; `CaptureFrame` returns a deterministic placeholder PNG (production wgpu offscreen swap deferred); peer count rides `AgentStatus.detail = "peers=N"` gated on the `agent` capability. Zero `.proto` change. Decisions 94–99 | ✅ pinned + landed (2026-05-23) |
@@ -652,8 +653,43 @@ parallel of `crates/`). Milestone breakdown + M1 detail:
       server-authoritative, typed handles).
 - [ ] **M4 — live sync** (`Subscribe` → `@s.on(...)`; GUI/script
       stay in sync).
-- [ ] **M5 — query payoff** (`query`/`to_dataframe`, same
-      numpy/pandas types as milox; Arrow Flight for large results).
+- [x] **M5 — query payoff.** ✅ **Landed.** `Session.query(result,
+      class_name, *, labels=None, states=None, component="") →
+      QueryResult` builds the typed `QueryRequest` directly (no griz
+      string formatted — M3's "no second emitter" invariant
+      generalises from `Command` to `Query`), dispatches over the
+      in-band `Query` RPC, surfaces `ok=false` as a typed
+      `QueryError` carrying the verbatim server message, and hands
+      the inline carrier to `QueryResult`. `Database.query(...)` is
+      a 1-line alias so there is exactly one `Query` dispatcher
+      (mirrors M3's one-`Command` dispatcher). `QueryResult` exposes
+      the proto's `[len(states) × len(labels) × components]` payload
+      via `.labels`/`.states`/`.values`/`.components` + the request
+      context, plus `.values_3d` (numpy reshape) and
+      `.to_dataframe()` (the **exact** `mili.utils.
+      query_data_to_dataframe` shape: index = states, columns =
+      labels; scalar flat, multi-component per-cell ndarray via
+      `from_records`). The proto's `oneof data { inline; flight_ticket
+      }` ships only the inline arm in M5; a `flight_ticket` reply
+      raises a clear `QueryError` — wiring the pygriz Flight client
+      lands jointly with M6's `render`/`snapshot` (same Flight
+      plumbing). Empty `labels`/`states` pass through verbatim so
+      the server fills them in (proto contract). Zero `crates/` edit;
+      zero `.proto` change. Scope/decisions:
+      [`phase-6-m5.md`](phase-6-m5.md) (67–69). Gating test
+      `python/pygriz/tests/test_m5_query.py` (7 always-on: typed
+      `QueryRequest` lowering / empty-fields server-fill /
+      `ok=false`→`QueryError` / `flight_ticket`→`QueryError` /
+      `Database.query` alias identity / scalar `to_dataframe` shape +
+      row-major spot value / multi-component `from_records` per-cell
+      ndarray; 2 skip-on-absent against `serial/basic1.pltA`: real
+      `sand[brick]` over three states returns finite values with
+      DataFrame shape, and `pressure` surfaces the server's
+      "not yet supported" derived-result error as `QueryError`). M1
+      + M2 + M3 gates + all `crates/` tests unchanged and green.
+      **Closes `wireframe-parity.md` #4 on the wire end-to-end**
+      (server arm + Rust client arm + pygriz arm all green against
+      the same `Query` RPC).
 - [ ] **M6 — output + remote tuning** (`render`/`save_animation`/
       `snapshot` via `CaptureFrame`; HPC-latency buffers).
 
