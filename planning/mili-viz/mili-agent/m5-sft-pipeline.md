@@ -45,9 +45,16 @@ template's string-branch (jinja lines 194-197) renders as
 `call:NAME{<JSON_dict>}` (double-braced) in the training tokens
 — the v1 checkpoints learned and emit that exact shape, not the
 FG-DSL `<escape>` form. Parser now handles both; corpus
-re-render queued under v2 backlog. **Path forward:** preflight
-#6 (GGUF chat-template baking diff, on the winner) →
-GGUF conversion → llamacpp re-eval on the winner only. **TRL pin bumped
+re-render queued under v2 backlog. **rev 22 (2026-05-25):**
+preflight #6 cleared, GGUF conversion landed, and llamacpp
+re-eval matched the HF number byte-for-byte — **77 / 81 =
+95.06 % L3** on both the HF (transformers) and GGUF (llamacpp)
+paths, identical per-scenario outcomes, identical model
+`tool_calls` on the four residual `select` failures. **v1 SFT
+ships:** `data/posttraining/checkpoints/v1/winner →
+checkpoint-126` (HF) +
+`data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf`
+(GGUF for serving). Quantization deferred to v2+. **TRL pin bumped
 `>=0.11,<0.13` → `>=1.0,<2` in rev 16** (the original pin's stated
 justification — `assistant_only_loss` — did not exist on the pinned
 versions; trl 0.20+ is the floor for that kwarg). rev-9
@@ -99,7 +106,8 @@ canonical harness config (`step_cap=8`, `temperature=0.0`,
 | v4 floor (`v4-llamacpp-realfixtures-fullresolve`)         | llamacpp / FunctionGemma-270M | 32 %     | `cdda3677…`  | Pre-GEPA-promotion; historical                   |
 | **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools, bootstrap eval; re-measured |
 | **v7 ceiling** (`v7-stage65-anthropic-smoke-…`)           | anthropic / claude-sonnet-4-5 | **98 %** | (synth)      | Post-promotion tools on `synth.jsonl` (175 rows) |
-| **v1 SFT winner** (`v1-sft-sweep/checkpoint-126-20260525-152545`) | transformers / `checkpoint-126` | **95.1 %** | (heldout)    | rev 21 sweep. 77 / 81 L3 on `eval/heldout.jsonl` (81 rows). Different corpus from the bootstrap eval — not a direct successor to the v7 26.0 % floor; both numbers are pinned for parallel reference. Three-way tie at the plateau (`checkpoint-126` / `-147` / `-168`); winner = earliest. See rev 21 full curve + per-intent breakdown.
+| **v1 SFT winner — HF** (`v1-sft-sweep/checkpoint-126-20260525-152545`) | transformers / `checkpoint-126` | **95.1 %** | (heldout)    | rev 21 sweep. 77 / 81 L3 on `eval/heldout.jsonl` (81 rows). Different corpus from the bootstrap eval — not a direct successor to the v7 26.0 % floor; both numbers are pinned for parallel reference. Three-way tie at the plateau (`checkpoint-126` / `-147` / `-168`); winner = earliest. See rev 21 full curve + per-intent breakdown. |
+| **v1 SFT winner — GGUF** (`v1-sft-winner-gguf-20260525-161145`) | llamacpp / `functiongemma-v1.bf16.gguf` | **95.06 %** | (heldout)    | rev 22 round-trip. 77 / 81 L3, **identical per-scenario outcomes** to the HF row above (same 4 `wrong_selection` IDs, byte-identical model `tool_calls` on each failure). Confirms GGUF conversion preserved deterministic greedy decode. b9307 `549b9d843` + `--jinja` + rev-10 client-side fallback (supports_tool_calls=false in caps).
 
 Earlier runs (`v0…v3`) ran against the empty M1 stub corpus before the
 fixture-resolver landed; their absolute numbers are not comparable —
@@ -370,6 +378,107 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 22)** — **GGUF round-trip clean; v1 SFT ships.**
+  Preflight #6 (`sft-preflight-gpu.md` §6) cleared on `winner →
+  checkpoint-126`; GGUF conversion produced
+  `data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf` (236
+  tensors, 542 MB); llamacpp re-eval on the same 81-row heldout split
+  matched the HF number exactly — **77 / 81 = 95.06 % L3**, identical
+  per-scenario outcomes, identical model tool_calls on the four
+  residual `select` failures.
+
+  **Preflight #6 — pre-conversion diff (HF source
+  `google/functiongemma-270m-it` snapshot `39eccb09…` vs
+  `data/posttraining/checkpoints/v1/winner/`).** Read-only.
+
+  | File | Result |
+  | --- | --- |
+  | `chat_template.jinja` (rendering authority) | byte-identical (sha256 `db61fb01…`, 13792 B) |
+  | `special_tokens_map.json` | byte-identical |
+  | `added_tokens.json` | byte-identical |
+  | `tokenizer.json` | 2 of 6416 added-token entries flipped `special: False → True` |
+  | `tokenizer_config.json` | same 2 entries flipped (consistent with `tokenizer.json`) |
+  | `chat_template` field *inside* `tokenizer_config.json` | absent on both sides — both rely on the sibling `chat_template.jinja` |
+
+  The two flips (cosmetic; all other 6414 added tokens unchanged):
+  `id=50 <start_function_response>` and `id=255999 <start_of_image>`,
+  both `special: False → True`. Critically unchanged: `id=48
+  <start_function_call>` and `id=49 <end_function_call>` — the FG
+  envelope tokens the model *emits*. The flip is cosmetic for the
+  L3 emission path: AddedTokens always tokenize as one piece
+  regardless of the `special` flag, so the encoded token stream the
+  model sees is identical; the flag only affects
+  `decode(skip_special_tokens=True)`, and the emission path is the
+  unchanged `<start_function_call>`/`<end_function_call>` pair
+  (id 48/49). Likely cause: TRL/transformers `save_pretrained()`
+  normalizing the flag during checkpointing; not investigated in
+  detail because the L3 round-trip below is byte-identical.
+
+  **GGUF conversion** via
+  `convert_hf_to_gguf.py /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/checkpoints/v1/winner --outtype bf16`
+  — 236 tensors, 536.3 M total, BF16. Used llama.cpp's in-tree
+  `gguf-py` on `PYTHONPATH` with the existing mili-rs uv `train`
+  extra (`torch 2.12.0+cu130`, `transformers 4.57.6`,
+  `safetensors 0.7.0`, `numpy 2.4.6`); no new dependency installs.
+  Pure-Python operation; **did not** source
+  `scripts/setup-gpu-env.sh` (same rule as training /
+  TransformersProvider — converter uses torch's bundled CUDA
+  runtime, not the module-loaded one).
+
+  **GGUF post-conversion template inspection.** Read the
+  `tokenizer.chat_template` field out of the GGUF via
+  `gguf.GGUFReader`; **byte-identical to both HF source and winner
+  `chat_template.jinja`** (sha256 `db61fb01…`, 13792 B). The GGUF
+  converter round-tripped the template cleanly — the failure mode
+  preflight #6 exists to catch (jinja whitespace normalization,
+  specials reordering, etc.) did not fire.
+
+  **llamacpp re-eval** on `matrix41` against the new GGUF, b9307
+  `549b9d843` with `--jinja`. `/props` reports
+  `supports_tool_calls=False` (same b9307 caps as the v7 baseline)
+  → rev-10 client-side fallback in `LlamaCppProvider.generate`
+  engages. Run artifacts at
+  `data/posttraining/runs/v1-sft-winner-gguf-20260525-161145/`.
+
+  **Result vs HF baseline (per-scenario diff against
+  `v1-sft-sweep/checkpoint-126-20260525-152545`):**
+
+  | Check | HF (transformers) | GGUF (llamacpp) |
+  | --- | --- | --- |
+  | L3 pass rate | 77 / 81 = 95.06 % | **77 / 81 = 95.06 %** |
+  | Wall-clock | 44.2 s | 49.8 s |
+  | Failure modes | 4× `wrong_selection` | 4× `wrong_selection` |
+  | Failing scenario IDs | `synth-00042,43,46,47` | **identical set** |
+  | Per-scenario tier/failure_mode mismatches | — | **0 of 81** |
+  | Model `tool_calls` on each failing scenario | (reference) | **byte-identical to HF** |
+
+  The model emitted the same exact wrong answer on each of the four
+  `select` semantic-disambiguation misses through both decode
+  paths — strongest possible evidence the BF16 GGUF conversion
+  preserved deterministic greedy decode without precision loss
+  material to L3 grading.
+
+  **Ship state.** `v1 SFT winner` =
+  `data/posttraining/checkpoints/v1/winner → checkpoint-126` (HF) +
+  `data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf` (GGUF
+  for serving). Both bear the same 95.06 % L3 number on the 81-row
+  heldout. Quantization (Q4_K_M) **not pursued** for v1 — BF16 GGUF
+  already serves at the target number on H100; quantization is a
+  v2+ lever (edge / CPU serving) and would only introduce noise to
+  rule out, not a problem to solve.
+
+  **v2 backlog: unchanged from rev 21.** Two items still pinned
+  in "Risks and open questions" — (#6) v1-corpus
+  JSON-literal `function.arguments` shape (path: normalize in
+  `assemble.project_sft_record`), (#7) `select` per-intent floor
+  at exactly 50 % (paraphrase-multiplier lever). No new v2 items
+  added by this rev; the preflight #6 `special`-flag flip is the
+  rare delta that's both detected *and* provably benign on
+  inspection.
+
+  **Test deltas.** No code changes this rev; 250 / 250 + 1 skip
+  stand.
 
 - **2026-05-25 (rev 21)** — **Eval path landed; v1 corpus data-shape
   discovery flagged for v2.** Three changes plus one finding.
