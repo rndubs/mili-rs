@@ -61,6 +61,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .base import ProviderOutput
+from ..tool_format import w1_to_openai_tool
 
 # FunctionGemma response-envelope regexes. The vLLM reference parser
 # (`vllm/tool_parsers/functiongemma_tool_parser.py`) uses the same shape.
@@ -305,19 +306,9 @@ class LlamaCppProvider:
         return self._caps_supports_tool_calls
 
     def _convert_to_openai_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
-        """Convert our tool format to OpenAI format for llama-server.
-
-        Our format: {"name", "description", "input_schema", "output_schema"}
-        OpenAI format: {"type": "function", "function": {"name", "description", "parameters"}}
-        """
-        return {
-            "type": "function",
-            "function": {
-                "name": tool.get("name", ""),
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {}),
-            },
-        }
+        """Delegate to the shared ``tool_format`` helper so train- and
+        inference-time can't drift on the W1 → FG/OpenAI projection."""
+        return w1_to_openai_tool(tool)
 
     def _normalize_openai_tool_calls(
         self, tool_calls_raw: Any

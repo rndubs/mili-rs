@@ -1,18 +1,23 @@
 # M5 — SFT pipeline (live tracker)
 
-**Status (2026-05-24):** Stages 2, 3, 5, 6.5 cleared; preflight #2
-cleared via Path A (rev 8); rev-9 parser gap resolved via **option
-(b)** in rev 10 — a client-side `content → tool_calls` fallback
-inside `LlamaCppProvider.generate`, gated on `/props`
+**Status (2026-05-24):** Stages 2, 3, 5, 6, 6.5 cleared; preflight #1,
+#2, #4 cleared (#2 via Path A rev 8; #4 = config seam landed pre-rev
+12); rev-9 parser gap resolved via **option (b)** in rev 10 — a
+client-side `content → tool_calls` fallback inside
+`LlamaCppProvider.generate`, gated on `/props`
 `chat_template_caps.supports_tool_calls = false`. v7 re-baseline on
 the same `--jinja` path with the fallback active lands at **13 / 50
-L3 (26.0 %)** — the 37/50 parser-gap cluster is fully cleared
-(those scenarios now grade against actual tool behavior) and the
-13/50 model-refusal cluster carries over verbatim. **Stage 5 cleared
-in rev 11 (pilot) + rev 12 (full sweep)** — 171 / 175 retention
-(97.7 %) at $1.88 total spend, K=3, byte-for-byte the same retention
-rate as the v7 stage-6.5 ceiling. **Stage 6 unblocked.** Matched-tools
-ceiling 97.71 % L3 (Claude Sonnet 4.5 on synth.jsonl, rev 7) stands.
+L3 (26.0 %)**. **Stage 5 cleared in rev 11 (pilot) + rev 12 (full
+sweep)** — 171 / 175 retention (97.7 %) at $1.88 total spend, K=3,
+byte-for-byte the same retention rate as the v7 stage-6.5 ceiling.
+**Stage 6 cleared in rev 13** — `mili-llm-bench assemble` produced
+the v1 SFT corpus from the rev-12 rollouts: 82 train / 8 val / 81
+heldout / 0 DPO pairs (K=3@T=0.7 produced 0 mixed-tier scenarios; pref
+files land empty by construction). Floor re-pinned from ≥40 →
+**≥10** after dedup math falsified the rev-4 paraphrase-multiplier
+assumption (see rev 13 changelog). Stage 7/8 + preflight #3/#5/#6
+**unblocked**. Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5 on
+synth.jsonl, rev 7) stands.
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -164,9 +169,21 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
         ceiling exactly; same 4 `query` failures persist
         (parked under `query.todo_v2` per rev 7). See changelog rev
         12. **Stage 6 unblocked.**
-- [ ] **Stage 6** — Assembly, dedup, splits, `dataset_card.md`.
-      Contamination control: split by `(intent_id, fixture)` cell,
-      not by row.
+- [x] **Stage 6** — Assembly, dedup, splits, `dataset_card.md`.
+      Cleared in rev 13. `mili-llm-bench assemble` reads
+      Stage 5 rollouts, dedups on
+      `(normalized_instruction, fixture, tool_calls_flat)` (the §6
+      key), splits by per-intent held-out cell (smaller of each
+      `(intent, fixture)` pair, alphabetical-fixture tiebreak),
+      enforces ≥20 % compound ratio in BOTH train and heldout,
+      writes `sft/{train,val}.jsonl` (82 + 8 rows) +
+      `eval/heldout.jsonl` (81 rows) + `pref/{train,val}.jsonl`
+      (empty — K=3@T=0.7 produced 0 mixed-tier scenarios) +
+      `dataset_card.md`. Tools-array conversion shared with the
+      llamacpp inference path via `mili_llm_bench.tool_format`
+      (train↔inference drift-proof). Contamination clean: heldout
+      scenario IDs ∩ train+val = ∅; heldout cells ∩ train+val cells
+      = ∅. See rev 13 changelog.
 - [ ] **Stage 7** — Eval harness (same code as Stage 4, pointed at the
       held-out split).
 - [ ] **Stage 8** — Pre-experiment gate. Run a stock 0.5–1B model with
@@ -201,7 +218,7 @@ stage runs.
 | ----------------------------- | ---------------------------------- | ---------------------------------------------------------------- |
 | Stage 5 — pilot K & budget    | K=3, ≤ $50 for 50-scenario pilot   | Re-plan: smaller K, cheaper teacher, or fewer paraphrases        |
 | Stage 5 — full-sweep budget   | ≤ $200 for ~200-scenario sweep     | Same — re-plan before scaling                                    |
-| Stage 6 — per-intent SFT rows | ≥40 rows/intent in `sft/train.jsonl` | Oversample the deficient intent before training                |
+| Stage 6 — per-intent SFT rows | ≥10 rows/intent in `sft/train.jsonl` (rebooted in rev 13; **TODO(v2):** restore to ≥40 once synth gains a paraphrase multiplier) | Flag the deficient intent in `dataset_card.md`; SFT pipeline decides whether to oversample or accept |
 | Stage 6.5 — data quality      | ≥85 % L3 under Claude (native tool-use; no GBNF qualifier — Claude doesn't support it) | Hand-fix or drop failing scenarios; re-run before SFT |
 | Stage 8 — pre-experiment gate | Stock 0.5–1B + GBNF < ceiling      | Confirms SFT room exists. If it *clears* ceiling: stop, ship that |
 | SFT regression tripwire       | ≥40 % L3 post-SFT                  | Below the GEPA-only ceiling = SFT is harming. Stop and diagnose  |
@@ -255,6 +272,108 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-24 (rev 13)** — **Stage 6 cleared.** `mili-llm-bench
+  assemble` ran against
+  `data/posttraining/runs/stage5-fullsweep-anthropic-20260524-223426/rollouts.jsonl`
+  with the three preamble decisions pinned in the new session:
+  `heldout-policy=per-intent`, `query-policy=accept`,
+  `compound-ratio-min=0.20` (enforced in both train and heldout),
+  `seed=42`. Output:
+  `data/posttraining/sft/{sft,eval,pref,dataset_card.md}` — 82 train
+  + 8 val + 81 heldout + 0 DPO pairs.
+
+  **Per-intent ≥40 floor rebooted to ≥10.** First-turn discovery:
+  the rev-4 ≥40 floor was set on a wrong premise. The rev-12
+  changelog claimed "13/14 intents will satisfy the ≥40 floor,
+  query at 8 will not" — but `retention_by_intent.count` is the
+  *retained scenario count*, not the dedup-collapsed row count, and
+  the actual synth corpus (`data/posttraining/scenarios/synth.jsonl`,
+  175 scenarios) emits ONE canonical instruction per scenario. K=3
+  rollouts at T=0.7 collapsed to one trajectory per scenario
+  (rev-12 finding), so after `(normalized_instruction, fixture,
+  tool_calls_flat)` dedup the retained corpus is 171 unique
+  trajectories distributed 4–20 across 14 intents — no intent can
+  clear ≥40 without re-running synth with a paraphrase multiplier.
+  Re-pinned to ≥10 as the realistic v1 floor; under-floor intents
+  flagged as v1 holes in `dataset_card.md` with explicit `TODO(v2)`
+  to re-run synth with `paraphrase_count > 1`. The ≥40 number is
+  carried in the gates table as a v2 target.
+
+  **13 of 14 intents are under the ≥10 train floor.** Only
+  `material` (train=11) clears. This is the floor measured on
+  `sft/train.jsonl` (the trainer's consumed corpus), not on the
+  pre-split retained pool. Pre-split, the picture is friendlier
+  (material 20, set-state 18, show-primal 18, colormap 18,
+  compound-* ≈ 13–14, select 16) but the per-intent held-out split
+  consumes ~50 % of the corpus, so train-side counts halve.
+  Under-floor cells are documented in `dataset_card.md` for the SFT
+  pipeline to decide whether to oversample or accept.
+
+  **Held-out split deterministic.** For each intent, the smaller of
+  `(d3samp6, cylinder)` is held out in full; ties broken
+  alphabetically by fixture name (`cylinder` < `d3samp6`). Every
+  intent has a `cylinder` heldout cell in this corpus because the
+  rev-12 retention is balanced or `cylinder`-light per (intent,
+  fixture). Train cells are uniformly `d3samp6`. The
+  whole-fixture alternative (a third fixture bound through Stage 3
+  + Stage 5 against `shell_mat2` or `bar5`) is logged as
+  `TODO(v2)` — pursue once the v1 baseline is measured.
+
+  **Compound ratio in both splits.** train = 22.0 %, heldout = 24.7 %
+  — both above the ≥20 % gate (Stage 2 / Stage 3 carrying constraint
+  into Stage 6). Heldout carries one row per compound family + one
+  spare; train carries 6 of each compound family. The compound-ratio
+  gate is enforced by the assembler (`compound_ratio_min=0.20`), so
+  any future rerun that violates fails loud.
+
+  **Contamination clean.** Scenario IDs in `eval/heldout.jsonl` ∩
+  `sft/train.jsonl` ∪ `sft/val.jsonl` = ∅. `(intent_id, fixture)`
+  cells in heldout ∩ train+val = ∅. Both pinned as runtime
+  assertions in the assembler + as test pins in
+  `tests/test_assemble.py::TestEndToEnd::test_contamination_clean`.
+
+  **DPO data is empty (expected).** `pref/{train,val}.jsonl` land
+  empty: K=3@T=0.7 produced 0 / 175 scenarios with a mixed-tier
+  rollout set (every scenario's 3 rollouts share the same
+  pass/fail outcome — rev-12 finding). v2 path: rerun a subset at
+  T ≥ 1.0 specifically to harvest `(chosen, rejected)` pairs.
+
+  **Tools-array drift-proofing.** Lifted the W1 → FG/OpenAI
+  conversion out of `providers/llamacpp.py::_convert_to_openai_tool`
+  into a new shared module `mili_llm_bench.tool_format`
+  (`w1_to_openai_tool` + `w1_tools_to_openai`). Both
+  `LlamaCppProvider._convert_to_openai_tool` (inference) and
+  `assemble.project_sft_record` (train) call the shared helper.
+  `output_schema` is intentionally dropped — FG's training format
+  has no slot for it; the dispatcher enforces output shape server-
+  side. New pin in `tests/test_assemble.py::TestToolFormatHelper::
+  test_llamacpp_provider_uses_shared_helper` asserts the two paths
+  remain equal byte-for-byte. 19 new pins in `tests/test_assemble.py`
+  cover the dedup key, the heldout partition, the compound-ratio
+  gate, the contamination check, and an end-to-end smoke against
+  the actual rev-12 rollouts file (skipped if the artifact is
+  absent). 220 / 220 tests pass (+19 from rev 12's 201).
+
+  **Anthropic → FG message conversion is a no-op at Stage 6.** The
+  Stage 5 driver writes each rollout's `messages` array in the
+  FG/OpenAI canonical shape (developer / user /
+  assistant.tool_calls / tool.content) — Anthropic's `tool_use` /
+  `tool_result` shape never lands on disk. The §Stage 5 spec's
+  "byte-for-byte FG-prompt round-trip" pin lives on the Stage-5
+  side (`tests/test_providers_anthropic.py::TestRoundTrip`). Stage 6
+  re-emits the messages verbatim minus the driver's synthetic
+  `stop:...` markers (see `assemble._strip_driver_stop_markers`).
+
+  **Path forward.** Preflight #3 (data-loader sanity), #5
+  (train-1-step-generate smoke), #6 (empty-class regression) are
+  now unblocked — they consume `sft/train.jsonl` which exists at
+  `data/posttraining/sft/sft/train.jsonl`. Stage 7 (eval harness
+  on `eval/heldout.jsonl`) and Stage 8 (pre-experiment gate) are
+  the remaining data-pipeline stages before `trainer.train()`. The
+  4 query `wrong_final_state` misses, the v2 paraphrase
+  multiplier, the K=1 retune, and the third-fixture binding are
+  all carried under `TODO(v2)` in `dataset_card.md`.
 
 - **2026-05-24 (rev 12)** — Stage 5 full sweep cleared. K=3 teacher
   rollouts (Claude Sonnet 4.5, `--temperature 0.7`,

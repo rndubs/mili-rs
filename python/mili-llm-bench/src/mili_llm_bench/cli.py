@@ -41,6 +41,7 @@ from typing import Any, Callable
 
 import yaml
 
+from . import assemble as _assemble_mod
 from . import driver, gepa_integration, report
 from .driver import EvalConfig, compute_system_prompt_hash, run_eval, run_one_scenario
 from .harness import Dispatcher, FakeDispatcher, Registry
@@ -979,6 +980,103 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     gepa.set_defaults(func=_cmd_run_gepa)
+
+    asm = subs.add_parser(
+        "assemble",
+        help=(
+            "Stage 6 of the M5 SFT pipeline. Reads Stage 5 rollouts, "
+            "dedups + splits by (intent, fixture) cell, writes "
+            "sft/{train,val}.jsonl + eval/heldout.jsonl + "
+            "pref/{train,val}.jsonl + dataset_card.md under --out. "
+            "Login-node safe."
+        ),
+    )
+    asm.add_argument(
+        "--rollouts",
+        nargs="+",
+        required=True,
+        help="One or more rollouts.jsonl paths. Absolute paths recommended.",
+    )
+    asm.add_argument(
+        "--extra-rollouts",
+        nargs="*",
+        default=[],
+        help=(
+            "Additional rollouts files merged into the input set (e.g. a "
+            "query-oversample run merged on top of the full sweep)."
+        ),
+    )
+    asm.add_argument(
+        "--out",
+        required=True,
+        help="Output directory; writes sft/, eval/, pref/ and dataset_card.md.",
+    )
+    asm.add_argument(
+        "--tools",
+        default=None,
+        help=(
+            "Override the tools.json path "
+            "(defaults to data/posttraining/grammar/tools.json). The "
+            "registry is consulted to project each rollout's tool "
+            "inventory into the FG/OpenAI tools-array shape."
+        ),
+    )
+    asm.add_argument(
+        "--heldout-policy",
+        choices=list(_assemble_mod.HELDOUT_POLICIES),
+        default=_assemble_mod.HELDOUT_POLICY_PER_INTENT,
+        help=(
+            "Held-out cell pattern. 'per-intent' holds out the smaller of "
+            "each (intent, fixture) cell pair. 'whole-fixture' requires a "
+            "third fixture; raises NotImplementedError today."
+        ),
+    )
+    asm.add_argument(
+        "--query-policy",
+        choices=list(_assemble_mod.QUERY_POLICIES),
+        default=_assemble_mod.QUERY_POLICY_ACCEPT,
+        help=(
+            "How to handle the under-floor query intent. 'accept' lets "
+            "the small cells land + flag in dataset_card.md (default). "
+            "'drop' removes the intent. 'oversample' assumes the caller "
+            "has merged an oversample run via --extra-rollouts."
+        ),
+    )
+    asm.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Stratified train/val split seed (default: 42).",
+    )
+    asm.add_argument(
+        "--floor-per-intent",
+        type=int,
+        default=_assemble_mod.DEFAULT_FLOOR_PER_INTENT,
+        help=(
+            "Soft per-intent floor on sft/train.jsonl. Under-floor "
+            f"intents are flagged in dataset_card.md (default: "
+            f"{_assemble_mod.DEFAULT_FLOOR_PER_INTENT})."
+        ),
+    )
+    asm.add_argument(
+        "--compound-ratio-min",
+        type=float,
+        default=_assemble_mod.DEFAULT_COMPOUND_RATIO_MIN,
+        help=(
+            "Minimum compound-family fraction enforced in BOTH train "
+            f"and heldout (default: {_assemble_mod.DEFAULT_COMPOUND_RATIO_MIN})."
+        ),
+    )
+    asm.add_argument(
+        "--val-fraction",
+        type=float,
+        default=_assemble_mod.DEFAULT_VAL_FRACTION,
+        help=(
+            "Fraction of the non-heldout pool routed to sft/val.jsonl "
+            f"(default: {_assemble_mod.DEFAULT_VAL_FRACTION})."
+        ),
+    )
+    asm.set_defaults(func=_assemble_mod.run_assemble_cli)
 
     return parser
 
