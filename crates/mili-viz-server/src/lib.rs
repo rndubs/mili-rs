@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use mili_rs::Database;
+use mili_rs::{Database, QueryArgs, StateValues};
 use mili_viz_proto::v1 as pb;
 use pb::mili_viz_server::{MiliViz, MiliVizServer};
 use tokio_stream::wrappers::BroadcastStream;
@@ -1138,19 +1138,84 @@ impl MiliViz for VizService {
         &self,
         request: Request<pb::QueryRequest>,
     ) -> Result<Response<pb::QueryReply>, Status> {
-        // Shape/plumbing only in M1; real values need `mili-rs`
-        // wired in at M2/M3 (Decision 7 table).
         let q = request.into_inner();
-        Ok(Response::new(pb::QueryReply {
-            ok: true,
-            error: String::new(),
-            data: Some(pb::query_reply::Data::Inline(pb::InlineTable {
-                labels: q.labels.clone(),
-                states: q.states.clone(),
-                values: vec![],
-                components: 0,
-            })),
-        }))
+        let reply = {
+            let s = self.inner.session.lock().unwrap();
+            let Some(db) = s.db.as_ref() else {
+                return Ok(Response::new(pb::QueryReply {
+                    ok: false,
+                    error: "no database loaded".to_string(),
+                    data: None,
+                }));
+            };
+
+            // proto: `labels` empty = all labels for the class.
+            let labels_i32: Vec<i32> = q.labels.iter().map(|&l| l as i32).collect();
+            let labels: Option<&[i32]> = if labels_i32.is_empty() {
+                None
+            } else {
+                Some(labels_i32.as_slice())
+            };
+
+            // proto: `states` empty = "current" state (1-based session
+            // cursor; mili-rs query takes 0-based state indices).
+            let (states_idx, states_echo): (Vec<usize>, Vec<u32>) = if q.states.is_empty() {
+                let cur = s.state.max(1) as usize;
+                (vec![cur - 1], vec![s.state.max(1)])
+            } else {
+                let idx = q
+                    .states
+                    .iter()
+                    .map(|&st| (st as usize).saturating_sub(1))
+                    .collect();
+                (idx, q.states.clone())
+            };
+
+            let args = QueryArgs {
+                svar: q.result.as_str(),
+                class: q.class_name.as_str(),
+                labels,
+                states: &states_idx,
+                materials: None,
+                ips: None,
+                subrec: None,
+            };
+
+            match db.query_with_labels(&args) {
+                Ok((vals, ret_labels)) => {
+                    let flat: Vec<f64> = match vals {
+                        StateValues::F32(v) => v.into_iter().map(f64::from).collect(),
+                        StateValues::F64(v) => v,
+                        StateValues::I32(v) => v.into_iter().map(f64::from).collect(),
+                        StateValues::I64(v) => v.into_iter().map(|x| x as f64).collect(),
+                    };
+                    let labels_out: Vec<i64> =
+                        ret_labels.iter().copied().map(i64::from).collect();
+                    let n_axis = states_idx.len() * labels_out.len();
+                    let components = if n_axis == 0 {
+                        0
+                    } else {
+                        u32::try_from(flat.len() / n_axis).unwrap_or(0)
+                    };
+                    pb::QueryReply {
+                        ok: true,
+                        error: String::new(),
+                        data: Some(pb::query_reply::Data::Inline(pb::InlineTable {
+                            labels: labels_out,
+                            states: states_echo,
+                            values: flat,
+                            components,
+                        })),
+                    }
+                }
+                Err(e) => pb::QueryReply {
+                    ok: false,
+                    error: e.to_string(),
+                    data: None,
+                },
+            }
+        };
+        Ok(Response::new(reply))
     }
 
     async fn agent_chat(

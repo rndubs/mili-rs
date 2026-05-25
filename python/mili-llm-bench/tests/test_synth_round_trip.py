@@ -139,6 +139,27 @@ def test_instruction_source_tagged_for_every_record(synth_run):
             )
 
 
+def test_every_catalog_intent_has_at_least_one_row(synth_run):
+    """Stage 3 must not silently drop an entire intent cell.
+
+    The Stage 3 ``query`` regression — every row skipped because
+    ``Session.query`` raised — looked like a clean run because the
+    per-row drop machinery kept the total nonzero. This test pins
+    the broader invariant: a missing-method regression on any intent
+    surfaces as a hard failure here.
+    """
+    out_path, _report = synth_run
+    from mili_llm_bench.synth.catalog import load_catalog
+
+    catalog = load_catalog(_repo_root() / CATALOG_RELATIVE)
+    seen: set[str] = {s.intent_id for s in load_scenarios(out_path)}
+    missing = [row.intent_id for row in catalog.intents if row.intent_id not in seen]
+    assert not missing, (
+        f"catalog intents with zero synthesized rows: {missing}. "
+        "A whole intent dropping silently masks oracle/dispatcher bugs."
+    )
+
+
 def test_deterministic_at_fixed_seed(tmp_path: Path):
     out_a = tmp_path / "a.jsonl"
     out_b = tmp_path / "b.jsonl"

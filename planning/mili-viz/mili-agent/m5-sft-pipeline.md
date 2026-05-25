@@ -213,6 +213,26 @@ them here too so the live tracker shows the live unknowns.
 
 ## Changelog
 
+- **2026-05-24 (rev 6)** — Stage 3 query read-path wired end-to-end.
+  `mili-viz-server`'s `Query` RPC, frozen as an M1 shape-only stub
+  (`crates/mili-viz-server/src/lib.rs` `async fn query`), now calls
+  `mili_rs::Database::query_with_labels` against the loaded run and
+  projects `StateValues` → `InlineTable.values` (f64). `pygriz` adds
+  `Session.query(**kwargs) -> dict` so the Stage 3 live oracle's
+  `s.query(...)` resolves through a typed `QueryRequest` instead of
+  raising `AttributeError`. Re-run of
+  `mili-llm-bench synth`: 175 scenarios (up from 163), 41 compound
+  (23.43% — still ≥20% gate), 0 skipped rows; `query` cell counts
+  6/d3samp6 + 6/cylinder. Catalog `query.todo_v2` line about the
+  pygriz gap removed. New gates:
+  `crates/mili-viz-server/tests/query_rpc.rs` round-trips the RPC
+  against a direct `mili-rs` call on d3samp6, plus a no-DB-loaded
+  error-path test; `tests/test_synth_round_trip.py` adds
+  `test_every_catalog_intent_has_at_least_one_row` so a whole intent
+  silently dropping fails the round-trip immediately rather than
+  hiding inside the report-only `skipped` list. The other Stage 3
+  dispatcher gap (`selection.clear_all()` for empty `clrsel`) is
+  unchanged — separate parked fix.
 - **2026-05-24 (rev 5)** — Stage 3 landed.
   `data/posttraining/scenarios/synth.jsonl` (163 scenarios, 41 compound,
   25.15% ratio, deterministic at `seed=42`) plus its

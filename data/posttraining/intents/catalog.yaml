@@ -374,11 +374,6 @@ intents:
          parity suite has pinned values for those derived fields per
          (fixture, class, label, state)."
       - "Add multi-state and 'all labels' (labels=null) query variants."
-      - "Stage 3 drops every query row because pygriz `Session.query`
-         is not implemented today (AttributeError on the live oracle
-         call). Wire the read path in pygriz + the typed-tool dispatcher
-         in `dispatchers/pygriz.py:query` before query rows can rejoin
-         the synth corpus."
 
   # ========== COMPOUND ==========
 

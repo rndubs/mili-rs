@@ -1,13 +1,13 @@
 # Stage 3 synthesis report
 
 - seed: `42`
-- total scenarios: **163**
-- compound scenarios: **41** (ratio 25.15%; ≥20% gate)
+- total scenarios: **175**
+- compound scenarios: **41** (ratio 23.43%; ≥20% gate)
 
 ## paraphrase source breakdown
 
-- `manual-paraphrase`: 98
-- `template`: 65
+- `manual-paraphrase`: 106
+- `template`: 69
 
 ## per-cell count
 
@@ -33,8 +33,8 @@
 | `view-reset` | `d3samp6` | 2 |
 | `colormap` | `cylinder` | 9 |
 | `colormap` | `d3samp6` | 9 |
-| `query` | `cylinder` | 0 |
-| `query` | `d3samp6` | 0 |
+| `query` | `cylinder` | 6 |
+| `query` | `d3samp6` | 6 |
 | `compound-material-then-show` | `cylinder` | 6 |
 | `compound-material-then-show` | `d3samp6` | 7 |
 | `compound-select-then-show` | `cylinder` | 7 |
@@ -46,21 +46,6 @@
 
 - d3samp6: num_states=101 ✓, classes ⊇ ['brick', 'beam', 'shell', 'node'] ✓, mat_ids [1, 2, 3] ✓
 - cylinder: num_states=11 ✓, classes ⊇ ['brick', 'node'] ✓, mat_ids [1, 2] ✓
-
-## skipped rows
-
-- query/d3samp6: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/d3samp6: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/d3samp6: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/d3samp6: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/d3samp6: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/d3samp6: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/cylinder: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/cylinder: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/cylinder: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/cylinder: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/cylinder: resolution failed: AttributeError("'Session' object has no attribute 'query'")
-- query/cylinder: resolution failed: AttributeError("'Session' object has no attribute 'query'")
 
 ## notes
 

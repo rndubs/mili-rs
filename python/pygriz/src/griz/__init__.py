@@ -228,6 +228,68 @@ class Session:
     def selection(self) -> "_Selection":
         return _Selection(self)
 
+    def query(
+        self,
+        *,
+        result: str,
+        class_name: str,
+        labels=None,
+        states=None,
+        component: str = "",
+    ) -> dict:
+        """Read result values for a set of (label, state) cells.
+
+        ``labels``/``states`` empty (or ``None``) mean "all labels for
+        the class" / "current state" respectively, matching the
+        ``QueryRequest`` semantics in ``mili_viz.proto`` § Query.
+
+        Returns a plain dict — ``{"ok": True, ...}`` on success, or
+        ``{"ok": False, "error": <str>}`` on a server-reported error
+        (the ``_proj_griz_raw`` pattern, never raises for an `ok=False`
+        server reply). The success shape is JSON-stable so the verifier
+        can compare ``expect.table`` cell-by-cell via plain equality.
+        """
+        pb, _ = _stubs()
+        req = pb.QueryRequest(
+            result=str(result),
+            class_name=str(class_name),
+            labels=[int(x) for x in (labels or [])],
+            states=[int(x) for x in (states or [])],
+            component=str(component),
+        )
+        reply = self._stub.Query(req)
+        if not reply.ok:
+            return {"ok": False, "error": str(reply.error or "")}
+        inline = reply.inline
+        out_labels = [int(x) for x in inline.labels]
+        out_states = [int(x) for x in inline.states]
+        components = int(inline.components)
+        # Reshape the flat ``[state][label][component]`` row-major buffer
+        # into nested lists so the verifier's ``==`` compares ragged-free
+        # data, not a flat array whose layout could drift.
+        flat = [float(x) for x in inline.values]
+        rows: list[list[list[float]]] = []
+        n_states = len(out_states)
+        n_labels = len(out_labels)
+        if n_states and n_labels and components:
+            stride = n_labels * components
+            for si in range(n_states):
+                row = []
+                base = si * stride
+                for li in range(n_labels):
+                    cell = flat[base + li * components : base + (li + 1) * components]
+                    row.append(cell)
+                rows.append(row)
+        return {
+            "ok": True,
+            "result": str(result),
+            "class_name": str(class_name),
+            "labels": out_labels,
+            "states": out_states,
+            "components": components,
+            "values": rows,
+        }
+
     def show(self, result: str, component: str = "", **opts) -> "Result":
         """``show <result> [component] [k=v...]`` → :class:`Result`
         handle (``.range`` is the authoritative ``(min, max)``)."""
