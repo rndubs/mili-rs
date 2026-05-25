@@ -296,29 +296,44 @@ them here too so the live tracker shows the live unknowns.
   change in this rev; surfacing to the user for the path-forward
   decision (see Status header — options a/b/c/d).
 
-  **Option (a) status (2026-05-24): no upstream fix.**
-  `ggml-org/llama.cpp origin/master` is at `549b9d843` (the same
-  commit as the existing build under test — zero commits ahead).
-  `git grep -iE 'functiongemma|function_gemma|start_function_call|
-  end_function_call|start_function_declaration'` returns **zero**
-  matches across `common/`, `tools/`, `src/`, `include/`. The
-  jinja-mode dispatcher in
+  **Option (a) status (2026-05-25): no upstream fix.** In-tree
+  check: `ggml-org/llama.cpp origin/master` is at `549b9d843` (the
+  same commit as the existing build under test — zero commits
+  ahead). `git grep -iE 'functiongemma|function_gemma|
+  start_function_call|end_function_call|start_function_declaration'`
+  returns **zero** matches across `common/`, `tools/`, `src/`,
+  `include/`. The jinja-mode dispatcher in
   `common/chat.cpp::common_chat_try_specialized_template`
   enumerates specialized handlers for Ministral / GPT-OSS /
   Functionary v3.2 / Kimi K2 / LFM2 / LFM2.5 / GigaChat V3 /
   DeepSeek V3.2 / Gemma4; the closest is Gemma4 (`PEG_GEMMA4`),
   but it keys on the substring `'<|tool_call>call:'` — a different
   marker family from FG's `<start_function_call>call:`. No remote
-  branch on `origin/` references FunctionGemma either (only the
-  historical Gemma 1/2 conversion branches). Any merged FG handler
-  would have to add a detector substring and a parser; both are
-  absent. GitHub PR/issue sweep deferred to the user — outbound
-  TLS to `api.github.com` is blocked from this node, and `gh` is
-  not installed. Recommendation: pursue **option (b)** (client-side
+  branch on `origin/` references FunctionGemma either. **Confirmed
+  externally (2026-05-25):** zero PRs, zero issues, zero discussions
+  on `ggml-org/llama.cpp` mention FunctionGemma; no public owner /
+  RFC / draft. Why the autoparser fails on FG: PR #18675 (merged
+  2026-03-06, master `566059a`) replaced the specialized-template
+  handlers with a differential PEG autoparser that infers a grammar
+  from the template. FG's `<escape>…<escape>` argument wrapping and
+  bare-key dict syntax are exactly the "odd constructs" the autoparser
+  cannot infer; the same failure mode is documented for LFM2.5 in
+  upstream issue #20245 (`tool_mode: NONE` → `supports_tool_calls =
+  false` on `/props`). vLLM and Ollama both ship FG tool-call parsers
+  natively (vLLM: `--tool-call-parser functiongemma`, Apache-2.0
+  reference at `vllm/tool_parsers/functiongemma_tool_parser.py`;
+  Ollama: `ollama pull functiongemma`). llama.cpp's own in-tree
+  workaround is `tools/agent` (the `llama-agent` binary), which does
+  FG-format parsing in-process but bypasses the OpenAI HTTP layer
+  entirely. Recommendation: pursue **option (b)** (client-side
   `content → tool_calls` fallback inside `LlamaCppProvider.generate`,
   gated on `caps.supports_tool_calls == false`, with a new pin in
-  `test_providers_llamacpp.py`). Not started here — explicit
-  decision requested before any code change.
+  `test_providers_llamacpp.py`). The vLLM parser file is a drop-in
+  regex reference:
+  `<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>`
+  for the envelope, `(\w+):<escape>(.*?)<escape>` for string args,
+  `(\w+):([^,}]+)` for bare bool / numeric args. Not started here
+  — explicit decision requested before any code change.
 
 - **2026-05-24 (rev 8)** — Preflight check #2 (train-vs-inference
   chat-template parity) resolved via **Path A**. Login-safe diff of
