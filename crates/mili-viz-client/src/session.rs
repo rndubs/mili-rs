@@ -370,6 +370,30 @@ impl Session {
         matches!(self.transport, Transport::Remote { .. })
     }
 
+    /// Run one frozen `Query` RPC (`wireframe-parity.md` "What's
+    /// still left" #4 — server arm). The server is now real for
+    /// primal svars (it dispatches to `Database::query_full` and
+    /// inlines the values); derived results return `ok = false` with
+    /// a typed error until the geometry-path derived routing is
+    /// replicated for `Query`. Callers should check
+    /// `QueryReply.ok` and the `data` oneof — the inline carrier is
+    /// the only path implemented today (the proto's `flight_ticket`
+    /// variant is reserved for large/typed payloads via Arrow
+    /// Flight, future work).
+    ///
+    /// # Errors
+    /// Returns a transport-level error if the RPC fails outright. A
+    /// server-rejected query (unknown svar, no run loaded, etc.)
+    /// surfaces as `Ok(reply)` with `reply.ok == false`; the caller
+    /// inspects `reply.error`.
+    pub async fn query(
+        &mut self,
+        req: pb::QueryRequest,
+    ) -> Result<pb::QueryReply, BoxErr> {
+        let reply = self.client.query(tonic::Request::new(req)).await?.into_inner();
+        Ok(reply)
+    }
+
     /// The server's advertised capabilities from `Hello`. Phase 5 M6
     /// — the AI Assistant panel keys off `CAP_AGENT` here.
     #[must_use]

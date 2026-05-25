@@ -94,7 +94,7 @@ indicators, File→Open, picking class-N label) are unchanged.
 | ---- | ------ | ----- | --- |
 | Command line (Layer-0 verbatim, transcript) | ✅ done | — | status 17 |
 | Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). Forward path: a `pip install`ed managed venv + `attach()`-into-*this*-GUI (the latter gated on Phase 5 M5 remote mode — the in-process client writes no session file) | client.md dec 3 / phase-6-m2 / status 18–20, 23 |
-| Time-history plot | 🟡 partial | fed by `ResultState` min/max envelope, not the `Query` per-element series; server `Query` is a stub | phase-5-m3.5 Dec 50 |
+| Time-history plot | 🟡 partial | fed by `ResultState` min/max envelope. Server `Query` RPC is **no longer a stub** — `Database::query_full` dispatch returns real values for primal svars (`InlineTable` carrier with `[states × labels × components]` row-major shape; out-of-range / no-run-loaded surface as typed `ok=false` errors; derived results route to "not yet supported" until the geometry-path derived dispatch is replicated). `Session::query` wraps the RPC for callers. The per-element-series **UX** integration (picking a series to plot) is the still-open follow-up — needs the picking-class-N label catalog (punch-list item below) or a text-input entry point | phase-5-m3.5 Dec 50 |
 | Whole-region hide (tweak) | ✅ done | `Preferences → Show bottom tabs` checkbox suppresses the whole `tabs` panel (strip + body) via `ShellState::show_bottom_tabs` (default `true` → L1 byte-stable) → `UiAction::SetShowBottomTabs` → persisted in `tweaks.json`. The per-tab `▾ hide` still collapses the body only (its own runtime mode). Regression-tested by `m3_5_bottom_tabs::show_bottom_tabs_false_suppresses_the_panel` | — |
 
 ## Status bar
@@ -157,11 +157,19 @@ leverage, ordered "ship-blocking first":
    TI-type-aware `ParamTable`). The reserved `T` tag in the catalog
    blob is the zero-proto-change forward seam. Substantial — `mili-rs`
    core first.
-4. **Time-history plot fed by `Query` per-element series**
-   (`shell.rs:1735-1762`) — currently the `ResultState` min/max
-   envelope. The forward path is `Query`-over-state-range; the server
-   `Query` RPC is a shape-only stub. Needs server `Query` arm wired,
-   then client per-element series.
+4. **Time-history plot fed by `Query` per-element series** — 🟡
+   partial. The server `Query` RPC is now real for primal svars
+   (`Database::query_full` dispatch; `InlineTable` carrier;
+   typed `ok=false` errors for unknown svars / out-of-range states /
+   no run loaded; derived results route to "not yet supported"
+   until the geometry-path derived dispatch is replicated). The
+   client carries `Session::query` as the wrapper. The **UX**
+   integration (a way to pick which element series to plot, then
+   render those lines in `time_history_body`) is the open
+   follow-up — blocked on either the picking-class-N label catalog
+   (item #6) or a text-input entry point in the Plot tab.
+   Regression-covered by `tests/query_rpc.rs` (5 cases over
+   `serial/basic1`, skip-on-absent).
 5. **Scripting tab — managed venv + attach-into-*this*-GUI**
    (`shell.rs:1012`, the `venv: starting · attach: launch` line).
    Runner works; the `pip install`ed managed venv and

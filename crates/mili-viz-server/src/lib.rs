@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use mili_rs::Database;
+use mili_rs::{Database, QueryArgs, StateValues};
 use mili_viz_proto::v1 as pb;
 use pb::mili_viz_server::{MiliViz, MiliVizServer};
 use tokio_stream::wrappers::BroadcastStream;
@@ -1138,17 +1138,129 @@ impl MiliViz for VizService {
         &self,
         request: Request<pb::QueryRequest>,
     ) -> Result<Response<pb::QueryReply>, Status> {
-        // Shape/plumbing only in M1; real values need `mili-rs`
-        // wired in at M2/M3 (Decision 7 table).
+        // Real `mili-rs`-backed read (`wireframe-parity.md` "What's
+        // still left" #4 — the time-history-Query forward path):
+        // dispatch to `Database::query_full` for primal svars, return
+        // the values inline. Derived results (stress invariants,
+        // principal stress/strain) need the same routing the geometry
+        // path uses — that's a follow-up; reject them here with a
+        // clear error so callers know to query the primals instead.
+        // Returns `ok=false` with a typed error on any read failure
+        // rather than `Status::*` so the wire surface stays the same
+        // shape the M1 stub already had (the client treats `ok` as
+        // the success flag).
         let q = request.into_inner();
+        let err = |msg: String| {
+            Ok(Response::new(pb::QueryReply {
+                ok: false,
+                error: msg,
+                data: None,
+            }))
+        };
+
+        if q.result.is_empty() {
+            return err("query: empty `result`".to_string());
+        }
+        if q.class_name.is_empty() {
+            return err("query: empty `class_name`".to_string());
+        }
+        // Derived results route through stress_invariant_spec /
+        // principal_stress_spec / principal_strain_spec in
+        // `geometry.rs::vertex_scalar`. A future cut can replicate
+        // that here; for now an honest "not yet supported" beats a
+        // silent zero.
+        if mili_rs::stress_invariant_spec(&q.result).is_some()
+            || mili_rs::principal_stress_spec(&q.result).is_some()
+            || mili_rs::principal_strain_spec(&q.result).is_some()
+        {
+            return err(format!(
+                "query: derived result `{}` not yet supported over the \
+                 Query RPC (query the primals instead — \
+                 wireframe-parity.md #4 follow-up)",
+                q.result
+            ));
+        }
+
+        let svar = if q.component.is_empty() {
+            q.result.clone()
+        } else {
+            // mili-rs accepts the `vec[component]` / `array[idx]` shape
+            // in its parser — same convention `mili.query()` uses.
+            format!("{}[{}]", q.result, q.component)
+        };
+
+        // Hold the session lock across the gather. `Database::query_full`
+        // is sync (no `.await` while the lock is held — std Mutex
+        // tolerates this), and `vertex_scalar` already calls
+        // `db.query_full` from inside the same lock during `show`, so
+        // this matches the existing single-mutex discipline.
+        let labels_i32: Vec<i32> = q.labels.iter().map(|l| *l as i32).collect();
+        let labels_opt: Option<&[i32]> = if labels_i32.is_empty() {
+            None
+        } else {
+            Some(&labels_i32)
+        };
+        let s = self.inner.session.lock().unwrap();
+        let Some(db) = s.db.as_ref() else {
+            return err("query: no run loaded".to_string());
+        };
+        let n = db.state_count();
+        if n == 0 {
+            return err("query: loaded database has no states".to_string());
+        }
+        // Empty `states` ⇒ current cursor (1-based) per the proto.
+        let states_1: Vec<u32> = if q.states.is_empty() {
+            vec![s.state.max(1)]
+        } else {
+            q.states.clone()
+        };
+        let mut states_0 = Vec::with_capacity(states_1.len());
+        for st in &states_1 {
+            if *st == 0 || (*st as usize) > n {
+                return err(format!(
+                    "query: state {st} out of range (1..={n})"
+                ));
+            }
+            states_0.push(*st as usize - 1);
+        }
+
+        let qr = match db.query_full(&QueryArgs {
+            svar: &svar,
+            class: &q.class_name,
+            labels: labels_opt,
+            states: &states_0,
+            materials: None,
+            ips: None,
+            subrec: None,
+        }) {
+            Ok(qr) => qr,
+            Err(e) => {
+                return err(format!("query: `{svar}` on class `{}`: {e}", q.class_name))
+            }
+        };
+        drop(s);
+
+        let values_f64: Vec<f64> = match qr.values {
+            StateValues::F32(v) => v.into_iter().map(f64::from).collect(),
+            StateValues::F64(v) => v,
+            StateValues::I32(v) => v.into_iter().map(f64::from).collect(),
+            StateValues::I64(v) => v.into_iter().map(|x| x as f64).collect(),
+        };
+
+        // Echo the resolved state list back so the client doesn't have
+        // to remember which states the server filled in for an empty
+        // request.
+        let states_out: Vec<u32> = states_0.iter().map(|s| (*s as u32) + 1).collect();
+        let labels_out: Vec<i64> = qr.labels.iter().map(|l| i64::from(*l)).collect();
+
         Ok(Response::new(pb::QueryReply {
             ok: true,
             error: String::new(),
             data: Some(pb::query_reply::Data::Inline(pb::InlineTable {
-                labels: q.labels.clone(),
-                states: q.states.clone(),
-                values: vec![],
-                components: 0,
+                labels: labels_out,
+                states: states_out,
+                values: values_f64,
+                components: qr.components.len() as u32,
             })),
         }))
     }
