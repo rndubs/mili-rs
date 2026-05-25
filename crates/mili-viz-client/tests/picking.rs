@@ -211,6 +211,9 @@ fn shell_apply_pick_uses_catalog_when_member_resolves() {
         .unwrap();
     s.apply_pick(Some(&hit));
     assert_eq!(s.pick, "brick 41 · v=2.000e1", "resolved member + scalar");
+    // The same resolve also lights the Plot tab's "+ pick" button
+    // (`wireframe-parity.md` #4 picking-driven variant).
+    assert_eq!(s.picked_element, Some(("brick".to_string(), 41)));
 
     // Hit tri 1 → (brick, 42).
     let hit_b = quad_with_members()
@@ -218,6 +221,20 @@ fn shell_apply_pick_uses_catalog_when_member_resolves() {
         .unwrap();
     s.apply_pick(Some(&hit_b));
     assert_eq!(s.pick, "brick 42 · v=3.000e1");
+    assert_eq!(s.picked_element, Some(("brick".to_string(), 42)));
+
+    // A miss clears the picked-element identity so the button greys
+    // out again — no stale pick keeps it live.
+    s.apply_pick(None);
+    assert_eq!(s.pick, "(no hit)");
+    assert!(s.picked_element.is_none());
+
+    // Turning picking off also clears the identity (already covered
+    // by the legacy test for `pick`, extended here for the new field).
+    s.apply_pick(Some(&hit));
+    assert_eq!(s.picked_element, Some(("brick".to_string(), 41)));
+    s.toggle_picking();
+    assert!(s.picked_element.is_none());
 }
 
 #[test]
@@ -234,6 +251,10 @@ fn shell_apply_pick_falls_back_when_catalog_lacks_member() {
         .unwrap();
     s.apply_pick(Some(&hit));
     assert!(s.pick.starts_with("node "), "fallback readout: {}", s.pick);
+    // The catalog couldn't resolve the picked tri's owning element,
+    // so the picked-element identity is left empty — the Plot tab's
+    // "+ pick" button stays greyed out (no false-positive identity).
+    assert!(s.picked_element.is_none());
 }
 
 #[test]

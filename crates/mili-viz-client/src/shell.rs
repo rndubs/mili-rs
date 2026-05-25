@@ -733,6 +733,18 @@ pub struct ShellState {
     pub plot_label_input: String,
     pub plot_svar_input: String,
     pub plot_component_input: String,
+    /// Picked-element identity `(class_name, label_id)` last resolved
+    /// through the catalog (`wireframe-parity-6.md` Decisions 104–106).
+    /// Populated by [`ShellState::apply_pick`] when the hit's
+    /// `member_id` resolves; cleared on a miss / when the catalog
+    /// can't resolve it / when picking is toggled off, so the
+    /// "+ pick" button on the Plot tab is greyed out whenever the
+    /// status-bar readout falls back to the `tri T · node N` form.
+    /// `None` (the default, and the headless composite path) keeps
+    /// the M3 composite gate byte-stable (`bug-tracker.md` VB-001 —
+    /// the button only renders when this and [`ShellState::result`]
+    /// are both populated).
+    pub picked_element: Option<(String, i32)>,
     /// Active colormap name (`phase-5-m4.md` Decision 66); one of
     /// [`crate::colormap::NAMES`], default `cool`.
     pub colormap: String,
@@ -860,6 +872,7 @@ impl Default for ShellState {
             plot_label_input: String::new(),
             plot_svar_input: String::new(),
             plot_component_input: String::new(),
+            picked_element: None,
             colormap: "cool".to_string(),
             legend_min: None,
             legend_max: None,
@@ -959,6 +972,10 @@ impl ShellState {
         if !self.picking {
             self.pick = "—".to_string();
             self.pick_point = None;
+            // Also drop the resolved-element identity so the Plot tab's
+            // "+ pick" button greys out — the user just turned picking
+            // off, no stale pick should keep the button live.
+            self.picked_element = None;
         }
         UiAction::TogglePicking
     }
@@ -970,23 +987,34 @@ impl ShellState {
     /// `<class> <label>` form (`brick 42 · v=…`); otherwise it falls
     /// back to the `tri T · node N` form. A miss reads `(no hit)`.
     pub fn apply_pick(&mut self, hit: Option<&crate::mesh::Pick>) {
+        // Resolve the picked tri's owning element once, up-front: both
+        // the status-bar readout and the Plot tab's "+ pick" button
+        // need the same `(class_name, label_id)`. A miss / a tri with
+        // no `member_id` / a class outside the catalog all drop to
+        // `None`, which the readout falls back to `tri T · node N` on
+        // and the "+ pick" button greys out from.
+        let resolved: Option<(String, i32)> = hit.and_then(|p| {
+            let id = p.member_id?;
+            let cat = self.catalog.as_ref()?;
+            cat.resolve_member(id).map(|(n, l)| (n.to_string(), l))
+        });
         self.pick = match hit {
             None => "(no hit)".to_string(),
-            Some(p) => {
-                let resolved = p.member_id.and_then(|id| {
-                    self.catalog.as_ref().and_then(|c| c.resolve_member(id))
-                });
-                match (resolved, p.scalar) {
-                    (Some((name, label)), Some(v)) => format!("{name} {label} · v={v:.3e}"),
-                    (Some((name, label)), None) => format!("{name} {label}"),
-                    (None, Some(v)) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
-                    (None, None) => format!("node {} · tri {}", p.node, p.tri),
-                }
-            }
+            Some(p) => match (resolved.as_ref(), p.scalar) {
+                (Some((name, label)), Some(v)) => format!("{name} {label} · v={v:.3e}"),
+                (Some((name, label)), None) => format!("{name} {label}"),
+                (None, Some(v)) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
+                (None, None) => format!("node {} · tri {}", p.node, p.tri),
+            },
         };
         // Remember the hit point for the viewport highlight glyph; a
         // miss clears it so a stale marker never lingers (MVP-cut 4).
         self.pick_point = hit.map(|p| p.point);
+        // The resolved-element identity drives the Plot tab's "+ pick"
+        // button (`wireframe-parity.md` #4 — picking-driven variant).
+        // A miss / cap-tri / catalog-less server all surface `None`,
+        // which the button greys out from.
+        self.picked_element = resolved;
     }
 
     /// Whether a class's materials are currently shown.
@@ -1226,6 +1254,65 @@ impl ShellState {
         self.plot_label_input.clear();
         self.plot_svar_input.clear();
         self.plot_component_input.clear();
+        Some(UiAction::QueryElementSeries {
+            label,
+            class_name,
+            label_id,
+            svar,
+            component,
+        })
+    }
+
+    /// `wireframe-parity.md` #4 (picking-driven variant) — emit a
+    /// [`UiAction::QueryElementSeries`] for the last-picked element on
+    /// the **currently-shown** svar and component (so a single button
+    /// captures whatever the user just clicked on while looking at
+    /// the loaded result). `None` when:
+    ///
+    ///  * `picked_element` is unset (no resolved pick — caller greys
+    ///    the button out so the human-visible behavior matches);
+    ///  * `result.name` is empty (no svar shown — nothing to plot;
+    ///    the button is also greyed out in that case);
+    ///  * the placeholder is identical to an existing series and
+    ///    contains samples — re-clicking is a refresh (samples are
+    ///    cleared in place) but never duplicates the legend row.
+    ///
+    /// Idempotency / placeholder / failure semantics match the
+    /// text-input sibling [`ShellState::submit_element_query`].
+    pub fn submit_picked_element_query(&mut self) -> Option<UiAction> {
+        let (class_name, label_id_i32) = self.picked_element.clone()?;
+        let result = self.result.as_ref()?;
+        let svar = result.name.clone();
+        if svar.is_empty() {
+            return None;
+        }
+        // `ResultInfo::component` is "" for scalar svars and e.g. "1"
+        // for a multi-component primal — exactly the form the
+        // `Query` RPC's `component` field already accepts.
+        let component = result.component.clone();
+        let label_id: i64 = i64::from(label_id_i32);
+        let label = if component.is_empty() {
+            format!("{svar} [{class_name} {label_id}]")
+        } else {
+            format!("{svar}[{component}] [{class_name} {label_id}]")
+        };
+        let placeholder = ElementSeries {
+            label: label.clone(),
+            class_name: class_name.clone(),
+            label_id,
+            svar: svar.clone(),
+            component: component.clone(),
+            samples: Vec::new(),
+        };
+        if let Some(existing) = self
+            .element_series
+            .iter_mut()
+            .find(|s| s.label == placeholder.label)
+        {
+            existing.samples.clear();
+        } else {
+            self.element_series.push(placeholder);
+        }
         Some(UiAction::QueryElementSeries {
             label,
             class_name,
@@ -2179,6 +2266,36 @@ fn time_history_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut V
     let click = ui.button("+series").clicked();
     if click {
         if let Some(a) = state.submit_element_query() {
+            actions.push(a);
+        }
+    }
+    // Picking-driven sibling (`wireframe-parity.md` #4 picking-driven
+    // variant; #6 lit up the catalog resolve that backs it). Enabled
+    // only when both halves of the contract are present: a resolved
+    // picked element AND a currently-shown svar (`result.name`). On
+    // hover the disabled button explains which half is missing so the
+    // greyed-out state is self-diagnosing.
+    let picked = state
+        .picked_element
+        .as_ref()
+        .map(|(c, l)| format!("{c} {l}"));
+    let svar = state
+        .result
+        .as_ref()
+        .map(|r| r.name.clone())
+        .filter(|n| !n.is_empty());
+    let enabled = picked.is_some() && svar.is_some();
+    let hover = match (&picked, &svar) {
+        (Some(p), Some(s)) => format!("Plot {s} for picked {p}"),
+        (None, _) => "Pick an element first".to_string(),
+        (_, None) => "No result shown — `show <svar>` first".to_string(),
+    };
+    let resp = ui
+        .add_enabled(enabled, egui::Button::new("+ pick"))
+        .on_hover_text(hover.clone())
+        .on_disabled_hover_text(hover);
+    if resp.clicked() {
+        if let Some(a) = state.submit_picked_element_query() {
             actions.push(a);
         }
     }

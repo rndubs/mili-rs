@@ -140,10 +140,45 @@ cases):
 
 ## Out of scope (follow-up)
 
-- The picking-driven variant of the Plot tab (click element →
-  "+series" for that element's time-history) is now unblocked but
-  not implemented here. The new `Pick::member_id` + `ResultCatalog::
-  resolve_member` is the right plumbing to key it off; the Plot tab
-  text-input variant remains the supported form for now.
+- ~~Picking-driven Plot-tab variant~~ — ✅ landed as a sibling
+  follow-up, see [`wireframe-parity.md`](wireframe-parity.md) #4
+  Decisions 107–108. `ShellState::picked_element: Option<(String,
+  i32)>` is populated alongside the readout in `apply_pick` (the
+  same `resolve_member` call is hoisted once and used for both
+  arms), cleared on miss / `toggle_picking(off)` / catalog
+  non-resolve. Plot tab gains a sibling `+ pick` button next to
+  `+series`; enabled only when both halves of the contract hold
+  (resolved pick AND `result.name` non-empty). On click, lowers
+  the existing `UiAction::QueryElementSeries` with the picked
+  `(class, label)` + the currently-shown `ResultInfo::{name,
+  component}` — no new action variant, no new lowering arm. 5 new
+  pure-client tests in `plot_element_series.rs` + 2 extensions to
+  `picking.rs`'s `apply_pick` cases.
 - TI-results catalog (the reserved `T` tag in the catalog blob)
   remains blocked on a `mili-rs` core TI accessor — untouched.
+
+## Decisions 107–108 (Plot-tab picking-driven `+ pick`)
+
+**Decision 107 — currently-shown component as the default.** When a
+picked element has a multi-component svar (`stress xx/yy/zz/xy/yz/zx`,
+`disp x/y/z`), `+ pick` plots the same component that is currently
+on screen (`ResultInfo::component` — copied straight into the
+`QueryRequest.component` field the server already accepts). The
+user just clicked an element while staring at that component, so
+matching what they see is the least-surprise default. Alternatives
+considered + rejected:
+
+- *Component 0 always* — simpler but surprises the user staring at
+  the `zx` component.
+- *Fan out one series per component* — noisy for 6-component
+  stress svars; the legend would balloon to 6 lines per click.
+
+**Decision 108 — self-diagnosing greying (no silent no-op).** The
+button is enabled only when both halves of the contract are present:
+a resolved `picked_element` AND a non-empty `result.name`. Missing
+either half greys the button and shows a hover hint naming the
+missing piece ("Pick an element first" / "No result shown — `show
+<svar>` first"). The alternative ("plot `nodpos-x` as a sensible
+default when no svar is shown") was rejected — the user has no
+mental model that `+ pick` would suddenly start plotting position
+data; greying out is honest.

@@ -96,7 +96,7 @@ unchanged.
 | ---- | ------ | ----- | --- |
 | Command line (Layer-0 verbatim, transcript) | ✅ done | — | status 17 |
 | Scripting runner | 🟡 partial | enabled: editor + Run + streamed output pane + `venv:…·attach:…` line → `UiAction::RunScript`, app spawns a `pygriz` subprocess (PYTHONPATH-injected `griz.launch()`). Forward path: a `pip install`ed managed venv + `attach()`-into-*this*-GUI (the latter gated on Phase 5 M5 remote mode — the in-process client writes no session file) | client.md dec 3 / phase-6-m2 / status 18–20, 23 |
-| Time-history plot | ✅ done (text-input variant) | fed by `ResultState` min/max envelope **plus** per-element `Query`-fed lines. Server `Query` RPC dispatches `Database::query_full` for primal svars (`InlineTable` carrier with `[states × labels × components]` row-major shape; out-of-range / no-run-loaded surface as typed `ok=false` errors; derived results route to "not yet supported" until the geometry-path derived dispatch is replicated). Plot tab body renders each series as its own line (round-robin palette, distinct from the envelope colours); input row carries `class · id · svar · comp` fields + `+series` button → `UiAction::QueryElementSeries`. `app.rs` lowering issues the request over all states the run advertises, parses the inline reply, and pushes samples back via `ShellState::push_element_series`; failures drop the placeholder so the legend never accumulates empty rows. The picking-driven variant (click an element → plot its series) is now **unblocked** — `Pick::member_id` + `ResultCatalog::resolve_member` (the path-(a) plumbing from [`wireframe-parity-6.md`](wireframe-parity-6.md)) give the (class, label) the new `+series` button needs; the UX wiring is a separate small follow-up | phase-5-m3.5 Dec 50 |
+| Time-history plot | ✅ done (text-input **and** picking-driven variants) | fed by `ResultState` min/max envelope **plus** per-element `Query`-fed lines. Server `Query` RPC dispatches `Database::query_full` for primal svars (`InlineTable` carrier with `[states × labels × components]` row-major shape; out-of-range / no-run-loaded surface as typed `ok=false` errors; derived results route to "not yet supported" until the geometry-path derived dispatch is replicated). Plot tab body renders each series as its own line (round-robin palette, distinct from the envelope colours); input row carries `class · id · svar · comp` fields + `+series` button → `UiAction::QueryElementSeries`, plus a sibling `+ pick` button that consumes the last-resolved `picked_element` (from #6's `Pick::member_id` + `ResultCatalog::resolve_member`) and the currently-shown `ResultInfo::{name, component}` — one click on a picked element plots its time-history line for whatever svar/component is on screen. The button greys out (self-diagnosing hover text) when either half is missing (no resolved pick, or no `show <svar>` active). `app.rs` lowering issues the request over all states the run advertises, parses the inline reply, and pushes samples back via `ShellState::push_element_series`; failures drop the placeholder so the legend never accumulates empty rows | phase-5-m3.5 Dec 50 |
 | Whole-region hide (tweak) | ✅ done | `Preferences → Show bottom tabs` checkbox suppresses the whole `tabs` panel (strip + body) via `ShellState::show_bottom_tabs` (default `true` → L1 byte-stable) → `UiAction::SetShowBottomTabs` → persisted in `tweaks.json`. The per-tab `▾ hide` still collapses the body only (its own runtime mode). Regression-tested by `m3_5_bottom_tabs::show_bottom_tabs_false_suppresses_the_panel` | — |
 
 ## Status bar
@@ -160,29 +160,48 @@ leverage, ordered "ship-blocking first":
    blob is the zero-proto-change forward seam. Substantial — `mili-rs`
    core first.
 4. **Time-history plot fed by `Query` per-element series** — ✅
-   done (text-input variant). Server `Query` RPC dispatches
-   `Database::query_full` for primal svars (`InlineTable` carrier;
-   typed `ok=false` errors; derived results route to "not yet
-   supported" until the geometry-path derived dispatch is
-   replicated). Client wraps the call in `Session::query`, lowers
-   `UiAction::QueryElementSeries` over every state the run
-   advertises, parses the inline reply, and pushes per-element
-   samples back via `ShellState::push_element_series`. Plot tab
-   body renders each series alongside the existing min/max
-   envelope (distinct round-robin palette); input row hosts
-   `class · id · svar · comp` fields + `+series` button.
+   done (text-input **and** picking-driven variants). Server
+   `Query` RPC dispatches `Database::query_full` for primal svars
+   (`InlineTable` carrier; typed `ok=false` errors; derived results
+   route to "not yet supported" until the geometry-path derived
+   dispatch is replicated). Client wraps the call in
+   `Session::query`, lowers `UiAction::QueryElementSeries` over
+   every state the run advertises, parses the inline reply, and
+   pushes per-element samples back via
+   `ShellState::push_element_series`. Plot tab body renders each
+   series alongside the existing min/max envelope (distinct
+   round-robin palette); input row hosts the original
+   `class · id · svar · comp` fields + `+series` button **and** the
+   picking-driven sibling `+ pick` button:
+
+   - `+ pick` consumes the last-resolved `picked_element` (from #6's
+     `Pick::member_id` + `ResultCatalog::resolve_member` — populated
+     in `ShellState::apply_pick` whenever the catalog resolves the
+     hit's owning element) and the currently-shown
+     `ResultInfo::{name, component}`. One click on a picked element
+     plots its time-history line for whatever svar/component is
+     currently on screen — no text typing.
+   - Component default = currently-shown component (Decision 107):
+     the user just clicked an element while looking at a result, so
+     plotting that *same* component is the least-surprise default
+     for multi-component svars (`stress[yz]`, `disp[x]`).
+   - Self-diagnosing greying (Decision 108): the button is enabled
+     only when both halves of the contract are present (resolved
+     pick AND non-empty `result.name`); the disabled-hover hint
+     explains which half is missing ("Pick an element first" /
+     "No result shown — `show <svar>` first").
+   - Idempotency reuses `submit_element_query`'s rule: re-clicking
+     refreshes samples in place, never duplicates the legend row.
+
    Regression-covered by `tests/query_rpc.rs` (5 server cases over
    `serial/basic1`, skip-on-absent) and
-   `tests/plot_element_series.rs` (7 pure-client cases: input
-   submit/clear, idempotent re-submit, component differentiates
-   identical-otherwise series, push/drop round-trip, painted shell
-   stays input-free). The **picking-driven** variant (click an
-   element on the hull → plot its series) is now **unblocked** —
-   item #6 landed (path (a):
-   [`wireframe-parity-6.md`](wireframe-parity-6.md));
-   `Pick::member_id` + `ResultCatalog::resolve_member` give the
-   `(class, label)` the new `+series` button needs. Open as a small
-   UX follow-up: lower a pick to a one-click `+series` button.
+   `tests/plot_element_series.rs` (12 pure-client cases: the
+   original 7 for the text-input variant + 5 for the picking-driven
+   sibling — no-pick / no-result short-circuit, current-svar-+-
+   component lowering, multi-component picks up `ResultInfo::component`,
+   idempotent re-click). `tests/picking.rs` extends the two
+   `apply_pick` cases to assert `picked_element` lights and clears
+   in lockstep with the status-bar readout.
 5. **Scripting tab — managed venv + attach-into-*this*-GUI**
    (`shell.rs:1012`, the `venv: starting · attach: launch` line).
    Runner works; the `pip install`ed managed venv and
@@ -198,9 +217,9 @@ leverage, ordered "ship-blocking first":
    `<class> <label> · v=…` form when the catalog resolves; cap
    tris carry a sentinel and fall back to the legacy
    `node N · tri T` form. Zero per-pick latency, no `.proto` /
-   ticket / RPC change. Unblocks the picking-driven variant of
-   #4 (click element → `+series` in the Plot tab — separate
-   follow-up). See [`wireframe-parity-6.md`](wireframe-parity-6.md).
+   ticket / RPC change. The same resolve now also lights the Plot
+   tab's `+ pick` button (#4 picking-driven variant — see above).
+   See [`wireframe-parity-6.md`](wireframe-parity-6.md).
 7. **Bottom-tabs whole-region hide** — ✅ done. `Preferences → Show
    bottom tabs` checkbox suppresses the whole `tabs` panel (strip +
    body); persisted via `tweaks.json`. The per-tab `▾ hide` retains
