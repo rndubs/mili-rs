@@ -12,20 +12,22 @@
 //! headless composite in `renderer.rs`.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mili_viz_proto::v1 as pb;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::camera::Camera;
 use crate::egui_layer::EguiPaint;
 use crate::mesh::Mesh;
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, OFFSCREEN_FORMAT};
 use crate::session::Session;
 use crate::shell::{build_shell_ui, CutThrottle, ResultInfo, SessionPhase, ShellState, UiAction};
+use crate::snapshot;
 
 struct WindowState {
     window: Arc<Window>,
@@ -71,6 +73,15 @@ struct App {
     /// emits (`phase-5-m8.md` Decision 85). The drag-end commit and
     /// any out-of-drag menu action emit unconditionally.
     cut_throttle: CutThrottle,
+    /// One queued snapshot, set by F12 or by the once-per-second
+    /// poll of `~/.griz/snapshots/.capture-request`. Drained on the
+    /// next redraw — at most one capture per frame.
+    pending_capture: Option<snapshot::CaptureRequest>,
+    /// Throttle for the filesystem-trigger poll: hitting the disk
+    /// every frame at 60 Hz is wasteful for a manual capture trigger.
+    /// Once a second is fast enough for an agent that already has to
+    /// wait for the PNG to land.
+    last_trigger_poll: Instant,
 }
 
 /// A message from the scripting-runner worker thread.
@@ -960,6 +971,28 @@ impl ApplicationHandler for App {
                 }
                 self.last_cursor = Some(p);
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::F12),
+                        state: ElementState::Pressed,
+                        repeat: false,
+                        ..
+                    },
+                ..
+            } => {
+                // F12 → composited-GUI snapshot (snapshot.rs). The
+                // capture services on the next redraw so the frame
+                // egui sees the keyup like any other event. A
+                // pending capture from the filesystem trigger is
+                // left alone — F12 doesn't preempt an in-flight
+                // CLI request.
+                if self.pending_capture.is_none() {
+                    self.pending_capture = Some(snapshot::CaptureRequest {
+                        out_path: snapshot::timestamped_path("hotkey"),
+                    });
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 if !egui_consumed {
                     let s = match delta {
@@ -984,6 +1017,7 @@ impl App {
     fn redraw(&mut self) {
         self.ingest_deltas();
         self.poll_script();
+        self.poll_snapshot_trigger();
 
         // Animation: server-authoritative — step forward by `stride`
         // roughly every 80 ms while the phase is Animating.
@@ -1060,7 +1094,196 @@ impl App {
         if actions.iter().any(crate::tweaks::is_persisted_action) {
             crate::tweaks::save(&crate::tweaks::PersistedTweaks::from_state(&self.shell));
         }
+
+        // Service a queued snapshot last so it captures the *just-
+        // presented* frame's UI state. The capture re-renders the
+        // mesh + egui passes into an offscreen RGBA8 texture (we
+        // don't try to copy from the swapchain — surface usage flags
+        // and format are platform-dependent, but a fresh RGBA8
+        // attachment is portable). Hotkey + filesystem trigger share
+        // this one path.
+        if let Some(req) = self.pending_capture.take() {
+            self.run_capture(&req);
+        }
     }
+
+    /// Once a second, look for `~/.griz/snapshots/.capture-request`
+    /// and turn it into a `pending_capture`. The throttle keeps the
+    /// hot redraw path off the disk at 60 Hz; a manual snapshot tool
+    /// already has to wait for the PNG to land, so a ~1 Hz pickup
+    /// latency is invisible.
+    fn poll_snapshot_trigger(&mut self) {
+        if self.pending_capture.is_some() {
+            return;
+        }
+        if self.last_trigger_poll.elapsed() < Duration::from_millis(1000) {
+            return;
+        }
+        self.last_trigger_poll = Instant::now();
+        if let Some(req) = snapshot::try_consume_request_file() {
+            self.pending_capture = Some(req);
+        }
+    }
+
+    /// Render mesh + egui into a fresh offscreen RGBA8 texture sized
+    /// like the live surface, read the pixels back, encode PNG, write
+    /// to `req.out_path`. Errors are logged + swallowed — capture is
+    /// a best-effort observability tool, never blocks the UI loop.
+    fn run_capture(&mut self, req: &snapshot::CaptureRequest) {
+        let Some(ws) = &mut self.state else { return };
+        let (w, h) = (ws.config.width, ws.config.height);
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        // 1. Offscreen RGBA8 target. COPY_SRC so we can read it back;
+        //    RENDER_ATTACHMENT for both passes to draw into.
+        let device = ws.renderer.device();
+        let queue = ws.renderer.queue();
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("snapshot composite target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: OFFSCREEN_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 2. Mesh pass — same scene rect / camera the live frame used.
+        let scene = self.shell.scene_frac.map(|[fx, fy, fw, fh]| {
+            let (sw, sh) = (w as f32, h as f32);
+            (fx * sw, fy * sh, (fw * sw).max(1.0), (fh * sh).max(1.0))
+        });
+        // Capture uses a fresh single-sample renderer matching the
+        // offscreen RGBA8 format. The windowed `ws.renderer` is built
+        // for the surface format with MSAA, so its pipelines don't
+        // accept this attachment. The mesh upload and colormap state
+        // live on the App / ShellState, not on the renderer, so the
+        // throwaway renderer renders the same content.
+        let mut capture_renderer = Renderer::new(device.clone(), queue.clone(), OFFSCREEN_FORMAT);
+        if let Some(mesh) = &self.mesh {
+            capture_renderer.upload_mesh(mesh, self.shell.effective_range(), &self.shell.colormap);
+            capture_renderer.set_mode(self.shell.render_mode);
+        }
+        capture_renderer.render_in(&target_view, w, h, &self.camera, scene);
+
+        // 3. Egui pass — second non-clearing paint over the same view.
+        //    A fresh `EguiPaint` is used (the live one is bound to the
+        //    surface format); an empty RawInput re-runs the same UI
+        //    closure against the current ShellState.
+        let mut egui = EguiPaint::new(device, OFFSCREEN_FORMAT);
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w as f32, h as f32),
+            )),
+            ..Default::default()
+        };
+        let shell = &mut self.shell;
+        egui.paint(
+            device,
+            queue,
+            &target_view,
+            &egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [w, h],
+                pixels_per_point: 1.0,
+            },
+            raw_input,
+            |ui| {
+                let _ = build_shell_ui(ui, shell);
+            },
+        );
+
+        // 4. Read back + encode. `read_back_rgba8` is the same dance
+        //    `Renderer::copy_back` runs internally; we open it up here
+        //    so the capture path doesn't reach into renderer privates.
+        let pixels = read_back_rgba8(device, queue, &target, w, h);
+        if let Err(e) = snapshot::write_png(&req.out_path, w, h, &pixels) {
+            eprintln!(
+                "mili-viz-client: snapshot write failed for {}: {e}",
+                req.out_path.display()
+            );
+        } else {
+            eprintln!(
+                "mili-viz-client: snapshot saved → {} ({}×{})",
+                req.out_path.display(),
+                w,
+                h
+            );
+        }
+    }
+}
+
+/// Copy an RGBA8 texture (with `COPY_SRC`) back to host memory as a
+/// tightly-packed `width*height*4`-byte buffer, row-major, top-left
+/// origin. Mirrors the unpacking inside `Renderer::copy_back` (which
+/// is private to the renderer module); the capture path needs the
+/// same logic from the outside.
+fn read_back_rgba8(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let unpadded = width * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(align) * align;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("snapshot readback buffer"),
+        size: u64::from(padded) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("snapshot readback encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("device poll");
+
+    let data = slice.get_mapped_range();
+    let mut out = Vec::with_capacity((unpadded * height) as usize);
+    for row in 0..height {
+        let start = (row * padded) as usize;
+        out.extend_from_slice(&data[start..start + unpadded as usize]);
+    }
+    drop(data);
+    buffer.unmap();
+    out
 }
 
 /// Open the windowed shell over a live [`Session`]. `transport`
@@ -1128,6 +1351,8 @@ pub fn run(
         script_tx,
         script_rx,
         cut_throttle: CutThrottle::new(),
+        pending_capture: None,
+        last_trigger_poll: Instant::now() - Duration::from_secs(10),
     };
     event_loop.run_app(&mut app)?;
     Ok(())

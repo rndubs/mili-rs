@@ -43,13 +43,32 @@ pub enum TransportChoice {
     Attach(Option<String>),
 }
 
+/// `mili-viz-client snapshot [--out PATH] [--timeout SECS]` — out-of-
+/// band arguments for the snapshot subcommand. The subcommand asks the
+/// running windowed client to write a PNG of the composited GUI to
+/// `out` (default: a timestamped path under `~/.griz/snapshots/`) and
+/// prints the resolved path to stdout. Used by Claude Code and other
+/// scripted agents to "see" the current app status.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SnapshotArgs {
+    /// `--out PATH` — destination PNG. Relative paths are resolved
+    /// against the current working directory.
+    pub out: Option<String>,
+    /// `--timeout SECS` — how long to wait for a running app to pick
+    /// up the request before giving up. Default `5.0`.
+    pub timeout_secs: Option<f64>,
+}
+
 /// The result of parsing argv.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CliOutcome {
     /// Continue startup with these arguments.
     Run(CliArgs),
     /// `-V` was given — the caller prints the version and exits 0.
     Version,
+    /// `snapshot` subcommand — the caller dispatches to
+    /// [`crate::run_snapshot_cli`].
+    Snapshot(SnapshotArgs),
 }
 
 /// Parse the portable griz subset from an argv iterator **excluding**
@@ -61,7 +80,14 @@ pub enum CliOutcome {
 /// so an unrecognised token is a clear error, never a silent filename.
 pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliOutcome, String> {
     let mut out = CliArgs::default();
-    let mut it = args.into_iter();
+    let mut it = args.into_iter().peekable();
+    // The `snapshot` subcommand is recognised only as the *first*
+    // positional token so a plotfile literally named "snapshot" can
+    // still be loaded as `-i snapshot` or `./snapshot`.
+    if it.peek().map(String::as_str) == Some("snapshot") {
+        let _ = it.next();
+        return parse_snapshot(it);
+    }
     let mut pending: Option<String> = None;
     loop {
         let arg = if let Some(p) = pending.take() {
@@ -134,6 +160,51 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<CliOutcome,
         }
     }
     Ok(CliOutcome::Run(out))
+}
+
+fn parse_snapshot<I: Iterator<Item = String>>(mut it: I) -> Result<CliOutcome, String> {
+    let mut a = SnapshotArgs::default();
+    while let Some(tok) = it.next() {
+        match tok.as_str() {
+            "--out" | "-o" => {
+                let p = it
+                    .next()
+                    .ok_or_else(|| format!("flag `{tok}` requires a <path> argument"))?;
+                a.out = Some(p);
+            }
+            "--timeout" => {
+                let s = it
+                    .next()
+                    .ok_or_else(|| "flag `--timeout` requires <seconds>".to_string())?;
+                let v: f64 = s
+                    .parse()
+                    .map_err(|_| format!("`--timeout` value `{s}` is not a number"))?;
+                if v <= 0.0 {
+                    return Err(format!("`--timeout` must be positive, got `{s}`"));
+                }
+                a.timeout_secs = Some(v);
+            }
+            "-h" | "--help" => {
+                return Err(
+                    "usage: mili-viz-client snapshot [--out <path>] [--timeout <seconds>]\n\
+                     \n\
+                     Asks the running `mili-viz-client` window to write a PNG of the\n\
+                     composited GUI (mesh + egui chrome) to <path>. Default <path> is\n\
+                     a timestamped file under ~/.griz/snapshots/. Also overwrites\n\
+                     ~/.griz/snapshots/latest.png. Press F12 in the window to take a\n\
+                     snapshot without using the CLI."
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "snapshot: unexpected argument `{other}` \
+                     (accepted: --out <path>, --timeout <seconds>)"
+                ));
+            }
+        }
+    }
+    Ok(CliOutcome::Snapshot(a))
 }
 
 fn set_root(out: &mut CliArgs, path: String) -> Result<(), String> {
@@ -311,6 +382,70 @@ mod tests {
     fn remote_missing_value_errors() {
         let e = parse(&["-r"]).unwrap_err();
         assert!(e.contains("`-r`/`--remote` requires"), "{e}");
+    }
+
+    // ── `snapshot` subcommand ───────────────────────────────────────
+
+    #[test]
+    fn bare_snapshot_subcommand_parses() {
+        assert_eq!(
+            parse(&["snapshot"]).unwrap(),
+            CliOutcome::Snapshot(SnapshotArgs::default())
+        );
+    }
+
+    #[test]
+    fn snapshot_out_flag() {
+        let CliOutcome::Snapshot(a) = parse(&["snapshot", "--out", "/tmp/frame.png"]).unwrap()
+        else {
+            panic!("Snapshot expected");
+        };
+        assert_eq!(a.out.as_deref(), Some("/tmp/frame.png"));
+    }
+
+    #[test]
+    fn snapshot_short_out_flag() {
+        let CliOutcome::Snapshot(a) = parse(&["snapshot", "-o", "f.png"]).unwrap() else {
+            panic!("Snapshot expected");
+        };
+        assert_eq!(a.out.as_deref(), Some("f.png"));
+    }
+
+    #[test]
+    fn snapshot_timeout_flag() {
+        let CliOutcome::Snapshot(a) =
+            parse(&["snapshot", "--timeout", "2.5", "-o", "f.png"]).unwrap()
+        else {
+            panic!("Snapshot expected");
+        };
+        assert_eq!(a.timeout_secs, Some(2.5));
+        assert_eq!(a.out.as_deref(), Some("f.png"));
+    }
+
+    #[test]
+    fn snapshot_bad_timeout_errors() {
+        assert!(parse(&["snapshot", "--timeout", "abc"])
+            .unwrap_err()
+            .contains("not a number"));
+        assert!(parse(&["snapshot", "--timeout", "0"])
+            .unwrap_err()
+            .contains("must be positive"));
+    }
+
+    #[test]
+    fn snapshot_unknown_arg_errors() {
+        let e = parse(&["snapshot", "--bogus"]).unwrap_err();
+        assert!(e.contains("unexpected argument"), "{e}");
+    }
+
+    #[test]
+    fn snapshot_only_matches_as_first_token() {
+        // A plotfile literally named "snapshot" is loaded via `-i`, not
+        // the subcommand — guards against an accidental capture.
+        let CliOutcome::Run(a) = parse(&["-i", "snapshot"]).unwrap() else {
+            panic!("Run expected");
+        };
+        assert_eq!(a.load_root.as_deref(), Some("snapshot"));
     }
 
     #[test]
