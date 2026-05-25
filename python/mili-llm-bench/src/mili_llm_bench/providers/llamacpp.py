@@ -15,6 +15,21 @@ inference (this provider via ``--jinja``). See
 ``planning/mili-viz/mili-agent/sft-preflight-gpu.md`` §2 for the
 parity story.
 
+**Response-side fallback (option b, rev 10).** On `llama.cpp` builds
+without a FunctionGemma response parser (the autoparser refactor in
+PR #18675 / master `566059a` cannot infer FG's `<escape>` arg wrapping
+and bare-key dict syntax — see m5-sft-pipeline.md rev 9 "Option (a)
+status"), the server returns FG's `<start_function_call>…
+<end_function_call>` markers as literal `message.content` and leaves
+`tool_calls` empty. To unblock Stage 5 without waiting on upstream,
+this provider runs a client-side fallback after each chat-completions
+response: probe `/props` once, cache
+`chat_template_caps.supports_tool_calls`, and when that's false (or
+unknown) AND `tool_calls` is empty AND content contains the FG
+envelope, extract `(name, args_dict)` pairs via the vLLM reference
+regexes and synthesize the canonical normalized tool_calls. Caller
+behavior is identical to a server that does parse FG natively.
+
 Earlier versions of this provider hand-rolled the prompt via a bespoke
 ``_build_functiongemma_prompt`` and hit ``/completion``. That path
 diverged from the HF template — system prompt content was discarded,
@@ -23,7 +38,9 @@ re-serialized with Python-style ``True``/``False``/``None`` — so any
 SFT trained against ``apply_chat_template`` would not see what the
 inference path emits. Stage 6.5 preflight #2 (2026-05-24) measured the
 divergence and resolved Path A: delete the bespoke renderer, let
-``--jinja`` do the work.
+``--jinja`` do the work. The rev-10 fallback re-adds the response-side
+parser only; the prompt path stays on `/v1/chat/completions` +
+`--jinja`.
 
 Deterministic: ``--temp 0`` (greedy) + ``seed`` (from the LlmProvider
 call). The v0 baseline is taken against the GGUF quantization BF16
@@ -37,12 +54,25 @@ on ``$PATH``.
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from .base import ProviderOutput
+
+# FunctionGemma response-envelope regexes. The vLLM reference parser
+# (`vllm/tool_parsers/functiongemma_tool_parser.py`) uses the same shape.
+# Envelope is permissive on inner whitespace so paths like
+# `<start_function_call>call:NAME{a:<escape>v<escape>}<end_function_call>`
+# parse the same as the rare `call:NAME {…}` whitespace variant.
+_FG_ENVELOPE_RE = re.compile(
+    r"<start_function_call>\s*call:(\w+)\s*\{(.*?)\}\s*<end_function_call>",
+    re.DOTALL,
+)
+_FG_STRING_ARG_RE = re.compile(r"(\w+):<escape>(.*?)<escape>", re.DOTALL)
+_FG_BARE_ARG_RE = re.compile(r"(\w+):([^,}]+)")
 
 DEFAULT_MODEL_ID = "ggml-org/functiongemma-270m-it-GGUF:BF16"
 DEFAULT_GGUF_REPO = "ggml-org/functiongemma-270m-it-GGUF"
@@ -90,6 +120,16 @@ class LlamaCppProvider:
     _server_process: Any = field(default=None, init=False, repr=False)
     _requests: Any = field(default=None, init=False, repr=False)
     _last_tool_call_parsing_approach: str | None = field(
+        default=None, init=False, repr=False
+    )
+    # /props caps cache. _caps_probed flips True after the first probe
+    # attempt (success or failure); _caps_supports_tool_calls is the
+    # cached value — True/False if /props returned a bool, None if the
+    # probe failed or the field was missing (treated as "unknown",
+    # which still allows the defensive envelope-detection branch to
+    # activate the fallback).
+    _caps_probed: bool = field(default=False, init=False, repr=False)
+    _caps_supports_tool_calls: bool | None = field(
         default=None, init=False, repr=False
     )
 
@@ -185,6 +225,7 @@ class LlamaCppProvider:
         message = (choices[0] or {}).get("message", {}) if choices else {}
         raw_tool_calls = message.get("tool_calls")
         tool_calls = self._normalize_openai_tool_calls(raw_tool_calls)
+        content = message.get("content") or ""
         if tool_calls:
             self._last_tool_call_parsing_approach = "a1-chat-completions"
             return ProviderOutput(
@@ -193,14 +234,75 @@ class LlamaCppProvider:
                 raw=result,
             )
 
+        # Fallback: llama.cpp b9307 / master 549b9d843 has no FunctionGemma
+        # response parser (autoparser refactor PR #18675 cannot infer
+        # FG's <escape>...<escape> args). When /props caps say
+        # supports_tool_calls=false (or the probe failed) AND the model
+        # emitted an FG envelope in content, parse it client-side here
+        # so the rest of the bench harness sees structured tool_calls.
+        if self._should_run_fg_fallback(content):
+            parsed = _parse_fg_envelopes(content)
+            if parsed:
+                self._last_tool_call_parsing_approach = "b-fg-content-fallback"
+                return ProviderOutput(
+                    tool_calls=parsed,
+                    tokens_used=tokens_used,
+                    raw=result,
+                )
+
         # No tool_calls field (or empty) — treat the message content as final text.
         self._last_tool_call_parsing_approach = "final-text"
-        content = message.get("content") or ""
         return ProviderOutput(
             final_text=str(content).strip(),
             tokens_used=tokens_used,
             raw=result,
         )
+
+    def _should_run_fg_fallback(self, content: str) -> bool:
+        """Decide whether to run the client-side FG content→tool_calls
+        fallback.
+
+        Gate:
+        - If `/props` caps say `supports_tool_calls == True`, trust the
+          server: the fallback is *not* invoked even if an FG envelope
+          shows up in content (caller bug if that happens).
+        - Otherwise (`supports_tool_calls == False`, or the probe failed
+          / the field is missing — treated as "unknown"), activate the
+          fallback iff content contains an FG envelope. The defensive
+          envelope-detection guards against a future build that lies on
+          `/props` but still emits FG markers.
+        """
+        if not content or "<start_function_call>" not in content:
+            return False
+        caps = self._fetch_caps_supports_tool_calls()
+        if caps is True:
+            return False
+        return True
+
+    def _fetch_caps_supports_tool_calls(self) -> bool | None:
+        """GET `/props` once, cache `chat_template_caps.supports_tool_calls`.
+
+        Returns True/False per `/props`, or None if the probe failed or
+        the field was missing. Cached on the provider instance — one
+        probe per provider, not per request.
+        """
+        if self._caps_probed:
+            return self._caps_supports_tool_calls
+        # Flip _caps_probed *before* the request: if the request itself
+        # raises, we don't want to retry on every subsequent generate.
+        self._caps_probed = True
+        requests = _import_requests()
+        try:
+            resp = requests.get(f"{self.server_url}/props", timeout=5)
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception:
+            self._caps_supports_tool_calls = None
+            return None
+        caps = (body or {}).get("chat_template_caps") or {}
+        val = caps.get("supports_tool_calls")
+        self._caps_supports_tool_calls = val if isinstance(val, bool) else None
+        return self._caps_supports_tool_calls
 
     def _convert_to_openai_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
         """Convert our tool format to OpenAI format for llama-server.
@@ -251,6 +353,59 @@ class LlamaCppProvider:
             out.append({"name": str(name), "arguments": arguments})
 
         return out if out else []
+
+
+def _coerce_fg_scalar(raw: str) -> Any:
+    """Coerce a bare (unquoted) FunctionGemma arg value to bool/int/float
+    or leave as string. ``true``/``false`` → bool; otherwise try int,
+    then float, else strip and return the original string.
+    """
+    s = raw.strip()
+    if s == "true":
+        return True
+    if s == "false":
+        return False
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+def _parse_fg_envelopes(content: str) -> list[dict[str, Any]]:
+    """Parse FunctionGemma ``<start_function_call>...<end_function_call>``
+    envelopes out of llama-server ``message.content`` and return one
+    canonical ``{"name", "arguments": dict}`` per envelope, in source
+    order.
+
+    Mirrors vLLM's ``FunctionGemmaToolParser``. String args are
+    delimited by ``<escape>`` markers; remaining ``key:value`` pairs
+    are bare scalars (bool / int / float / unquoted string).
+    """
+    out: list[dict[str, Any]] = []
+    for env in _FG_ENVELOPE_RE.finditer(content):
+        name = env.group(1)
+        body = env.group(2)
+        args: dict[str, Any] = {}
+        # Pull string args first; record names so the bare-scalar pass
+        # doesn't double-count them.
+        for sm in _FG_STRING_ARG_RE.finditer(body):
+            args[sm.group(1)] = sm.group(2)
+        # Mask out the string-arg spans (including their <escape>...<escape>
+        # values) so the bare-scalar regex doesn't capture <escape> as a
+        # bogus value.
+        masked = _FG_STRING_ARG_RE.sub("", body)
+        for bm in _FG_BARE_ARG_RE.finditer(masked):
+            key = bm.group(1)
+            if key in args:
+                continue
+            args[key] = _coerce_fg_scalar(bm.group(2))
+        out.append({"name": name, "arguments": args})
+    return out
 
 
 __all__ = [

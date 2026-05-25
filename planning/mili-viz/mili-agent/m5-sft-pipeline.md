@@ -1,20 +1,16 @@
 # M5 — SFT pipeline (live tracker)
 
 **Status (2026-05-24):** Stages 2, 3, 6.5 cleared; preflight #2
-cleared via Path A (rev 8). v6 re-baseline on the new `--jinja`
-path landed at **0 / 50 L3 (rev 9)** — diagnosed as an upstream
-parser gap in `llama.cpp` b9307 (`549b9d843`):
-`chat_template_caps.supports_tool_calls = false` for the
-FunctionGemma BF16 GGUF, so FG's `<start_function_call>…
-<end_function_call>` response markers return as literal
-`message.content` instead of structured `tool_calls`. **Stage 5 is
-blocked** until the inference path emits structured tool_calls.
-Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5 on synth.jsonl,
-rev 7) stands. Next decision: (a) upgrade `llama.cpp` to a build
-with a FG response parser, (b) add a content→`tool_calls` fallback
-inside `LlamaCppProvider.generate` (re-introduces parser code Path
-A deleted), (c) revert Path A and re-apply the developer-message
-fix to the bespoke renderer, or (d) switch the inference runtime.
+cleared via Path A (rev 8); rev-9 parser gap resolved via **option
+(b)** in rev 10 — a client-side `content → tool_calls` fallback
+inside `LlamaCppProvider.generate`, gated on `/props`
+`chat_template_caps.supports_tool_calls = false`. v7 re-baseline on
+the same `--jinja` path with the fallback active lands at **13 / 50
+L3 (26.0 %)** — the 37/50 parser-gap cluster is fully cleared
+(those scenarios now grade against actual tool behavior) and the
+13/50 model-refusal cluster carries over verbatim. **Stage 5 is
+unblocked.** Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5
+on synth.jsonl, rev 7) stands.
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -36,7 +32,8 @@ canonical harness config (`step_cap=8`, `temperature=0.0`,
 
 | Run                                                       | Provider                      | L3       | tools_sha256 | Notes                                            |
 | --------------------------------------------------------- | ----------------------------- | -------- | ------------ | ------------------------------------------------ |
-| **v6 floor** (`v6-llamacpp-jinja-rebaseline-20260524-205725`) | llamacpp / FunctionGemma-270M | **0 %** | `27ffbd0e…` | Re-baseline on `--jinja` path; 50 / 50 `parse_error`. llama.cpp b9307 (`549b9d843`) has no FG response parser (`chat_template_caps.supports_tool_calls = false`); 37 / 50 emit FG markers in content, 13 / 50 model-refused. Stage 5 blocked — see rev 9. Supersedes the stale v5 floor (40 % L3 under the deleted bespoke renderer). |
+| **v7 floor** (`v7-llamacpp-b-fallback-20260524-215520`)   | llamacpp / FunctionGemma-270M | **26.0 %** | `27ffbd0e…` | Canonical re-baseline on `--jinja` path with the rev-10 client-side fallback active. 13 / 50 L3 (`L0=20`, `L2=17`, `L3=13`). Failure-mode shift vs v6: parser-gap cluster (37/50) fully cleared; remaining 13 parse_errors are the same v6 refusal cluster (load 5/6, colormap 3/4, scattered show/select/clrsel). Stage 5 unblocked — see rev 10. |
+| v6 (`v6-llamacpp-jinja-rebaseline-20260524-205725`)       | llamacpp / FunctionGemma-270M | 0 %      | `27ffbd0e…`  | Broken-parser floor; kept for the rev-9 ↔ rev-10 lift comparison. Same `--jinja` prompt path as v7, no fallback. 50 / 50 `parse_error` because llama.cpp b9307 (`549b9d843`) has no FG response parser. |
 | v4 floor (`v4-llamacpp-realfixtures-fullresolve`)         | llamacpp / FunctionGemma-270M | 32 %     | `cdda3677…`  | Pre-GEPA-promotion; historical                   |
 | **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools, bootstrap eval; re-measured |
 | **v7 ceiling** (`v7-stage65-anthropic-smoke-…`)           | anthropic / claude-sonnet-4-5 | **98 %** | (synth)      | Post-promotion tools on `synth.jsonl` (175 rows) |
@@ -46,15 +43,19 @@ fixture-resolver landed; their absolute numbers are not comparable —
 see [`bench-fixture-stub-fallback-fixed`](../../../../.claude/projects/-Users-rwhit-Workspace-mili-rs/memory/bench-fixture-stub-fallback-fixed.md)
 in memory.
 
-**Per-intent floor (FunctionGemma v6, 0 %):** every intent at 0 / N
-on the new `--jinja` path — see rev 9 for the failure-cluster
-breakdown. Not a measurement of FG capability under a working
-inference path; reflects only that the response parser doesn't
-recognize FG's format. Historical v5 per-intent numbers (load 83 %,
-set-state 83 %, colormap 75 %, show-derived 25 %, show-primal /
-step 17 %, material / select / clrsel / view-reset / compound 0 %)
-are kept here for orientation but were measured against the deleted
-bespoke renderer that nullified the bench system prompt.
+**Per-intent floor (FunctionGemma v7, 26.0 %):** step 4/6 (66.7%),
+view-reset 2/3 (66.7%), clrsel 2/4 (50.0%), material 2/6 (33.3%),
+set-state 2/6 (33.3%), load 1/6 (16.7%), colormap 0/4, compound
+0/1, select 0/4, show-derived 0/4, show-primal 0/6. Compound is
+1/50 in the bootstrap eval (acknowledged sparsity — see "Multi-step
+tool calls" below), so its 0/1 is unmeasured, not measured. The
+zero-rate intents (colormap, select, show-primal, show-derived) are
+the SFT lift targets; their per-intent ≥50 % gate sits in the gates
+table below. Historical v5 per-intent numbers (load 83 %, set-state
+83 %, colormap 75 %, show-derived 25 %, show-primal / step 17 %,
+material / select / clrsel / view-reset / compound 0 %) are kept
+here for orientation but were measured against the deleted bespoke
+renderer that nullified the bench system prompt.
 
 ---
 
@@ -240,6 +241,64 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-24 (rev 10)** — Rev-9 parser gap resolved via **option
+  (b)**: client-side `content → tool_calls` fallback added to
+  `LlamaCppProvider.generate` in
+  `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`.
+  Gate: on the first request, GET `/props` once and cache
+  `chat_template_caps.supports_tool_calls`; the fallback activates
+  iff (caps != True) AND (`tool_calls` is empty) AND (content
+  contains `<start_function_call>`). Defensive disjunction covers
+  the case where `/props` lies on a future build. Regexes mirror
+  vLLM's `FunctionGemmaToolParser`: envelope
+  `<start_function_call>\s*call:(\w+)\s*\{(.*?)\}\s*<end_function_call>`,
+  string args `(\w+):<escape>(.*?)<escape>`, bare scalars
+  `(\w+):([^,}]+)` with `true`/`false`/int/float coercion. Prompt
+  path untouched — still `/v1/chat/completions` + `--jinja`; the
+  rev-8 bespoke renderer stays deleted. Five new pins in
+  `tests/test_providers_llamacpp.py::TestFallbackParser`
+  (`test_fallback_parses_single_call`, `_parses_multiple_calls`,
+  `_preserves_oai_tool_calls`, `_disabled_when_supports_tool_calls_true`,
+  `_handles_escape_and_bare_args`); 20 / 20 provider tests pass.
+
+  **v7 re-baseline (canonical bootstrap eval, step_cap=8,
+  temperature=0.0, system_prompt_sha256 `9f36d0deb5e98a89`,
+  tools_sha256 `27ffbd0e…`, on `matrix37` H100 with
+  `llama-server -m functiongemma-270m-it-bf16.gguf --jinja`):
+  **13 / 50 L3 (26.0 %)**.** By tier: L0=20, L1=0, L2=17, L3=13.
+  By failure mode: 13 parse_error, 6 wrong_final_state, 5
+  unknown_tool, 4 wrong_materials, 4 wrong_result, 3 wrong_selection,
+  2 schema_mismatch. Wall-clock 23 s. Artifacts:
+  `data/posttraining/runs/v7-llamacpp-b-fallback-20260524-215520/`.
+
+  **Failure-cluster shift vs v6.** The rev-9 parser-gap cluster
+  (37/50) is fully cleared — every scenario that previously
+  short-circuited on `parse_error` now grades the actual rollout.
+  The 13 remaining parse_errors are the *same* model-refusal
+  cluster v6 already identified ("I cannot assist with…",
+  concentrated on load 5/6 and colormap 3/4 plus scattered
+  show-primal / show-derived / select / clrsel). Verified by
+  inspecting all 13 v7 parse_error rollouts: zero contain an FG
+  envelope in content, all match the v6 refusal-text pattern. The
+  fallback is doing exactly its job — the residual 13/50 is a
+  separate prompt-engineering problem, not a parser problem, and
+  is the SFT lift target.
+
+  **Per-intent floor pinned (v7):** step 4/6 (66.7%), view-reset
+  2/3 (66.7%), clrsel 2/4 (50.0%), material 2/6 (33.3%), set-state
+  2/6 (33.3%), load 1/6 (16.7%), colormap 0/4, compound 0/1
+  (unmeasured — sparsity), select 0/4, show-derived 0/4,
+  show-primal 0/6. The 0% intents (colormap, select, show-primal,
+  show-derived) plus low-rate load/material are the SFT lift
+  surface; the per-intent ≥50 % gate in the gates table is what
+  v1 SFT needs to clear.
+
+  **Stage 5 is unblocked.** The "inference path emits structured
+  tool_calls" precondition is now met for the post-SFT eval cycle,
+  whether on this `llama.cpp` build or on a future upstream build
+  with a real FG parser (caps gate flips the fallback off
+  automatically when supports_tool_calls returns true).
 
 - **2026-05-24 (rev 9)** — v5 re-baseline (the required follow-on to
   rev 8) ran on the new `--jinja` inference path against the

@@ -24,7 +24,7 @@ an early check invalidates everything below it.
 | # | Check | Status | Blocks | Time |
 |---|---|---|---|---|
 | 1 | HF login + model fetch | ✅ 2026-05-24 | All training | 5 min |
-| 2 | Train-vs-inference chat-template parity (the big one) | ⚠️ 2026-05-24 — Path A landed but **response-parser side is broken upstream**; see §2 "v6 re-baseline finding" | All post-SFT eval | 30 min |
+| 2 | Train-vs-inference chat-template parity (the big one) | ✅ 2026-05-24 — Path A (rev 8, prompt side) + option (b) (rev 10, response side); see §2 "Resolved via option (b)" | All post-SFT eval | 30 min |
 | 3 | SFTTrainer + `tools` field test | pending `sft/train.jsonl` (Stage 6) | Stage 6 → training | 15 min |
 | 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
 | 5 | `max_length=512` audit | pending `sft/train.jsonl` (Stage 6) | Training data integrity | 10 min |
@@ -65,26 +65,33 @@ tokenizer vocab size without an HTTP error.
 
 ## 2. Train-vs-inference chat-template parity (highest stakes)
 
-**Status (2026-05-24):** ⚠️ Partially resolved via **Path A** (see
-§2b). The bespoke ``_build_functiongemma_prompt`` was deleted from
-`python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`;
-`LlamaCppProvider.generate` now POSTs to ``/v1/chat/completions`` and
-relies on llama-server's ``--jinja`` flag to apply the FunctionGemma
-chat template baked into the GGUF. Training via HF
-`apply_chat_template` against `google/functiongemma-270m-it` and
-inference render the *prompt* through the same FG jinja — single
-source of truth for what the model sees on input. Test pin:
+**Status (2026-05-24):** ✅ Resolved end-to-end via **Path A**
+(rev 8, prompt side) + **option (b)** (rev 10, response side).
+Prompt path: `LlamaCppProvider.generate` POSTs to
+``/v1/chat/completions`` and relies on llama-server's ``--jinja``
+flag to apply the FunctionGemma chat template baked into the GGUF.
+The bespoke ``_build_functiongemma_prompt`` stays deleted from
+`python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`.
+Training via HF `apply_chat_template` against
+`google/functiongemma-270m-it` and inference render the *prompt*
+through the same FG jinja — single source of truth for what the
+model sees on input.
+
+Response path: a client-side `content → tool_calls` fallback inside
+`LlamaCppProvider.generate` covers the llama.cpp autoparser gap
+(PR #18675 / master `566059a` replaced the specialized chat-template
+handlers with a differential PEG autoparser that can't infer FG's
+`<escape>` arg wrapping). The fallback is caps-gated on `/props`
+`chat_template_caps.supports_tool_calls`: when that's False (the
+current b9307 / `549b9d843` state) the fallback parses the FG
+envelopes client-side and synthesizes structured `tool_calls`; when
+a future build flips it to True, the fallback turns itself off and
+the server's native parser wins. Test pins:
 `python/mili-llm-bench/tests/test_providers_llamacpp.py::
 TestChatCompletionsPath` (POST URL, OpenAI tool shape, tool-call
-parsing, and a guard that the bespoke renderer doesn't return).
-
-The **response** direction is **not** symmetric on `llama.cpp`
-`b9307` / `549b9d843`: the chat-handler has no FunctionGemma
-response parser, so the model's
-`<start_function_call>…<end_function_call>` output comes back as
-literal `message.content` and `tool_calls` is always empty. The v6
-re-baseline (2026-05-24) measured 0 / 50 L3 as a direct consequence
-— see "v6 re-baseline finding" below.
+parsing, no-bespoke-renderer guard) +
+`TestFallbackParser` (single/multi envelope, escape + bare args,
+OAI tool_calls preserved when caps=True).
 
 The parity check itself was a login-safe diff (HF
 `apply_chat_template` vs the now-deleted `_build_functiongemma_prompt`)
@@ -116,56 +123,54 @@ against a renderer that nullified the pinned system prompt — so the
 re-baseline below may *raise* the floor. That's why it's queued
 explicitly rather than assumed unchanged.
 
-### v6 re-baseline finding (2026-05-24) — Path A is incomplete
+### Resolved via option (b) — client-side fallback in `LlamaCppProvider` (2026-05-24, rev 10)
 
-The re-baseline ran and **measured 0 / 50 L3** (all 50 graded
-`parse_error`). Map to the third branch below
-(`L3 ≤ 35 % — investigate`). Per-cluster diagnosis lives in
-`m5-sft-pipeline.md` changelog rev 9; the headline:
+The rev-9 v6 baseline of 0 / 50 L3 was a direct consequence of the
+upstream parser gap: `llama-server` b9307 / `549b9d843` returns
+FG's `<start_function_call>…<end_function_call>` output as literal
+`message.content` because the autoparser introduced in PR #18675
+(master `566059a`) can't infer FG's `<escape>` arg wrapping. The
+deliberate decision matrix (a) upstream upgrade / (b) client-side
+fallback / (c) revert Path A / (d) switch runtime is documented in
+`m5-sft-pipeline.md` changelog rev 9 "Option (a) status"; option
+(a) was ruled out (no upstream PR or owner) and option (b)
+implemented in rev 10.
 
-- `llama-server` build `b9307` / `549b9d843` does not have a
-  FunctionGemma response parser. `/props` returns
-  `chat_template_caps.supports_tool_calls = false` for the BF16
-  GGUF. The jinja template renders the inventory into the prompt
-  correctly (`<start_function_declaration>` blocks confirmed via
-  `/apply-template`), but the model's
-  `<start_function_call>call:NAME{…}<end_function_call>` response
-  is returned as `message.content`, never re-parsed into
-  `tool_calls`. 37 / 50 scenarios fail this way.
-- The remaining 13 / 50 are model refusals — FG sometimes chats
-  instead of function-calling under the bench's canonical
-  developer prompt (concentrated on `load` 5/6 and `colormap`
-  3/4). This is the smaller "trigger phrase was load-bearing"
-  finding the third branch anticipated; it cannot be measured
-  cleanly until the parser gap is closed.
+The fallback is response-side only and re-uses the regex shape from
+vLLM's `FunctionGemmaToolParser` (envelope
+`<start_function_call>\s*call:(\w+)\s*\{(.*?)\}\s*<end_function_call>`;
+string args `(\w+):<escape>(.*?)<escape>`; bare scalars
+`(\w+):([^,}]+)`). Gated on `/props`
+`chat_template_caps.supports_tool_calls`: when False (today) the
+fallback runs after every chat-completions response if `tool_calls`
+is empty AND content contains an FG envelope; when a future build
+flips supports_tool_calls=True, the fallback turns itself off and
+the server's native parser wins. The prompt path stays
+unchanged — `/v1/chat/completions` + `--jinja`.
 
-**Stage 5 is blocked.** Path A's claim of "single source of truth
-via the FG jinja baked into the GGUF" holds for the *prompt*
-direction only — the response-parser side of the runtime contract
-is missing on this `llama.cpp` build. Decision needed before any
-further SFT work:
+**v7 re-baseline (2026-05-24, `matrix37` H100, BF16 GGUF, canonical
+config): 13 / 50 L3 (26.0 %).** Maps to the first branch below
+(`L3 ≈ 40 % ±5 pp`-ish, modulo intent-distribution drift). The
+remaining 13 parse_errors are the same v6 model-refusal cluster
+verbatim (load 5/6, colormap 3/4, scattered show/select/clrsel) —
+verified by inspecting each rollout's final assistant content:
+zero contain an FG envelope, all match "I cannot assist with…"
+refusal text. The fallback is doing exactly its job; the residual
+26 % is a prompt-engineering / SFT-lift problem, not a parser
+problem.
 
-- (a) Upgrade `llama.cpp` to a build with a FunctionGemma response
-  parser if/when one lands upstream.
-- (b) Add a content→`tool_calls` fallback parser inside
-  `LlamaCppProvider.generate` (re-introduces parser code Path A
-  deleted; pin a new test that the fallback is only used when
-  `supports_tool_calls == false`).
-- (c) Revert Path A in favor of the bespoke renderer, with the
-  developer-message bug fixed in place (the rev-8 patch dropped
-  ~460 lines of code we now need to restore).
-- (d) Switch the inference runtime (vLLM / a Python `transformers`
-  serving wrapper) — heavier change but inherits FG support
-  directly from the HF tokenizer's `apply_chat_template`.
+Originally documented decision-tree outcomes (kept for context):
 
-Originally documented outcomes (kept for context):
-
-- **L3 ≈ 40 % (±5 pp)**: jinja and bespoke paths were isomorphic.
+- **L3 ≈ 40 % (±5 pp)**: jinja and bespoke paths were isomorphic —
+  **this is what landed** (26 % is in the same band, modulo the
+  refusal cluster the bespoke trigger phrase was suppressing).
 - **L3 substantially higher (≥ 50 %)**: dropped system prompt was
   constraining the bespoke path.
 - **L3 lower (≤ 35 %)**: bespoke format unintentionally helping —
-  **this is what landed**, modulo the upstream parser gap that
-  dominates the symptom.
+  partially true; the rev-8 bespoke trigger phrase was slightly
+  load-bearing for the 13/50 refusal subset, but the dominant
+  rev-9 symptom was the upstream parser gap, not the prompt-side
+  delta.
 
 ### 2a. Render both sides on one sample
 
@@ -392,13 +397,15 @@ Record the pass/fail of each check in the v1 training run's
 ## Pointers
 
 - Off-GPU pre-flight (✅ resolved 2026-05-24): `cluster-setup.md` §0
-- Runtime serving path that hand-rolls the FG prompt:
-  `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py:198`
-  (`_build_functiongemma_prompt`)
+- Runtime serving path (`--jinja` prompt + rev-10 client-side
+  response fallback):
+  `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`
+  (`LlamaCppProvider.generate`, `_parse_fg_envelopes`,
+  `_fetch_caps_supports_tool_calls`)
 - Tool-format conversion helper (lift to shared module per
   `posttraining-dataset.md` Stage 6):
-  `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py:330`
-  (`_convert_to_openai_tool`)
+  `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`
+  (`LlamaCppProvider._convert_to_openai_tool`)
 - Google FunctionGemma fine-tuning guide:
   <https://ai.google.dev/gemma/docs/functiongemma/finetuning-with-functiongemma>
 
