@@ -441,14 +441,60 @@ corpus size (~200 scenarios → a few hundred filtered SFT records).
 **Important constraints:**
 
 - Train on the `messages` field; `tools` is a **context prefix** shown
-  to the model at inference, never a target. `assistant_only_loss=True`
+  to the model at inference, never a target. `MaskAssistantOnlyCollator`
   enforces this at the token level (loss masked everywhere except
-  assistant turns).
+  assistant turns; see §0 and `m5-sft-pipeline.md` rev 17 for why
+  TRL's native `assistant_only_loss=True` path doesn't work on FG's
+  template).
 - **Do not change the tokenizer.** Any modification to
   `tokenizer_config.json` (chat template, special tokens, vocabulary)
   between source HF model and saved checkpoint will silently break
   GGUF conversion or inference. The §0 pre-flight diffs these to
   catch drift.
+
+### Launching the run
+
+The recipe above is realized as `python/scripts/sft_train.py`; submit
+via the slurm wrapper `scripts/sft_train.sbatch`. The launcher
+short-circuits with a recovery hint if invoked from a non-GPU host
+(catches the common "ran it from `matrix2`" failure mode where
+`device_map="cuda"` would otherwise crash several seconds into model
+loading).
+
+```bash
+# Queued, from a login node — 1h H100 job, logs to logs/sft-train-<JOBID>.{out,err}
+sbatch scripts/sft_train.sbatch
+
+# SBATCH overrides
+sbatch --partition=pdebug --time=00:30:00 scripts/sft_train.sbatch
+
+# Forwarded sft_train.py overrides (anything after the script name)
+sbatch scripts/sft_train.sbatch \
+  --num-train-epochs 4 \
+  --output-dir data/posttraining/checkpoints/v1-4ep
+
+# Interactive smoke — 1 epoch is ≈ 1–2 min on H100
+srun --partition=pbatch --time=00:15:00 --gres=gpu:1 \
+  ./scripts/sft_train.sbatch --num-train-epochs 1 --output-dir /tmp/sft-smoke
+
+# Direct execution from an existing GPU shell (matrix41 etc.)
+./scripts/sft_train.sbatch
+```
+
+`./scripts/sft_train.sbatch` as a direct command works because
+`#SBATCH` lines are bash comments outside of slurm; the script `exec`s
+into `uv run --directory python python scripts/sft_train.py "$@"` at
+the end. Defaults to the rev-4 §6 hyperparameter table; override only
+with a one-line justification in the run's `dataset_card.md` so silent
+drift is impossible.
+
+The launcher **does not** source `scripts/setup-gpu-env.sh` — that
+script loads `cuda/12.9.1` to keep llama.cpp's CUDA backend
+ABI-consistent with its build toolchain, which would shadow PyTorch's
+bundled CUDA 13 runtime via `LD_LIBRARY_PATH`. Same reasoning as the
+top-of-file comment in `scripts/gpu-sanity.sh`. The launcher inlines
+the training-safe subset (`HF_HUB_DISABLE_TELEMETRY=1`,
+`UV_LINK_MODE=copy`) instead.
 
 ---
 
@@ -550,6 +596,25 @@ ceilings-at-time-of-writing; bump and re-test as the upstream
 libraries move.
 
 ## Changelog
+
+- **2026-05-25 (rev 5).** Training entry point landed.
+  `python/scripts/sft_train.py` realizes the §6 recipe (rev 4) as a
+  runnable argparse-driven script with defaults matching the pinned
+  hyperparameter table. `scripts/sft_train.sbatch` is the slurm
+  submission wrapper — works either via `sbatch`, `srun`, or direct
+  execution from an existing GPU shell (since `#SBATCH` lines are
+  bash comments outside slurm, the script `exec`s into the `uv run`
+  invocation at the end). Fails loud via `nvidia-smi` gate + recovery
+  hint if invoked from a non-GPU host (`matrix2` etc.), with the
+  exact sbatch / srun fallback commands printed inline. Inlines the
+  training-safe subset of `setup-gpu-env.sh`'s exports
+  (`HF_HUB_DISABLE_TELEMETRY=1`, `UV_LINK_MODE=copy`) but does not
+  source it — avoids the `cuda/12.9.1` ↔ torch-bundled-CUDA-13
+  `LD_LIBRARY_PATH` shadow the `gpu-sanity.sh` comment block warns
+  about. Drive-by drift fix: §6 "Important constraints" first bullet
+  was still attributing assistant-only loss masking to TRL's native
+  `assistant_only_loss=True` kwarg — corrected to point at
+  `MaskAssistantOnlyCollator` per rev 4.
 
 - **2026-05-25 (rev 4).** Preflight #4 cleared via custom collator
   (option B). TRL 1.5.0's native `assistant_only_loss=True` fails at

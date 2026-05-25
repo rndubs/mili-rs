@@ -13,7 +13,21 @@ auto-patch. The rev-12 config-seam claim in `cluster-setup.md` §0
 turned out to be genuinely vacuous (kwarg exists on TRL 1.5.0 but
 trainer dies on the template); see report
 `data/posttraining/sft/preflight-4-loss-mask.md`**; #5 cleared
-off-GPU in rev 14 — see below). **TRL pin bumped
+off-GPU in rev 14 — see below). **Stage 8 deferred 2026-05-25
+(rev 18)** — Stage 6.5's 97.71 % L3 already supplies the
+"strong model" signal; `google/gemma-{2b,7b}-it` parked as
+post-SFT fallbacks if the regression tripwire fires. Critical path
+is now `trainer.train()` (cluster-setup.md §6, rev 4 recipe)
+→ preflight #6 → real Stage 7 eval. **rev 19 (2026-05-25):**
+training entry point landed — `scripts/sft_train.sbatch` +
+`python/scripts/sft_train.py`. **rev 20 (2026-05-25):**
+`trainer.train()` landed — 168 steps / 8 epochs / 111.9 s on
+`matrix41`; 8 per-epoch checkpoints + `final/` at
+`data/posttraining/checkpoints/v1/` (13 GB). Loss collapsed to
+~0 by epoch 6 — pure memorization on 82 rows. Per-checkpoint
+heldout eval pending; **GGUF conversion deferred** to post-winner
+selection (`eval/heldout.jsonl` can be graded directly off HF
+checkpoints via a new TransformersProvider). **TRL pin bumped
 `>=0.11,<0.13` → `>=1.0,<2` in rev 16** (the original pin's stated
 justification — `assistant_only_loss` — did not exist on the pinned
 versions; trl 0.20+ is the floor for that kwarg). rev-9
@@ -217,10 +231,18 @@ Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2
       `parse_error` from the mock, expected). Remaining work: real
       eval pass against the post-SFT checkpoint (GPU-blocked behind
       `trainer.train()`).
-- [ ] **Stage 8** — Pre-experiment gate. Run a stock 0.5–1B model with
-      grammar-constrained decoding and **no fine-tune** against
-      Stage-7 eval. If it clears the bar, post-training is moot for v1
-      and we stop.
+- [~] **Stage 8** — Pre-experiment gate. **Deferred 2026-05-25 (rev 18).**
+      Original framing was "stock 0.5–1B + GBNF, does it clear the
+      ceiling?" — a self-hosted-small-model gate. We already have the
+      "what does a strong model do?" signal from Stage 6.5 at **97.71 %
+      L3** (Claude Sonnet 4.5 on the same corpus distribution); no need
+      to re-establish a ceiling via a self-hosted run. `google/gemma-2b-it`
+      and `google/gemma-7b-it` are parked as **post-SFT fallbacks** —
+      revisit only if `trainer.train()` lands below the regression
+      tripwire (≥ 40 % L3) and the v2 levers from rev 17 (oversample
+      free-text-bearing compounds; K=1 or T≥1.0 resampling) don't
+      recover. No new GBNF authoring or TransformersProvider work
+      on the v1 critical path.
 
 The interface-independent stages (1, 2, 3, 4, 6, 6.5, 7, 8) can all
 land before any teacher cost; Stage 5 is the only one that burns API.
@@ -303,6 +325,112 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 20)** — **`trainer.train()` landed; v1 checkpoint
+  pool ready for heldout eval.** First end-to-end SFT run on
+  `matrix41` H100: 168 steps over 8 epochs, **111.9 s wall-clock**
+  (≈ 14 s/epoch). Output at
+  `data/posttraining/checkpoints/v1/`: 8 per-epoch checkpoints
+  (`checkpoint-21` through `checkpoint-168` — TRL's
+  `save_strategy="epoch"`) plus an explicit `final/` copy of
+  epoch 8. Total disk: 13 GB.
+
+  **Loss curve — strong memorization signal.** Epoch 1 trained
+  from `loss=4.13` to `loss=0.07` (the 1-epoch smoke window
+  captured this); epoch 2 drifted between 0.1 and 0.0; epochs 3–8
+  ran at essentially `loss=0.0` with `mean_token_accuracy=1.0`,
+  `entropy≈0`, and `grad_norm` in the 1e-3 to 1e-2 range. Final
+  reported metrics: `train_loss=0.095` (averaged), `eval_loss=2.5e-5`,
+  `eval_mean_token_accuracy=1.0`. **The eval signal is not
+  generalization** — `val.jsonl` (8 rows) is split from the same
+  Stage-5 rollout pool as `train.jsonl`. The actual generalization
+  test is `eval/heldout.jsonl` (81 rows, separate
+  `(intent, fixture)` cells). The strong-memorization signal across
+  the late epochs is the reason `save_strategy="epoch"` was wired
+  into the recipe up front: the per-checkpoint heldout sweep picks
+  the right stopping point empirically rather than us guessing now.
+  Plausible candidates: `checkpoint-21` (epoch 1, the only epoch
+  with non-trivial gradient signal) or one of the early
+  checkpoints (2–4) if memorization of tool-call syntax helps L3
+  without hurting semantic correctness.
+
+  **One smoke-driven fix landed in the recipe.** First smoke run
+  OOM'd at end-of-epoch eval — FG's 262K-token vocab × `max_length=4096`
+  makes the per-batch logits tensor enormous, and HF's default
+  `per_device_eval_batch_size=8` (not equal to train batch size as
+  one might assume) compounds it. `sft_train.py` now defaults
+  `per_device_eval_batch_size=1`. Training batch size unchanged.
+  Second smoke + full run both cleared without retry.
+
+  **Eval path decision.** GGUF conversion + preflight #6 are
+  **deferred** to post-winner selection. The eval harness can grade
+  HF checkpoints directly via a new TransformersProvider —
+  `tokenizer.apply_chat_template(messages, tools=tools, …)` is the
+  source of truth that training rendered against, and re-using it
+  for eval eliminates the GGUF chat-template-mutation risk that
+  preflight #6 exists to catch (we only have to clear that gate
+  for the one shipping checkpoint, not all 8). vLLM's native FG
+  tool parser is the upstream alternative but isn't in the env;
+  TransformersProvider is the lighter lift. Pending implementation.
+
+  **Path forward.** TransformersProvider → per-checkpoint heldout
+  eval → pick best L3 by gate (regression tripwire ≥ 40 %, v1
+  target ≥ 62 %, stretch ≥ 80 %, per-intent floor ≥ 50 % on the
+  four 0-rate intents) → preflight #6 + GGUF conversion only for
+  the winner → ship.
+
+- **2026-05-25 (rev 19)** — **Training entry point landed.**
+  `python/scripts/sft_train.py` realizes the `cluster-setup.md` §6
+  recipe (rev 4) as a runnable argparse-driven script. Defaults match
+  the pinned hyperparameter table verbatim; overrides require a
+  one-line justification in the run's `dataset_card.md` so silent
+  drift is impossible. `scripts/sft_train.sbatch` is the slurm
+  submission wrapper — works via `sbatch` from a login node, `srun`
+  interactively, or direct execution from an existing GPU shell
+  (`#SBATCH` lines are bash comments outside slurm; the script
+  `exec`s into `uv run --directory python python scripts/sft_train.py
+  "$@"` at the end). Forwards arbitrary CLI overrides to the python
+  script. Short-circuits with the exact sbatch / srun recovery
+  commands when launched from a non-GPU host (caught the
+  `matrix2`-login-node "ran it from the wrong shell" failure mode).
+  Inlines the training-safe subset of `setup-gpu-env.sh`'s exports
+  (`HF_HUB_DISABLE_TELEMETRY=1`, `UV_LINK_MODE=copy`) but does not
+  source it — the `cuda/12.9.1` module-load would put system CUDA on
+  `LD_LIBRARY_PATH` and risk shadowing torch's bundled CUDA 13
+  runtime (same reasoning as `gpu-sanity.sh`'s top-of-file comment).
+  Launch instructions live in `cluster-setup.md` §6 "Launching the
+  run". Drive-by drift fix in §6's constraints bullet (TRL native
+  `assistant_only_loss=True` → `MaskAssistantOnlyCollator` per rev 4)
+  rolled in.
+
+  **Smoke run in flight** on `matrix41` H100 via `srun --partition=pbatch
+  --time=00:15:00 --gres=gpu:1 ./scripts/sft_train.sbatch
+  --num-train-epochs 1 --output-dir /tmp/sft-smoke`. Pending result.
+
+- **2026-05-25 (rev 18)** — **Stage 8 deferred to post-SFT fallback.**
+  Original framing was a self-hosted-small-model gate ("stock 0.5–1B
+  + GBNF, does it clear the ceiling?"). Reframed in conversation:
+  Stage 6.5 already measured Claude Sonnet 4.5 at **97.71 % L3
+  (171 / 175)** on `synth.jsonl` — that *is* the "what could we do
+  with a stronger model" signal, and the only reason we're still on
+  the FunctionGemma path is the self-hosted-small-deployment story,
+  not raw quality. A self-hosted Stage 8 run with grammar-constrained
+  gemma-7b-it would (a) require GBNF authoring + a TransformersProvider
+  (or GBNF + GGUF conversion + llama-server), (b) test "with max
+  format help, can a larger general model match a strong API model?"
+  — a question whose answer doesn't change the v1 SFT decision either
+  way. `google/gemma-2b-it` and `google/gemma-7b-it` are parked as
+  **post-SFT fallbacks**: revisit only if `trainer.train()` lands
+  below the regression tripwire (≥ 40 % L3) and the rev-17 v2 levers
+  (oversample free-text-bearing compounds; K=1 or T≥1.0 resampling
+  for DPO pairs) don't recover.
+
+  **Path forward.** Critical path collapses to `trainer.train()`
+  (cluster-setup.md §6, rev 4 recipe) → preflight #6 (GGUF
+  chat-template baking, gated on a trained checkpoint) → real
+  Stage 7 eval pass against `eval/heldout.jsonl`. No tracker artifacts
+  modified; the stage entry above flips to `[~]` (deferred) with
+  the fallback policy pinned inline.
 
 - **2026-05-25 (rev 17)** — **Preflight #4 cleared on `matrix41` H100
   via option (B) — custom data collator.** New module
@@ -1134,6 +1262,9 @@ them here too so the live tracker shows the live unknowns.
 - Build plan: [`posttraining-dataset.md`](posttraining-dataset.md)
 - Cluster bring-up (H100 + llama.cpp + training stack):
   [`cluster-setup.md`](cluster-setup.md)
+- Training entry point (script + slurm launcher; instructions in
+  `cluster-setup.md` §6 "Launching the run"):
+  `python/scripts/sft_train.py`, `scripts/sft_train.sbatch`
 - GPU-blocked pre-flight checklist (must clear before `trainer.train()`):
   [`sft-preflight-gpu.md`](sft-preflight-gpu.md)
 - Why SFT vs. GEPA: [`GEPA-vs-POSTTRAINING.md`](GEPA-vs-POSTTRAINING.md)

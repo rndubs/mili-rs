@@ -44,3 +44,20 @@ data/posttraining/runs/
 data/posttraining/sft/sft/
 data/posttraining/sft/pref/
 data/posttraining/sft/eval/
+
+# SFT training checkpoints: per-epoch HF saves + final/ — multi-GB each,
+# reproducible from sft/sft/train.jsonl + scripts/sft_train.sbatch. Only
+# the "winning" checkpoint's GGUF eventually ships; per-checkpoint dirs
+# are intermediate artifacts.
+data/posttraining/checkpoints/
+
+# Training / job runtime logs (sbatch stdout, slurm stderr, ad-hoc
+# nohup output). Regenerable from the source command line; commits
+# would balloon over time.
+logs/
+
+# Claude Code harness state. `settings.json` and `hooks/` are tracked
+# (project-level config); `settings.local.json` is per-user overrides
+# and `scheduled_tasks.lock` is harness runtime state.
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
