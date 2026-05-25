@@ -24,7 +24,7 @@ an early check invalidates everything below it.
 | # | Check | Status | Blocks | Time |
 |---|---|---|---|---|
 | 1 | HF login + model fetch | ✅ 2026-05-24 | All training | 5 min |
-| 2 | Train-vs-inference chat-template parity (the big one) | pending GPU node | All post-SFT eval | 30 min |
+| 2 | Train-vs-inference chat-template parity (the big one) | ✅ 2026-05-24 (Path A landed; v5 re-baseline pending GPU) | All post-SFT eval | 30 min |
 | 3 | SFTTrainer + `tools` field test | pending `sft/train.jsonl` (Stage 6) | Stage 6 → training | 15 min |
 | 4 | `assistant_only_loss=True` compatibility | pending GPU node | Training | 10 min |
 | 5 | `max_length=512` audit | pending `sft/train.jsonl` (Stage 6) | Training data integrity | 10 min |
@@ -65,16 +65,77 @@ tokenizer vocab size without an HTTP error.
 
 ## 2. Train-vs-inference chat-template parity (highest stakes)
 
-The runtime serving path
-(`python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py::_build_functiongemma_prompt`)
-hand-rolls the FunctionGemma prompt rather than using the GGUF's
-baked-in jinja template. Training via HF `apply_chat_template` will
-likely **not** produce a byte-identical prompt to what llama-server
-feeds the trained model.
+**Status (2026-05-24):** ✅ Resolved via **Path A** (see §2b below).
+The bespoke ``_build_functiongemma_prompt`` was deleted from
+`python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`;
+`LlamaCppProvider.generate` now POSTs to ``/v1/chat/completions`` and
+relies on llama-server's ``--jinja`` flag to apply the FunctionGemma
+chat template baked into the GGUF. Training via HF
+`apply_chat_template` against `google/functiongemma-270m-it` and
+inference both render through the **same** FG jinja — single source
+of truth. Test pin:
+`python/mili-llm-bench/tests/test_providers_llamacpp.py::
+TestChatCompletionsPath` (POST URL, OpenAI tool shape, tool-call
+parsing, and a guard that the bespoke renderer doesn't return).
 
-If you train against one format and serve through another, the SFT
-optimization target is divergent from the inference distribution —
-post-SFT L3 numbers are then uninterpretable.
+The parity check itself was a login-safe diff (HF
+`apply_chat_template` vs the now-deleted `_build_functiongemma_prompt`)
+captured under `/tmp/sft_template_parity/` during the bring-up; the
+documented divergences are kept verbatim in 2a below to motivate why
+Path A was chosen and to surface the **v5 re-baseline** that this
+change demands. The divergences were:
+
+1. **Developer message body dropped on the inference side.** The
+   bespoke renderer wrote its own hard-coded developer turn ("You
+   are a model that can do function calling with the following
+   functions") and discarded the actual `developer` message content
+   — the bench-pinned system prompt
+   (`system_prompt_sha256 = 9f36d0deb5e98a89`) never reached the
+   model in production. Training would have included it.
+2. **Tool-parameter schema flattened to `{key:type}`** vs HF's full
+   JSON Schema with `properties`/`type`/`description` nesting.
+3. **Tool-call argument JSON re-serialized** with Python-cased
+   `True`/`False`/`None` vs JSON-cased `true`/`false`/`null`, and
+   custom `<escape>...<escape>` markers vs verbatim JSON strings.
+4. **Tool-response wrapped as raw content** vs HF's
+   `{value:<escape>...<escape>}`.
+5. **`<bos>` token absent** on the inference side (HF prepends it).
+6. **Whitespace** — HF inlines `<start_function_declaration>` blocks;
+   inference inserted newlines.
+
+(1) is the consequential one. The v5 floor (40 % L3) was measured
+against a renderer that nullified the pinned system prompt — so the
+re-baseline below may *raise* the floor. That's why it's queued
+explicitly rather than assumed unchanged.
+
+### Required follow-on (GPU-blocked) — re-baseline v5
+
+The 40 % v5 floor in `m5-sft-pipeline.md` was measured against the
+deleted renderer. Re-pinning requires:
+
+```bash
+# GPU node, llama-server WITH --jinja
+llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 --jinja &
+
+# Then on the GPU node:
+uv run --directory python --extra llamacpp --extra pygriz mili-llm-bench run \
+  --provider llamacpp \
+  --scenarios data/posttraining/eval/bootstrap.jsonl \
+  --out data/posttraining/runs/v6-llamacpp-jinja-rebaseline-$(date +%Y%m%d-%H%M%S)
+```
+
+Expected outcomes and what each implies:
+
+- **L3 ≈ 40 % (±5 pp)**: the bespoke and jinja paths happened to be
+  isomorphic for the bootstrap eval. Floor stands; pin the new run
+  as `v6 floor` and supersede `v5 floor` in the baselines table.
+- **L3 substantially higher (≥ 50 %)**: the dropped system prompt was
+  meaningfully constraining the bespoke path. Use the new number as
+  the floor; the gap SFT must close is smaller than previously
+  measured.
+- **L3 lower (≤ 35 %)**: the bespoke format was unintentionally helping
+  (e.g. the trigger phrase was load-bearing for FG's tool-calling
+  logic). Investigate before SFT — the prior 40 % was inflated.
 
 ### 2a. Render both sides on one sample
 

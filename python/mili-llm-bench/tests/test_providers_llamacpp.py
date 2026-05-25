@@ -153,6 +153,164 @@ class TestResponseParsing:
         assert result[0]["arguments"] == {"file": "d3samp6"}
 
 
+class TestChatCompletionsPath:
+    """Path A pin — generate() POSTs to /v1/chat/completions, not /completion.
+
+    Stage 6.5 preflight #2 (2026-05-24) resolved the train-vs-inference
+    chat-template divergence by switching to llama-server's --jinja path:
+    the FunctionGemma jinja baked into the GGUF is the single source of
+    truth for both training (HF apply_chat_template) and inference (this
+    provider). The bespoke ``_build_functiongemma_prompt`` + ``/completion``
+    raw-text path was deleted; this test pins that decision so the
+    rewrite is not silently reverted.
+    """
+
+    def _stub_response(self, monkeypatch, payload: dict) -> list[dict]:
+        """Patch requests.post + binary/health checks so generate() runs
+        synchronously without llama-server. Returns the call-args list
+        the mocked post records, for the test to inspect."""
+        from mili_llm_bench.providers import llamacpp as mod
+
+        captured: list[dict] = []
+
+        class _StubResp:
+            def __init__(self, body: dict) -> None:
+                self._body = body
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return self._body
+
+        class _StubRequests:
+            class RequestException(Exception):
+                pass
+
+            @staticmethod
+            def post(url: str, json: dict, timeout: int) -> "_StubResp":
+                captured.append({"url": url, "json": json, "timeout": timeout})
+                return _StubResp(payload)
+
+        monkeypatch.setattr(mod, "_import_requests", lambda: _StubRequests)
+        monkeypatch.setattr(mod.shutil, "which", lambda _: "/usr/bin/llama-server")
+        # Force _health_check to claim "up" without touching the network.
+        monkeypatch.setattr(
+            mod.LlamaCppProvider,
+            "_health_check",
+            lambda self, max_retries=30, retry_delay=1.0: True,
+        )
+        return captured
+
+    def test_generate_posts_to_chat_completions_endpoint(self, monkeypatch) -> None:
+        """generate() hits /v1/chat/completions (not /completion)."""
+        from mili_llm_bench.providers.llamacpp import LlamaCppProvider
+
+        captured = self._stub_response(
+            monkeypatch,
+            {"choices": [{"message": {"content": "done", "tool_calls": None}}]},
+        )
+        provider = LlamaCppProvider()
+        provider.generate(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[],
+            temperature=0.0,
+            max_new_tokens=64,
+            seed=0,
+        )
+        assert len(captured) == 1
+        url = captured[0]["url"]
+        assert url.endswith("/v1/chat/completions"), url
+
+    def test_generate_sends_tools_in_openai_shape(self, monkeypatch) -> None:
+        """Tools are converted from Anthropic shape (name+input_schema)
+        to OpenAI shape ({type, function: {name, parameters}}) before
+        being sent to llama-server."""
+        from mili_llm_bench.providers.llamacpp import LlamaCppProvider
+
+        captured = self._stub_response(
+            monkeypatch,
+            {"choices": [{"message": {"content": "", "tool_calls": []}}]},
+        )
+        provider = LlamaCppProvider()
+        provider.generate(
+            messages=[{"role": "user", "content": "load cylinder"}],
+            tools=[
+                {
+                    "name": "load",
+                    "description": "Open a database.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"root": {"type": "string"}},
+                    },
+                }
+            ],
+            temperature=0.0,
+            max_new_tokens=64,
+            seed=0,
+        )
+        sent = captured[0]["json"]
+        assert "tools" in sent
+        assert sent["tools"][0]["type"] == "function"
+        assert sent["tools"][0]["function"]["name"] == "load"
+        assert sent["tools"][0]["function"]["parameters"]["type"] == "object"
+
+    def test_generate_parses_openai_tool_calls(self, monkeypatch) -> None:
+        """A tool_calls payload from llama-server (server applied
+        --jinja and parsed the FG <start_function_call> blocks) gets
+        normalized into the canonical [{name, arguments}] form."""
+        from mili_llm_bench.providers.llamacpp import LlamaCppProvider
+
+        self._stub_response(
+            monkeypatch,
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "type": "function",
+                                    "function": {
+                                        "name": "load",
+                                        "arguments": '{"root": "cylinder"}',
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+        provider = LlamaCppProvider()
+        out = provider.generate(
+            messages=[{"role": "user", "content": "load cylinder"}],
+            tools=[],
+            temperature=0.0,
+            max_new_tokens=64,
+            seed=0,
+        )
+        assert out.tool_calls == [{"name": "load", "arguments": {"root": "cylinder"}}]
+
+    def test_bespoke_renderer_is_gone(self) -> None:
+        """The bespoke FG prompt builder and tool-text parser are
+        removed. If a future revert re-introduces them, this test
+        forces the discussion before the dual-template world returns."""
+        from mili_llm_bench.providers.llamacpp import LlamaCppProvider
+
+        for forbidden in (
+            "_build_functiongemma_prompt",
+            "_format_tool_call_for_history",
+            "_format_tool_declaration",
+            "_parse_functiongemma_tool_calls",
+            "_parse_function_arguments",
+        ):
+            assert not hasattr(LlamaCppProvider, forbidden), (
+                f"{forbidden} was removed in Stage 6.5 preflight #2 (Path A); "
+                f"if it returned, re-read sft-preflight-gpu.md §2 before re-adding."
+            )
+
+
 class TestCliHelp:
     """CLI --help mentions llamacpp."""
 

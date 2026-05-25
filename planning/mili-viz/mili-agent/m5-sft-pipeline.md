@@ -1,11 +1,13 @@
 # M5 — SFT pipeline (live tracker)
 
-**Status (2026-05-24):** Stages 2, 3, and 6.5 cleared. Floor 40% L3
-(FunctionGemma-270M + GEPA-promoted tools on bootstrap eval),
-matched-tools ceiling 97.71% L3 (Claude Sonnet 4.5 on synth.jsonl;
-rev 7). SFT must close the gap to that ceiling — next stages are
-preflight check #2 (chat-template parity) or Stage 5 (teacher
-rollouts).
+**Status (2026-05-24):** Stages 2, 3, 6.5 cleared; preflight #2
+cleared via Path A (rev 8). Floor **stale** — the prior 40 % v5 L3
+was measured against a bespoke inference renderer that silently
+discarded the bench-pinned system prompt; v5 re-baseline on the
+new `--jinja` path is queued (GPU-blocked — needs llama-server).
+Matched-tools ceiling 97.71 % L3 (Claude Sonnet 4.5 on synth.jsonl,
+rev 7) stands. Next: v5 re-baseline (GPU node) → Stage 5 teacher
+rollout pilot.
 
 This is the **single live entry point** for "where are we in SFT?"
 Other docs in this directory (`m1-…`, `m2-…`, `m3-…`, `m4-…`) are
@@ -27,7 +29,7 @@ canonical harness config (`step_cap=8`, `temperature=0.0`,
 
 | Run                                                       | Provider                      | L3       | tools_sha256 | Notes                                            |
 | --------------------------------------------------------- | ----------------------------- | -------- | ------------ | ------------------------------------------------ |
-| **v5 floor** (`v5-llamacpp-promoted-tools`)               | llamacpp / FunctionGemma-270M | **40 %** | `27ffbd0e…`  | Current default; reproduces GEPA-promoted tools  |
+| ~~v5 floor~~ (`v5-llamacpp-promoted-tools`) **stale rev 8** | llamacpp / FunctionGemma-270M | ~~40 %~~ | `27ffbd0e…`  | Bespoke renderer dropped the developer message; re-baseline pending under `--jinja` |
 | v4 floor (`v4-llamacpp-realfixtures-fullresolve`)         | llamacpp / FunctionGemma-270M | 32 %     | `cdda3677…`  | Pre-GEPA-promotion; historical                   |
 | **v4 ceiling** (`v4-anthropic-realfixtures`)              | anthropic / claude-sonnet-4-5 | **92 %** | `cdda3677…`  | Pre-promotion tools, bootstrap eval; re-measured |
 | **v7 ceiling** (`v7-stage65-anthropic-smoke-…`)           | anthropic / claude-sonnet-4-5 | **98 %** | (synth)      | Post-promotion tools on `synth.jsonl` (175 rows) |
@@ -226,6 +228,32 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-24 (rev 8)** — Preflight check #2 (train-vs-inference
+  chat-template parity) resolved via **Path A**. Login-safe diff of
+  HF `apply_chat_template` against the bespoke
+  `_build_functiongemma_prompt` returned FAIL on all 3 sample shapes
+  (atomic / compound / griz_raw) with six structural divergences;
+  the consequential one was that the bespoke renderer **discarded
+  the developer message** and substituted a hard-coded one-liner,
+  silently nullifying the bench-pinned system prompt
+  (`system_prompt_sha256 = 9f36d0deb5e98a89`) on every llamacpp run
+  since GEPA promotion. Rewrote
+  `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`:
+  `generate()` now POSTs to `/v1/chat/completions` (the server must
+  be started with `--jinja`), parses OpenAI-shape `tool_calls`,
+  removes the bespoke prompt + parser path entirely (file shrank
+  ~460 → 265 lines). Added `TestChatCompletionsPath` (4 tests) in
+  `tests/test_providers_llamacpp.py` pinning the URL, OpenAI tool
+  conversion, tool-call normalization, and the no-bespoke-renderer
+  guard — 15 / 15 pass. The deletion makes Path B (custom HF jinja)
+  unrecoverable without a re-add discussion. **v5 floor re-baseline
+  is required** — see `sft-preflight-gpu.md` §2 "Required follow-on";
+  GPU-blocked because llama-server is not on the matrix login
+  `$PATH`. Until that lands, the 40 % v5 floor in the baselines
+  table is stale (measured against the wrong system prompt). The
+  ~98 % matched-tools ceiling from rev 7 is unaffected (Anthropic
+  path, not llamacpp).
 
 - **2026-05-24 (rev 7)** — Stage 6.5 cleared. Claude Sonnet 4.5
   smoke test on `synth.jsonl` (175 scenarios, post-promotion
