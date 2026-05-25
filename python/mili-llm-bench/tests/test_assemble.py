@@ -420,6 +420,105 @@ class TestProjectRecord:
         names = [t["function"]["name"] for t in rec["tools"]]
         assert names == ["load"]
 
+    def test_tool_call_arguments_normalized_string_to_dict(
+        self, tmp_path: Path
+    ) -> None:
+        """m5-sft-pipeline.md Risks §6 / rev 21 (4) — path (b) fix.
+        Stage 5 wrote ``function.arguments`` as a JSON string; Stage 6
+        normalizes back to dict so the next training run renders
+        canonical FG-DSL (``call:NAME{key:<escape>value<escape>}``)
+        instead of the double-braced ``call:NAME{<JSON>}`` shape the
+        v1 corpus accidentally trained on."""
+        path = tmp_path / "rollouts.jsonl"
+        # ``_make_rollout`` serializes ``arguments`` via ``json.dumps``,
+        # matching the rev-12 corpus shape exactly.
+        _write_rollouts(
+            path,
+            [
+                _make_rollout(
+                    scenario_id="synth-001",
+                    intent_id="load",
+                    fixture="d3samp6",
+                    instruction="load",
+                    tool_calls_flat=[
+                        {"name": "load", "arguments": {"root": "d3samp6"}}
+                    ],
+                )
+            ],
+        )
+        rollouts = A.dedup_retained(A.load_rollouts([path]))
+        rec = A.project_sft_record(rollouts[0], _build_minimal_registry())
+        assistant = next(m for m in rec["messages"] if m["role"] == "assistant")
+        args = assistant["tool_calls"][0]["function"]["arguments"]
+        assert isinstance(args, dict)
+        assert args == {"root": "d3samp6"}
+
+    def test_tool_call_arguments_normalization_idempotent_on_dict(
+        self, tmp_path: Path
+    ) -> None:
+        """Once Stage 5 emits dicts directly (rev 21 path (a)), Stage 6
+        must remain a no-op on the already-fixed input. Idempotent on
+        dicts; the helper checks ``isinstance(args, str)`` before
+        parsing."""
+        path = tmp_path / "rollouts.jsonl"
+        rec_dict = _make_rollout(
+            scenario_id="synth-001",
+            intent_id="load",
+            fixture="d3samp6",
+            instruction="load",
+            tool_calls_flat=[{"name": "load", "arguments": {"root": "d3samp6"}}],
+        )
+        # Patch the rollout in place to emit dict-shaped arguments —
+        # the future Stage-5-side fix's shape.
+        for m in rec_dict["messages"]:
+            for tc in m.get("tool_calls") or []:
+                tc["function"]["arguments"] = {"root": "d3samp6"}
+        _write_rollouts(path, [rec_dict])
+        rollouts = A.dedup_retained(A.load_rollouts([path]))
+        out = A.project_sft_record(rollouts[0], _build_minimal_registry())
+        assistant = next(m for m in out["messages"] if m["role"] == "assistant")
+        args = assistant["tool_calls"][0]["function"]["arguments"]
+        assert args == {"root": "d3samp6"}
+
+    def test_tool_call_arguments_normalized_multi_call(
+        self, tmp_path: Path
+    ) -> None:
+        """A compound assistant turn with two tool calls normalizes
+        both. Catches the failure mode where the helper short-circuits
+        after the first call in a list."""
+        path = tmp_path / "rollouts.jsonl"
+        _write_rollouts(
+            path,
+            [
+                _make_rollout(
+                    scenario_id="synth-001",
+                    intent_id="compound-material-show",
+                    fixture="d3samp6",
+                    instruction="disable mat 2 then show sx",
+                    tool_calls_flat=[
+                        {
+                            "name": "material",
+                            "arguments": {"enable": False, "material": 2},
+                        },
+                        {"name": "show", "arguments": {"result": "sx"}},
+                    ],
+                )
+            ],
+        )
+        rollouts = A.dedup_retained(A.load_rollouts([path]))
+        rec = A.project_sft_record(rollouts[0], _build_minimal_registry())
+        assistant = next(m for m in rec["messages"] if m["role"] == "assistant")
+        assert len(assistant["tool_calls"]) == 2
+        for tc in assistant["tool_calls"]:
+            assert isinstance(tc["function"]["arguments"], dict)
+        assert assistant["tool_calls"][0]["function"]["arguments"] == {
+            "enable": False,
+            "material": 2,
+        }
+        assert assistant["tool_calls"][1]["function"]["arguments"] == {
+            "result": "sx",
+        }
+
 
 class TestEndToEnd:
     """The full ``assemble()`` pipeline against a synthetic corpus."""

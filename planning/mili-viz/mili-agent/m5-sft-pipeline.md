@@ -54,7 +54,13 @@ paths, identical per-scenario outcomes, identical model
 ships:** `data/posttraining/checkpoints/v1/winner →
 checkpoint-126` (HF) +
 `data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf`
-(GGUF for serving). Quantization deferred to v2+. **TRL pin bumped
+(GGUF for serving). Quantization deferred to v2+. **rev 23
+(2026-05-25):** Risks §6 resolved — `_normalize_tool_call_arguments`
+helper in `assemble.project_sft_record` JSON-parses string-shaped
+`function.arguments` to dict so the next training cycle renders
+canonical FG-DSL; takes effect on v2 corpus, not retroactive on the
+shipped v1. M6 plan (`m6-client-integration-v1.md`) sketches the
+path to wire the v1 GGUF into the existing M4 `LlamaCppAgent`. **TRL pin bumped
 `>=0.11,<0.13` → `>=1.0,<2` in rev 16** (the original pin's stated
 justification — `assistant_only_loss` — did not exist on the pinned
 versions; trl 0.20+ is the floor for that kwarg). rev-9
@@ -336,21 +342,21 @@ them here too so the live tracker shows the live unknowns.
 5. **`griz_raw` fallback grammar (Stage 1).** Deferred from v1, but it
    gates whether long-tail griz commands can ever participate. Track
    in v2 backlog.
-6. **v1 corpus `function.arguments` as JSON string.** Discovered in
-   rev 21. The Stage 5 driver writes each assistant rollout's
-   `function.arguments` as a JSON **string** instead of a dict. The FG
-   chat template's string-arguments branch (`chat_template.jinja`
-   lines 194-197) inserts that literal between the call's curly
-   braces, producing double-braced training tokens
-   (`call:NAME{<whitespace>{<JSON>}}`) instead of the canonical FG-DSL
-   (`call:NAME{key:<escape>value<escape>}`). The v1 checkpoints
-   learned the accidental shape; `parse_fg_envelopes` was extended to
-   accept both. v2 fix path: normalize string → dict in
-   `assemble.project_sft_record` on the way out of dedup (path b in
-   rev 21 (4)) so the next training run renders canonical FG-DSL and
-   the parser's JSON-literal branch can retire. The current v1 corpus
-   stays as the pinned input for this generation; not refactored
-   in place.
+6. **v1 corpus `function.arguments` as JSON string.** ~~Discovered in
+   rev 21.~~ **Resolved 2026-05-25 (rev 23) — path (b) fix landed in
+   `assemble.project_sft_record`** via a new
+   `_normalize_tool_call_arguments` helper that JSON-parses string
+   arguments on the way out of dedup. Idempotent on dicts (path (a)
+   future state). The next training run renders canonical FG-DSL
+   (`call:NAME{key:<escape>value<escape>}`); the
+   `parse_fg_envelopes` JSON-literal branch *stays* so v1 SFT
+   inference (which still emits the double-braced shape it was trained
+   on) keeps parsing. The branch retires when a v2 SFT cycle on the
+   re-rendered corpus produces a checkpoint that emits the FG-DSL
+   shape. The current v1 corpus and checkpoints stay as pinned
+   artifacts; not refactored in place. Re-assemble smoke (temp dir)
+   produced identical row counts (82 / 8 / 81 / 0) and 201 / 201
+   tool-call arguments now dict-shaped.
 7. **`select` per-intent floor at exactly 50 %.** Winner
    (`checkpoint-126`) clears the per-intent floor on the four 0-rate
    intents from v7 (colormap, show-primal, show-derived all at 100 %;
@@ -378,6 +384,53 @@ them here too so the live tracker shows the live unknowns.
 ---
 
 ## Changelog
+
+- **2026-05-25 (rev 23)** — **Risks §6 resolved; v2 corpus shape
+  fix landed in Stage 6.** New `_normalize_tool_call_arguments`
+  helper in `assemble.py` JSON-parses string-shaped
+  `tool_calls[i].function.arguments` to dict on the way out of
+  dedup, inside `project_sft_record` (right after
+  `_strip_driver_stop_markers`). Idempotent on already-dict
+  arguments — safe under both today's Stage 5 (string-emitting) and
+  a future path-(a) Stage 5 fix (dict-emitting); malformed-JSON
+  raises (loud, intentional). 3 new test pins in
+  `tests/test_assemble.py::TestProjectRecord` cover string → dict,
+  idempotency on dict, and multi-call assistant turns. **Smoke
+  re-assemble** against the rev-12 Stage 5 source
+  (`runs/stage5-fullsweep-anthropic-20260524-223426/rollouts.jsonl`)
+  written to a temp dir produced **byte-shape-different,
+  row-count-identical** output:
+
+  | Output | Rows | Tool-call args (str → dict) |
+  | --- | --- | --- |
+  | `sft/train.jsonl` | 82 | 0 / 100 strings; **100 / 100 dicts** |
+  | `sft/val.jsonl` | 8 | (folded into 82 train above prior to split) |
+  | `eval/heldout.jsonl` | 81 | 0 / 101 strings; **101 / 101 dicts** |
+  | `pref/{train,val}.jsonl` | 0 | (expected — Stage 5 K=3@T=0.7 zero-diversity) |
+
+  Compound ratio 22.0 % train / 24.7 % heldout — same as rev 13's
+  audited numbers (clears the ≥20 % gate). The v1 corpus on disk
+  (`data/posttraining/sft/`) stays as the **pinned input** for the
+  shipped checkpoint — not regenerated, since the rev-22 winner
+  trained on the string-shape and the GGUF is what serves. The fix
+  takes effect on the *next* training cycle (v2). The
+  `parse_fg_envelopes` JSON-literal branch stays in
+  `providers/_fg_envelope.py` so the v1 SFT checkpoint's
+  inference-time emissions (still in double-braced shape, by
+  training) parse correctly; the branch retires when a v2 SFT
+  produces a checkpoint emitting the canonical FG-DSL shape.
+
+  **Test deltas.** 250 / 250 + 1 skip before → **252 / 252 + 1
+  skip after** (3 new always-on pins in TestProjectRecord:
+  `test_tool_call_arguments_normalized_string_to_dict`,
+  `_idempotent_on_dict`, `_multi_call`).
+
+  Parallel work: M6 milestone plan added at
+  [`m6-client-integration-v1.md`](m6-client-integration-v1.md)
+  documenting the path to wire the v1 GGUF into the existing
+  M4 `LlamaCppAgent` (model swap + prompt-path / parser /
+  system-prompt reconciliation). M6 does not depend on this rev's
+  fix; the two are independent improvements.
 
 - **2026-05-25 (rev 22)** — **GGUF round-trip clean; v1 SFT ships.**
   Preflight #6 (`sft-preflight-gpu.md` §6) cleared on `winner →

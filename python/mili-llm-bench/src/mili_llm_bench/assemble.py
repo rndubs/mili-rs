@@ -140,6 +140,52 @@ def _strip_driver_stop_markers(
     ]
 
 
+def _normalize_tool_call_arguments(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Parse JSON-string ``tool_calls[i].function.arguments`` into a
+    dict (m5-sft-pipeline.md Risks §6 / rev 21 (4)).
+
+    Stage 5's teacher driver wrote ``arguments`` as a JSON-encoded
+    string (``'{"root": "d3samp6"}'``) instead of the canonical dict.
+    The FG chat template's string-arguments branch (chat_template.jinja
+    L194-197) then renders that literal between the call's curly
+    braces, producing double-braced training tokens
+    (``call:NAME{<whitespace>{<JSON>}}``) rather than the canonical
+    FG-DSL ``call:NAME{key:<escape>value<escape>}``.
+
+    This is the rev-21 path-(b) fix: normalize in Stage 6 so the
+    existing rev-12 rollouts feed forward and the next training run
+    renders canonical FG-DSL. Idempotent — dict-shaped arguments pass
+    through unchanged, so the helper is safe on partially-fixed
+    inputs. Malformed JSON raises (loud); the rev-12 corpus is
+    well-formed per the rev-21 audit."""
+    out: list[dict[str, Any]] = []
+    for m in messages:
+        tool_calls = m.get("tool_calls")
+        if (
+            m.get("role") != "assistant"
+            or not tool_calls
+            or not isinstance(tool_calls, list)
+        ):
+            out.append(m)
+            continue
+        new_tool_calls: list[dict[str, Any]] = []
+        changed = False
+        for tc in tool_calls:
+            fn = tc.get("function") or {}
+            args = fn.get("arguments")
+            if isinstance(args, str):
+                new_tool_calls.append(
+                    {**tc, "function": {**fn, "arguments": json.loads(args)}}
+                )
+                changed = True
+            else:
+                new_tool_calls.append(tc)
+        out.append({**m, "tool_calls": new_tool_calls} if changed else m)
+    return out
+
+
 @dataclass
 class LoadedRollout:
     """One retained Stage-5 rollout, projected into Stage-6 dedup keys."""
@@ -369,6 +415,7 @@ def project_sft_record(
         tools_oai.append(w1_to_openai_tool(registry.tools[name]))
 
     messages = _strip_driver_stop_markers(rec.get("messages") or [])
+    messages = _normalize_tool_call_arguments(messages)
 
     verifier = rec.get("verifier") or {}
     postcondition = verifier.get("postcondition") or {}
