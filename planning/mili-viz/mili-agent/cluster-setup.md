@@ -55,16 +55,15 @@ matching the 🛑 items.
   not pass `row["tools"]` into `apply_chat_template`. Dump one
   tokenized sample and grep for `start_function_declaration`; if
   absent, use the explicit `formatting_func` in §6.
-- 🛑 **Train-vs-inference chat-template parity.** Training renders
-  via HF `apply_chat_template`; llama-server inference currently uses
-  the bespoke `providers/llamacpp.py::_build_functiongemma_prompt`
-  (not the GGUF's baked-in jinja). These two must produce
-  byte-identical strings for the same `(messages, tools)` input, or
-  every post-SFT L3 number is meaningless. Two acceptable paths:
-  (a) switch llama-server inference to `--jinja` (the GGUF-baked
-  template) and assert byte-equality with HF; or (b) keep the bespoke
-  builder and write a custom HF chat template at training time that
-  matches it byte-for-byte. **Pick one on day 1 of cluster bring-up.**
+- ✅ **Train-vs-inference chat-template parity.** Resolved 2026-05-24
+  (m5-sft-pipeline.md rev 8) via Path A — `_build_functiongemma_prompt`
+  deleted; `LlamaCppProvider.generate` now POSTs
+  `/v1/chat/completions` with llama-server in `--jinja` mode. Single
+  template source: the FG jinja baked into the GGUF (and mirrored on
+  the HF tokenizer). Test pin in
+  `python/mili-llm-bench/tests/test_providers_llamacpp.py::
+  TestChatCompletionsPath`. **v5 floor re-baseline pending on a GPU
+  node** — see `sft-preflight-gpu.md` §2 "Required follow-on".
 - 🛑 **`assistant_only_loss=True` compatibility test.** Confirm the
   feature works with FunctionGemma's chat template role tokens in
   pinned TRL version — loss should be non-zero only on
@@ -157,25 +156,35 @@ export PATH="$PWD/build/bin:$PATH"
 ## 2. Smoke-test inference
 
 ```bash
-llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16
+llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 --jinja
 ```
 
 This downloads the BF16 GGUF (~540MB) into `~/.cache/llama.cpp/`
 (or wherever `LLAMA_CACHE` points) and serves on `localhost:8080`.
-Test it:
+
+`--jinja` is **required** — `LlamaCppProvider` (m5-sft-pipeline.md
+rev 8) drives the server through `/v1/chat/completions` and relies
+on the server applying the FunctionGemma chat template baked into
+the GGUF. Without `--jinja`, the server returns plain text and the
+tool-calls field stays empty.
+
+Smoke-test it:
 
 ```bash
 curl -s http://localhost:8080/health
-curl -s http://localhost:8080/completion \
+# /v1/chat/completions exercises the --jinja path used in production:
+curl -s http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"prompt": "<start_of_turn>user\nhello<end_of_turn>\n<start_of_turn>model\n", "n_predict": 20}'
+  -d '{"model": "fg", "messages": [{"role": "user", "content": "hello"}],
+       "max_tokens": 20}'
 ```
 
-If text comes back, inference works. **Kill the server before SFT**
-— training wants the GPU.
+If a JSON response with `choices[0].message.content` comes back,
+inference works. **Kill the server before SFT** — training wants
+the GPU.
 
 On air-gapped clusters, download the GGUF on a login node and serve
-with `llama-server -m /path/to/local.gguf` instead.
+with `llama-server -m /path/to/local.gguf --jinja` instead.
 
 ---
 
@@ -442,7 +451,7 @@ Same harness as the v5 baseline, just pointed at the new GGUF:
 
 ```bash
 llama-server -m data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf \
-  --port 8080 &
+  --port 8080 --jinja &
 
 uv run --directory python/mili-llm-bench mili-llm-bench run \
   --provider llamacpp \

@@ -61,9 +61,12 @@ uv run --directory python bash scripts/gen-pygriz-stubs.sh
 ```
 
 **Before running the baseline**, ensure you have:
-1. **llama-server running** in a separate shell:
+1. **llama-server running** in a separate shell (`--jinja` required —
+   `LlamaCppProvider` hits `/v1/chat/completions` and relies on the
+   server applying the FG jinja; see
+   `planning/mili-viz/mili-agent/sft-preflight-gpu.md` §2):
    ```bash
-   llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16
+   llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 --jinja
    ```
 
 2. **Python workspace synced** with all extras:
