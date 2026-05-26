@@ -41,6 +41,8 @@ from typing import Any, Callable
 
 import yaml
 
+from . import assemble as _assemble_mod
+from . import audit_token_budget as _audit_mod
 from . import driver, gepa_integration, report
 from .driver import EvalConfig, compute_system_prompt_hash, run_eval, run_one_scenario
 from .harness import Dispatcher, FakeDispatcher, Registry
@@ -88,7 +90,7 @@ def _resolve_path(path_str: str) -> Path:
     return path.resolve()
 
 # The five-element closed set the operator sees.
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "functiongemma", "anthropic", "llamacpp")
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("mock", "replay", "transformers", "anthropic", "llamacpp")
 
 
 # ---------------------------------------------------------------------------
@@ -102,10 +104,11 @@ class FactoryBundle:
     """The provider + dispatcher factories ``run_eval`` consumes.
 
     ``provider_name`` is the human-readable label that lands in the
-    rollout record + report headline (e.g. ``"functiongemma"``).
-    ``model_id`` is the *pinned* model identifier — for the local
-    runtimes this is the HF repo id; for ``mock`` / ``replay`` it's
-    the literal provider name. Recorded verbatim in ``config.yaml``.
+    rollout record + report headline (e.g. ``"transformers"``).
+    ``model_id`` is the *pinned* model identifier — for ``llamacpp``
+    this is the GGUF repo id; for ``transformers`` this is the local
+    checkpoint path; for ``mock`` / ``replay`` it's the literal
+    provider name. Recorded verbatim in ``config.yaml``.
     """
 
     provider_factory: Callable[[Scenario], LlmProvider]
@@ -144,8 +147,7 @@ def build_factories(
     *,
     config: EvalConfig,
     anthropic_model: str | None = None,
-    functiongemma_model: str | None = None,
-    functiongemma_revision: str | None = None,
+    transformers_model_path: str | None = None,
     # Test seams — production callers leave both None.
     provider_factory_override: Callable[[Scenario], LlmProvider] | None = None,
     dispatcher_factory_override: Callable[[Scenario], Dispatcher] | None = None,
@@ -160,12 +162,14 @@ def build_factories(
     ``MockLlmProvider`` per scenario without the live pygriz / LLM
     deps.
 
-    The four supported provider names are
-    ``{mock, replay, functiongemma, anthropic}`` — anything else
-    raises ``ValueError`` so the operator sees the closed-set message
-    instead of a downstream traceback. The default dispatcher is the
-    pygriz one (the production lowering); when pygriz is unavailable
-    or the test seam fires we fall back to the ``FakeDispatcher``.
+    The supported provider names are
+    ``{mock, replay, transformers, anthropic, llamacpp}`` — anything
+    else raises ``ValueError`` so the operator sees the closed-set
+    message instead of a downstream traceback. ``transformers``
+    requires ``transformers_model_path`` (the local SFT checkpoint
+    directory). The default dispatcher is the pygriz one (the
+    production lowering); when pygriz is unavailable or the test seam
+    fires we fall back to the ``FakeDispatcher``.
     """
     if provider_name not in SUPPORTED_PROVIDERS:
         raise ValueError(
@@ -188,21 +192,19 @@ def build_factories(
     elif provider_name == "mock":
         provider_factory = _mock_provider_factory
         model_id = "mock"
-    elif provider_name == "functiongemma":
-        from .providers.functiongemma import (  # lazy
-            DEFAULT_MODEL_ID as FG_DEFAULT_ID,
-            FunctionGemmaProvider,
-        )
-        chosen_model = functiongemma_model or FG_DEFAULT_ID
-        chosen_revision = functiongemma_revision
+    elif provider_name == "transformers":
+        if not transformers_model_path:
+            raise ValueError(
+                "--provider transformers requires --model-path "
+                "(the local SFT checkpoint directory)."
+            )
+        from .providers.transformers import TransformersProvider  # lazy
+
         # One provider per run — the model weights are loaded once and
         # reused across scenarios.
-        provider = FunctionGemmaProvider(
-            model_id=chosen_model,
-            revision=chosen_revision,
-        )
+        provider = TransformersProvider(model_path=transformers_model_path)
         provider_factory = lambda _s: provider  # noqa: E731
-        model_id = chosen_model
+        model_id = transformers_model_path
     elif provider_name == "anthropic":
         from .providers.anthropic import (  # lazy
             DEFAULT_MODEL_ID as ANT_DEFAULT_ID,
@@ -378,6 +380,10 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
     """Build an ``EvalConfig`` from the parsed CLI args, honoring
     the baseline-pinned defaults when a flag is unset."""
     base = EvalConfig()
+    # ``--temperature`` lives on the run subcommand only; replay /
+    # synth never expose it. ``getattr`` with the pinned default
+    # keeps both code paths shape-compatible.
+    temperature = getattr(args, "temperature", None)
     return EvalConfig(
         step_cap=args.step_cap if args.step_cap is not None else base.step_cap,
         max_new_tokens=(
@@ -385,7 +391,7 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
             if args.max_new_tokens is not None
             else base.max_new_tokens
         ),
-        temperature=base.temperature,
+        temperature=temperature if temperature is not None else base.temperature,
         seed=args.seed if args.seed is not None else base.seed,
         per_turn_timeout_s=(
             args.per_turn_timeout_s
@@ -405,6 +411,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     out_dir = _resolve_path(args.out)
 
     scenarios = load_scenarios(scenarios_path)
+    # ``--limit N`` caps the run to the first N scenarios so the Stage-5
+    # pilot (50 of 175) stays under the budget gate; applied here so the
+    # cost telemetry + retention rate reflect the *capped* sweep, not
+    # the full corpus. K=1 bench-as-eval still uses this; absent flag =
+    # no cap.
+    if getattr(args, "limit", None) is not None and args.limit > 0:
+        scenarios = scenarios[: args.limit]
     if tools_path is not None:
         registry = Registry.load_from_artifact(tools_path)
     else:
@@ -417,9 +430,18 @@ def _cmd_run(args: argparse.Namespace) -> int:
         args.provider,
         config=config,
         anthropic_model=args.anthropic_model,
-        functiongemma_model=args.functiongemma_model,
-        functiongemma_revision=args.functiongemma_revision,
+        transformers_model_path=args.model_path,
     )
+
+    k = int(getattr(args, "k", 1) or 1)
+    retain = getattr(args, "retain", "all") or "all"
+    if k > 1 and config.temperature == 0.0 and args.provider == "anthropic":
+        sys.stderr.write(
+            f"warning: --k {k} against anthropic with --temperature 0.0 will "
+            "produce K identical rollouts (the Anthropic API does not honor "
+            "a seed parameter; only temperature creates per-pass diversity). "
+            "Consider --temperature 0.7 for the Stage 5 teacher-rollout pilot.\n"
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -447,6 +469,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             provider_name=bundle.provider_name,
             registry=registry,
             tools=tool_list,
+            k=k,
+            retain=retain,
+            model_id=bundle.model_id,
         )
     except Exception as exc:
         sys.stderr.write(f"run failed: {exc!r}\n")
@@ -463,11 +488,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         scenarios_sha256=scenarios_sha256,
     )
 
-    print(
+    msg = (
         f"run complete: L3 pass rate {summary['l3_pass_rate']:.3f} "
-        f"({summary['by_max_tier'].get('3', 0)}/{summary['total']}); "
-        f"see {out_dir / 'report.md'}"
+        f"({summary['by_max_tier'].get('3', 0)}/{summary['total']})"
     )
+    if k > 1:
+        msg += (
+            f"; retention {summary.get('scenarios_retained', 0)}/"
+            f"{summary.get('scenarios_total', 0)} "
+            f"({summary.get('retention_rate', 0.0):.1%})"
+        )
+    if "cost_estimate_usd" in summary:
+        msg += f"; cost ${summary['cost_estimate_usd']:.2f}"
+    msg += f"; see {out_dir / 'report.md'}"
+    print(msg)
     return 0
 
 
@@ -588,6 +622,47 @@ def _default_tools_path() -> Path:
     from .schemas import default_artifact_path
 
     return default_artifact_path()
+
+
+def _cmd_synth(args: argparse.Namespace) -> int:
+    """Stage 3 of the M5 SFT pipeline.
+
+    Reads ``data/posttraining/intents/catalog.yaml`` and writes a
+    JSONL scenario corpus + Markdown report to ``--out``. Login-node
+    safe; no GPU / no Anthropic API. See
+    ``planning/mili-viz/mili-agent/m5-sft-pipeline.md`` Stage 3 row.
+    """
+    from .synth import run_synth
+
+    catalog_path = _resolve_path(args.catalog)
+    out_path = _resolve_path(args.out)
+    report_path = (
+        _resolve_path(args.report) if args.report else out_path.with_suffix(".report.md")
+    )
+
+    try:
+        report = run_synth(
+            catalog_path=catalog_path,
+            out_path=out_path,
+            report_path=report_path,
+            seed=args.seed if args.seed is not None else 42,
+            target_total=args.target_total,
+            compound_ratio=args.compound_ratio,
+            confirm_fixtures=not args.no_confirm_fixtures,
+        )
+    except Exception as exc:
+        sys.stderr.write(f"synth failed: {exc!r}\n")
+        return 1
+
+    print(
+        f"synth complete: {report.total} scenarios "
+        f"({report.compound_count} compound, "
+        f"ratio {report.compound_ratio:.2%}); "
+        f"wrote {out_path} + {report_path}"
+    )
+    if report.skipped:
+        print(f"  skipped {len(report.skipped)} rows; see report for details")
+    return 0
 
 
 def _cmd_run_gepa(args: argparse.Namespace) -> int:
@@ -729,14 +804,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pin a specific Claude model id (defaults to the baseline pin).",
     )
     run.add_argument(
-        "--functiongemma-model",
+        "--model-path",
         default=None,
-        help="Pin a specific FunctionGemma HF repo id (defaults to the baseline pin).",
+        help=(
+            "Local checkpoint directory for --provider transformers "
+            "(e.g. data/posttraining/checkpoints/v1/checkpoint-21). "
+            "Required when --provider transformers is selected."
+        ),
     )
     run.add_argument(
-        "--functiongemma-revision",
+        "--limit",
+        type=int,
         default=None,
-        help="Pin a specific HF revision/commit for the FunctionGemma model.",
+        help=(
+            "Cap the run to the first N scenarios. Used by the Stage 5 "
+            "pilot (--limit 50 against the 175-row synth.jsonl) to stay "
+            "under the $50 budget gate."
+        ),
+    )
+    run.add_argument(
+        "--k",
+        type=int,
+        default=1,
+        help=(
+            "Number of rollouts per scenario (Stage 5 teacher-rollout "
+            "fan-out). K>1 writes K rollouts per scenario into "
+            "rollouts.jsonl with a k_idx + retained field; per-pass "
+            "seed = config.seed + k_idx. Default 1 (bench-as-eval)."
+        ),
+    )
+    run.add_argument(
+        "--retain",
+        choices=["all", "passing"],
+        default="all",
+        help=(
+            "Stage 5 retention filter. 'passing' marks only L3 rollouts "
+            "as retained=true (the Stage 6 SFT-corpus filter key); 'all' "
+            "marks every rollout retained=true. Default 'all'."
+        ),
+    )
+    run.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "Sampling temperature (default 0.0). Stage 5 K=3 pilots "
+            "against Anthropic require temperature > 0 to produce "
+            "diverse rollouts (the API does not honor a seed parameter)."
+        ),
     )
     _add_run_common_flags(run)
     run.set_defaults(func=_cmd_run)
@@ -752,6 +867,57 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--out", required=True, help="Output directory for re-graded artifacts.")
     _add_run_common_flags(replay)
     replay.set_defaults(func=_cmd_replay)
+
+    synth = subs.add_parser(
+        "synth",
+        help=(
+            "Stage 3 scenario synthesis. Reads data/posttraining/intents/"
+            "catalog.yaml; writes data/posttraining/scenarios/synth.jsonl "
+            "+ synth.report.md. Login-node safe."
+        ),
+    )
+    synth.add_argument(
+        "--catalog",
+        default="data/posttraining/intents/catalog.yaml",
+        help="Path to the intent catalog (default: data/posttraining/intents/catalog.yaml).",
+    )
+    synth.add_argument(
+        "--out",
+        default="data/posttraining/scenarios/synth.jsonl",
+        help="Output JSONL path (default: data/posttraining/scenarios/synth.jsonl).",
+    )
+    synth.add_argument(
+        "--report",
+        default=None,
+        help="Output report path (default: <out>.report.md).",
+    )
+    synth.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Sampler RNG seed (default: 42).",
+    )
+    synth.add_argument(
+        "--target-total",
+        type=int,
+        default=200,
+        help="Informational target for total scenario count (default: 200).",
+    )
+    synth.add_argument(
+        "--compound-ratio",
+        type=float,
+        default=0.20,
+        help="Minimum compound ratio gate (default: 0.20).",
+    )
+    synth.add_argument(
+        "--no-confirm-fixtures",
+        action="store_true",
+        help=(
+            "Skip the pygriz fixture-fact confirmation pass. Use this "
+            "when pygriz is not installed or mili-viz-server isn't built."
+        ),
+    )
+    synth.set_defaults(func=_cmd_synth)
 
     gepa = subs.add_parser(
         "run-gepa",
@@ -813,6 +979,147 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     gepa.set_defaults(func=_cmd_run_gepa)
+
+    asm = subs.add_parser(
+        "assemble",
+        help=(
+            "Stage 6 of the M5 SFT pipeline. Reads Stage 5 rollouts, "
+            "dedups + splits by (intent, fixture) cell, writes "
+            "sft/{train,val}.jsonl + eval/heldout.jsonl + "
+            "pref/{train,val}.jsonl + dataset_card.md under --out. "
+            "Login-node safe."
+        ),
+    )
+    asm.add_argument(
+        "--rollouts",
+        nargs="+",
+        required=True,
+        help="One or more rollouts.jsonl paths. Absolute paths recommended.",
+    )
+    asm.add_argument(
+        "--extra-rollouts",
+        nargs="*",
+        default=[],
+        help=(
+            "Additional rollouts files merged into the input set (e.g. a "
+            "query-oversample run merged on top of the full sweep)."
+        ),
+    )
+    asm.add_argument(
+        "--out",
+        required=True,
+        help="Output directory; writes sft/, eval/, pref/ and dataset_card.md.",
+    )
+    asm.add_argument(
+        "--tools",
+        default=None,
+        help=(
+            "Override the tools.json path "
+            "(defaults to data/posttraining/grammar/tools.json). The "
+            "registry is consulted to project each rollout's tool "
+            "inventory into the FG/OpenAI tools-array shape."
+        ),
+    )
+    asm.add_argument(
+        "--heldout-policy",
+        choices=list(_assemble_mod.HELDOUT_POLICIES),
+        default=_assemble_mod.HELDOUT_POLICY_PER_INTENT,
+        help=(
+            "Held-out cell pattern. 'per-intent' holds out the smaller of "
+            "each (intent, fixture) cell pair. 'whole-fixture' requires a "
+            "third fixture; raises NotImplementedError today."
+        ),
+    )
+    asm.add_argument(
+        "--query-policy",
+        choices=list(_assemble_mod.QUERY_POLICIES),
+        default=_assemble_mod.QUERY_POLICY_ACCEPT,
+        help=(
+            "How to handle the under-floor query intent. 'accept' lets "
+            "the small cells land + flag in dataset_card.md (default). "
+            "'drop' removes the intent. 'oversample' assumes the caller "
+            "has merged an oversample run via --extra-rollouts."
+        ),
+    )
+    asm.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Stratified train/val split seed (default: 42).",
+    )
+    asm.add_argument(
+        "--floor-per-intent",
+        type=int,
+        default=_assemble_mod.DEFAULT_FLOOR_PER_INTENT,
+        help=(
+            "Soft per-intent floor on sft/train.jsonl. Under-floor "
+            f"intents are flagged in dataset_card.md (default: "
+            f"{_assemble_mod.DEFAULT_FLOOR_PER_INTENT})."
+        ),
+    )
+    asm.add_argument(
+        "--compound-ratio-min",
+        type=float,
+        default=_assemble_mod.DEFAULT_COMPOUND_RATIO_MIN,
+        help=(
+            "Minimum compound-family fraction enforced in BOTH train "
+            f"and heldout (default: {_assemble_mod.DEFAULT_COMPOUND_RATIO_MIN})."
+        ),
+    )
+    asm.add_argument(
+        "--val-fraction",
+        type=float,
+        default=_assemble_mod.DEFAULT_VAL_FRACTION,
+        help=(
+            "Fraction of the non-heldout pool routed to sft/val.jsonl "
+            f"(default: {_assemble_mod.DEFAULT_VAL_FRACTION})."
+        ),
+    )
+    asm.set_defaults(func=_assemble_mod.run_assemble_cli)
+
+    audit = subs.add_parser(
+        "audit-token-budget",
+        help=(
+            "Preflight #5 of the M5 SFT pipeline. Renders every row of "
+            "sft/train.jsonl through the FunctionGemma tokenizer's "
+            "apply_chat_template(messages, tools=tools, ...) call and "
+            "writes a pass/fail report; default gate is max_length=512 "
+            "(Google's FG fine-tuning recipe). Login-node safe but "
+            "requires the [train] extra."
+        ),
+    )
+    audit.add_argument(
+        "--train",
+        required=True,
+        help="Path to sft/train.jsonl (absolute path recommended).",
+    )
+    audit.add_argument(
+        "--out",
+        default=None,
+        help=(
+            "Override the report path "
+            "(default: <train>/../preflight-5-token-budget.md)."
+        ),
+    )
+    audit.add_argument(
+        "--tokenizer",
+        default=_audit_mod.DEFAULT_TOKENIZER_ID,
+        help=(
+            f"HF tokenizer id (default: {_audit_mod.DEFAULT_TOKENIZER_ID}). "
+            "Pulled from cache; preflight #1 must have cleared first."
+        ),
+    )
+    audit.add_argument(
+        "--max-length",
+        type=int,
+        default=_audit_mod.DEFAULT_MAX_LENGTH,
+        help=(
+            f"Pass/fail threshold (default: {_audit_mod.DEFAULT_MAX_LENGTH}, "
+            "Google's FG recipe). Bumping requires a deliberate entry in "
+            "m5-sft-pipeline.md per sft-preflight-gpu.md §5."
+        ),
+    )
+    audit.set_defaults(func=_audit_mod.run_audit_cli)
 
     return parser
 

@@ -7,3 +7,14 @@ workspace.members = [
     "mili-llm-bench",
     "pygriz",
 ]
+# LLNL CSP MITMs outbound TLS; uv's bundled rustls roots don't trust it.
+# `native-tls = true` makes uv read the system store, which the env's
+# SSL_CERT_FILE / cluster-managed CA bundle populates.
+native-tls = true
+
+# Route all PyPI traffic through the LLNL Nexus mirror. Required from
+# compute nodes (no direct egress) and faster from login nodes.
+[[tool.uv.index]]
+name = "llnl-pypi-mirror"
+url = "https://wci-repo.llnl.gov/repository/pypi-group/simple"
+default = true

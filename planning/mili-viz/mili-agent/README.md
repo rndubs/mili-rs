@@ -47,8 +47,19 @@ the verifier doubles as filter + reward + eval).
 ✅ Complete. FunctionGemma wired into the griz client via
 `LlamaCppAgent` → `llama-server`. End-to-end signal path verified.
 
-**[M5: SFT Pipeline](m5-sft-pipeline.md)** — 🚧 Active.
-The live execution tracker. See above.
+**[M5: SFT Pipeline](m5-sft-pipeline.md)** — ✅ v1 ships (rev 22,
+2026-05-25). Winner GGUF
+`data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf` at
+**95.06 % L3** on the 81-row heldout (HF and GGUF paths
+byte-identical). v2 lifts (corpus shape #6, `select` floor #7)
+parked in the Risks section.
+
+**[M6: v1 Client Integration](m6-client-integration-v1.md)** — 📋
+Planned. Wire the M5 winner GGUF into the existing
+M4 `LlamaCppAgent`. Five narrow deltas (model swap, prompt path,
+parser, system-prompt unification, heuristic-guard relaxation)
+plus a validation gate that the bench's 95.06 % L3 survives the
+live serving path.
 
 ---
 

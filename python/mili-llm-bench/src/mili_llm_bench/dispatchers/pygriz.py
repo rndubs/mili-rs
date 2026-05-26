@@ -249,6 +249,35 @@ def _proj_griz_raw(reply: Any) -> dict[str, Any]:
     return out
 
 
+def _project_query_result(qr: Any) -> dict[str, Any]:
+    """Project a ``griz.QueryResult`` into the JSON-stable dict shape
+    the verifier compares against ``expect.table``. Row-major
+    ``[state][label][component]`` reshape so plain ``==`` works."""
+    labels = [int(x) for x in qr.labels]
+    states = [int(x) for x in qr.states]
+    components = int(qr.components)
+    flat = [float(x) for x in qr.values]
+    rows: list[list[list[float]]] = []
+    if states and labels and components:
+        stride = len(labels) * components
+        for si in range(len(states)):
+            row = []
+            base = si * stride
+            for li in range(len(labels)):
+                cell = flat[base + li * components : base + (li + 1) * components]
+                row.append(cell)
+            rows.append(row)
+    return {
+        "ok": True,
+        "result": str(qr.result),
+        "class_name": str(qr.class_name),
+        "labels": labels,
+        "states": states,
+        "components": components,
+        "values": rows,
+    }
+
+
 def _step_dir(arguments: dict[str, Any]) -> Callable[[Any], None]:
     direction = str(arguments.get("dir", "")).upper()
     if direction == "NEXT":
@@ -432,8 +461,13 @@ class PygrizDispatcher:
             return {"ok": True, "action_complete": True}
 
         if name == "query":
-            table = s.query(**arguments)
-            return {"ok": True, "table": table if isinstance(table, dict) else {}}
+            import griz
+
+            try:
+                qr = s.query(**arguments)
+            except griz.QueryError as exc:
+                return {"ok": False, "error": str(exc)}
+            return {"ok": True, "table": _project_query_result(qr)}
 
         if name == "snapshot":
             return _proj_snapshot(s)

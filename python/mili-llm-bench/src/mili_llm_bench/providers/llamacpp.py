@@ -3,37 +3,68 @@
 Uses llama.cpp's llama-server to drive FunctionGemma-270M-it locally.
 Launches llama-server once per provider instance (lazy, on first
 generate), keeps it alive across scenarios, and hits its
-/v1/chat/completions endpoint with the canonical messages + tools list.
+``/v1/chat/completions`` endpoint with the canonical messages + tools
+list.
 
-Approach (a1): tool-calling endpoint with --jinja. If llama-server's
-tool-use parsing aligns with FunctionGemma's chat template (the server
-applies the model's baked-in jinja template via --jinja and parses
-<start_function_call> blocks into OpenAI-shaped tool_calls), the
-provider maps the response. If the endpoint returns plain text instead
-of structured tool_calls, falls back to (a2) — raw completion parsing
-with the existing _parse_tool_call_block helper.
+**llama-server must be started with ``--jinja``** so the server applies
+the FunctionGemma chat template baked into the GGUF and exposes
+structured ``tool_calls`` in the OpenAI-shaped response. This is the
+single template path: the same FG jinja governs training (HF
+``apply_chat_template`` against ``google/functiongemma-270m-it``) and
+inference (this provider via ``--jinja``). See
+``planning/mili-viz/mili-agent/sft-preflight-gpu.md`` §2 for the
+parity story.
 
-Deterministic: --temp 0 (greedy) + --seed (from the LlmProvider call).
-The v0 baseline is taken against the GGUF quantization BF16
+**Response-side fallback (option b, rev 10).** On `llama.cpp` builds
+without a FunctionGemma response parser (the autoparser refactor in
+PR #18675 / master `566059a` cannot infer FG's `<escape>` arg wrapping
+and bare-key dict syntax — see m5-sft-pipeline.md rev 9 "Option (a)
+status"), the server returns FG's `<start_function_call>…
+<end_function_call>` markers as literal `message.content` and leaves
+`tool_calls` empty. To unblock Stage 5 without waiting on upstream,
+this provider runs a client-side fallback after each chat-completions
+response: probe `/props` once, cache
+`chat_template_caps.supports_tool_calls`, and when that's false (or
+unknown) AND `tool_calls` is empty AND content contains the FG
+envelope, extract `(name, args_dict)` pairs via the shared
+``parse_fg_envelopes`` helper (``providers._fg_envelope``) and
+synthesize the canonical normalized tool_calls. The same helper is
+the response parser inside ``TransformersProvider`` for SFT
+checkpoint eval — single regex set, no drift. Caller behavior is
+identical to a server that does parse FG natively.
+
+Earlier versions of this provider hand-rolled the prompt via a bespoke
+``_build_functiongemma_prompt`` and hit ``/completion``. That path
+diverged from the HF template — system prompt content was discarded,
+parameter schemas were flattened, tool-call argument JSON was
+re-serialized with Python-style ``True``/``False``/``None`` — so any
+SFT trained against ``apply_chat_template`` would not see what the
+inference path emits. Stage 6.5 preflight #2 (2026-05-24) measured the
+divergence and resolved Path A: delete the bespoke renderer, let
+``--jinja`` do the work. The rev-10 fallback re-adds the response-side
+parser only; the prompt path stays on `/v1/chat/completions` +
+`--jinja`.
+
+Deterministic: ``--temp 0`` (greedy) + ``seed`` (from the LlmProvider
+call). The v0 baseline is taken against the GGUF quantization BF16
 (full-precision GGUF, no quantization noise).
 
-The binary check + first launch happens inside generate (lazy startup);
-the module imports without requiring llama-cli/llama-server on $PATH.
+The binary check + first launch happens inside ``generate`` (lazy
+startup); the module imports without requiring llama-cli/llama-server
+on ``$PATH``.
 """
 
 from __future__ import annotations
 
 import json
 import shutil
-import subprocess
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 import time
-import signal
+from dataclasses import dataclass, field
+from typing import Any
 
 from .base import ProviderOutput
-from .functiongemma import _parse_tool_call_block as _parse_json_tool_calls
+from ._fg_envelope import parse_fg_envelopes
+from ..tool_format import w1_to_openai_tool
 
 DEFAULT_MODEL_ID = "ggml-org/functiongemma-270m-it-GGUF:BF16"
 DEFAULT_GGUF_REPO = "ggml-org/functiongemma-270m-it-GGUF"
@@ -83,6 +114,16 @@ class LlamaCppProvider:
     _last_tool_call_parsing_approach: str | None = field(
         default=None, init=False, repr=False
     )
+    # /props caps cache. _caps_probed flips True after the first probe
+    # attempt (success or failure); _caps_supports_tool_calls is the
+    # cached value — True/False if /props returned a bool, None if the
+    # probe failed or the field was missing (treated as "unknown",
+    # which still allows the defensive envelope-detection branch to
+    # activate the fallback).
+    _caps_probed: bool = field(default=False, init=False, repr=False)
+    _caps_supports_tool_calls: bool | None = field(
+        default=None, init=False, repr=False
+    )
 
     def _check_binary(self) -> None:
         """Check that llama-server is on $PATH; raise RuntimeError if not."""
@@ -118,11 +159,17 @@ class LlamaCppProvider:
         max_new_tokens: int,
         seed: int,
     ) -> ProviderOutput:
-        """Generate a response via llama-server's /completion endpoint.
+        """Generate a response via llama-server's ``/v1/chat/completions``
+        endpoint. The server must be started with ``--jinja`` so the
+        FunctionGemma chat template (baked into the GGUF) is applied
+        server-side.
 
-        Uses the raw completion path (a2): manually construct the FunctionGemma
-        prompt (since /apply-template doesn't support tools in llama-server),
-        send to /completion, parse raw text with _parse_tool_call_block.
+        Posts the canonical messages + OpenAI-shape tools list; reads
+        structured ``tool_calls`` from ``choices[0].message`` via
+        ``_normalize_openai_tool_calls``. No bespoke prompt building,
+        no text-mode parsing — the server-applied template is the
+        single source of truth for both training (HF
+        ``apply_chat_template``) and inference (this provider).
         """
         requests = _import_requests()
         self._check_binary()
@@ -131,288 +178,128 @@ class LlamaCppProvider:
         if not self._health_check():
             raise RuntimeError(
                 f"llama-server at {self.server_url} is not responding. "
-                f"Start it manually:\n\n"
-                f"  llama-server -hf {DEFAULT_GGUF_REPO}:{DEFAULT_GGUF_QUANT}\n"
+                f"Start it manually with --jinja:\n\n"
+                f"  llama-server -hf {DEFAULT_GGUF_REPO}:{DEFAULT_GGUF_QUANT} --jinja\n"
             )
 
-        # Manually construct FunctionGemma prompt (llama-server /apply-template
-        # doesn't support tools, so we build it ourselves per the model card).
-        prompt = self._build_functiongemma_prompt(messages, tools)
-
-        # Hit /completion with the formatted prompt.
-        # Stop sequences: <start_function_response> (FunctionGemma handoff token per Google docs)
-        # and <end_of_turn> (natural boundary if model doesn't call a tool).
-        completion_payload = {
-            "prompt": prompt,
+        payload: dict[str, Any] = {
+            "model": self.model_id,
+            "messages": messages,
             "temperature": temperature,
-            "n_predict": max_new_tokens,
+            "max_tokens": max_new_tokens,
             "seed": seed,
-            "stop": ["<start_function_response>", "<end_of_turn>"],
         }
+        if tools:
+            payload["tools"] = [self._convert_to_openai_tool(t) for t in tools]
 
         try:
             resp = requests.post(
-                f"{self.server_url}/completion",
-                json=completion_payload,
+                f"{self.server_url}/v1/chat/completions",
+                json=payload,
                 timeout=180,
             )
             resp.raise_for_status()
         except requests.RequestException as exc:
             raise RuntimeError(
-                f"llama-server completion request failed: {exc}\n"
-                f"Ensure the server is running:\n\n"
-                f"  llama-server -hf {DEFAULT_GGUF_REPO}:{DEFAULT_GGUF_QUANT}\n"
+                f"llama-server chat completions request failed: {exc}\n"
+                f"Ensure the server is running with --jinja:\n\n"
+                f"  llama-server -hf {DEFAULT_GGUF_REPO}:{DEFAULT_GGUF_QUANT} --jinja\n"
             ) from exc
 
         result = resp.json()
 
-        # Extract token counts.
-        tokens_used = 0
-        if "tokens_evaluated" in result:
-            tokens_used += result["tokens_evaluated"]
-        if "tokens_predicted" in result:
-            tokens_used += result["tokens_predicted"]
+        usage = result.get("usage") or {}
+        tokens_used = int(
+            usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+        )
 
-        # Raw completion text parsing (a2).
-        raw_text = result.get("content", "")
-
-        # Parse tool calls from the text.
-        # Try FunctionGemma text format first (call:name{args}), then JSON format.
-        tool_calls = self._parse_functiongemma_tool_calls(raw_text)
-        if tool_calls is not None:
-            self._last_tool_call_parsing_approach = "a2-raw-completion"
+        choices = result.get("choices") or []
+        message = (choices[0] or {}).get("message", {}) if choices else {}
+        raw_tool_calls = message.get("tool_calls")
+        tool_calls = self._normalize_openai_tool_calls(raw_tool_calls)
+        content = message.get("content") or ""
+        if tool_calls:
+            self._last_tool_call_parsing_approach = "a1-chat-completions"
             return ProviderOutput(
                 tool_calls=tool_calls,
                 tokens_used=tokens_used,
-                raw=raw_text,
+                raw=result,
             )
 
-        # No tool calls found; treat as final text.
-        self._last_tool_call_parsing_approach = "final-text"
-        return ProviderOutput(
-            final_text=raw_text.strip(),
-            tokens_used=tokens_used,
-            raw=raw_text,
-        )
-
-    def _build_functiongemma_prompt(
-        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
-    ) -> str:
-        """Build FunctionGemma-format prompt manually (llama-server /apply-template
-        doesn't support tools).
-
-        Format per the model card and Google's FunctionGemma documentation.
-        Includes full conversation history (assistant tool calls and tool responses)
-        so the model can complete the official loop: tool call → tool response → final answer.
-
-        Key: the developer phrase "You are a model that can do function calling with
-        the following functions" activates the model's function calling logic.
-        """
-        prompt_parts = []
-        dev_sent_once = False
-
-        # Build developer turn with tool declarations (only once, at the start)
-        prompt_parts.append("<start_of_turn>developer\n")
-
-        # Use the exact trigger phrase from Google's documentation
-        dev_content = (
-            "You are a model that can do function calling with the following functions"
-        )
-        prompt_parts.append(dev_content)
-
-        # Add tool declarations if present
-        if tools:
-            prompt_parts.append("\n\n")
-            for tool in tools:
-                prompt_parts.append(self._format_tool_declaration(tool))
-
-        prompt_parts.append("\n<end_of_turn>\n")
-        dev_sent_once = True
-
-        # Process messages in order, including assistant/tool history for multi-turn
-        for msg in messages:
-            role = msg.get("role")
-            content = msg.get("content", "")
-
-            if role in ("developer", "system"):
-                # Skip developer/system after first one (already added above)
-                if not dev_sent_once:
-                    prompt_parts.append("<start_of_turn>developer\n")
-                    prompt_parts.append(content)
-                    prompt_parts.append("\n<end_of_turn>\n")
-                    dev_sent_once = True
-            elif role == "user":
-                prompt_parts.append(f"<start_of_turn>user\n{content}\n<end_of_turn>\n")
-            elif role == "assistant":
-                # Include assistant tool calls and final text in the conversation
-                prompt_parts.append("<start_of_turn>model\n")
-
-                # If there are tool_calls, emit them in FunctionGemma format
-                tool_calls = msg.get("tool_calls") or []
-                if tool_calls:
-                    for tc in tool_calls:
-                        func = tc.get("function", {})
-                        name = func.get("name", "")
-                        args = func.get("arguments", {})
-                        if isinstance(args, str):
-                            import json
-                            try:
-                                args = json.loads(args)
-                            except json.JSONDecodeError:
-                                args = {}
-
-                        # Format: <start_function_call>call:name{key:value,...}<end_function_call>
-                        prompt_parts.append(
-                            self._format_tool_call_for_history(name, args)
-                        )
-
-                # Add final text if present
-                if content:
-                    prompt_parts.append(content)
-
-                prompt_parts.append("\n<end_of_turn>\n")
-            elif role == "tool":
-                # Tool response: append in FunctionGemma format before next model turn
-                tool_name = msg.get("tool_use_id", "").split(":")[-1] or "unknown"
-                prompt_parts.append(
-                    f"<start_function_response>response:{tool_name}{{{content}}}<end_function_response>\n"
+        # Fallback: llama.cpp b9307 / master 549b9d843 has no FunctionGemma
+        # response parser (autoparser refactor PR #18675 cannot infer
+        # FG's <escape>...<escape> args). When /props caps say
+        # supports_tool_calls=false (or the probe failed) AND the model
+        # emitted an FG envelope in content, parse it client-side here
+        # so the rest of the bench harness sees structured tool_calls.
+        if self._should_run_fg_fallback(content):
+            parsed = parse_fg_envelopes(content)
+            if parsed:
+                self._last_tool_call_parsing_approach = "b-fg-content-fallback"
+                return ProviderOutput(
+                    tool_calls=parsed,
+                    tokens_used=tokens_used,
+                    raw=result,
                 )
 
-        # Prime the model to generate the next response
-        prompt_parts.append("<start_of_turn>model\n")
+        # No tool_calls field (or empty) — treat the message content as final text.
+        self._last_tool_call_parsing_approach = "final-text"
+        return ProviderOutput(
+            final_text=str(content).strip(),
+            tokens_used=tokens_used,
+            raw=result,
+        )
 
-        return "".join(prompt_parts)
+    def _should_run_fg_fallback(self, content: str) -> bool:
+        """Decide whether to run the client-side FG content→tool_calls
+        fallback.
 
-    def _format_tool_call_for_history(self, name: str, args: dict[str, Any]) -> str:
-        """Format a tool call for inclusion in conversation history.
-
-        Format: <start_function_call>call:name{key:<escape>value<escape>,...}<end_function_call>
+        Gate:
+        - If `/props` caps say `supports_tool_calls == True`, trust the
+          server: the fallback is *not* invoked even if an FG envelope
+          shows up in content (caller bug if that happens).
+        - Otherwise (`supports_tool_calls == False`, or the probe failed
+          / the field is missing — treated as "unknown"), activate the
+          fallback iff content contains an FG envelope. The defensive
+          envelope-detection guards against a future build that lies on
+          `/props` but still emits FG markers.
         """
-        parts = [f"<start_function_call>call:{name}{{"]
-        arg_parts = []
-        for key, value in args.items():
-            arg_parts.append(f"{key}:<escape>{value}<escape>")
-        parts.append(",".join(arg_parts))
-        parts.append("}<end_function_call>")
-        return "".join(parts)
+        if not content or "<start_function_call>" not in content:
+            return False
+        caps = self._fetch_caps_supports_tool_calls()
+        if caps is True:
+            return False
+        return True
 
-    def _format_tool_declaration(self, tool: dict[str, Any]) -> str:
-        """Format a single tool for the <start_function_declaration> block.
+    def _fetch_caps_supports_tool_calls(self) -> bool | None:
+        """GET `/props` once, cache `chat_template_caps.supports_tool_calls`.
 
-        FunctionGemma expects the format:
-        <start_function_declaration>declaration:toolname{
-        description:<escape>desc<escape>,
-        parameters:{param1:<escape>type1<escape>,param2:<escape>type2<escape>}
-        }<end_function_declaration>
+        Returns True/False per `/props`, or None if the probe failed or
+        the field was missing. Cached on the provider instance — one
+        probe per provider, not per request.
         """
-        name = tool.get('name', '')
-        desc = tool.get("description", "")
-
-        parts = [f"<start_function_declaration>declaration:{name}{{\n"]
-        parts.append(f"description:<escape>{desc}<escape>")
-
-        # Format parameters as simple key:type pairs
-        input_schema = tool.get("input_schema", {})
-        properties = input_schema.get("properties", {})
-
-        if properties:
-            parts.append(",\nparameters:{")
-            param_parts = []
-            for param_name, param_schema in properties.items():
-                param_type = param_schema.get("type", "string")
-                param_parts.append(f"{param_name}:<escape>{param_type}<escape>")
-            parts.append(",".join(param_parts))
-            parts.append("}")
-
-        parts.append("\n}<end_function_declaration>\n")
-        return "".join(parts)
+        if self._caps_probed:
+            return self._caps_supports_tool_calls
+        # Flip _caps_probed *before* the request: if the request itself
+        # raises, we don't want to retry on every subsequent generate.
+        self._caps_probed = True
+        requests = _import_requests()
+        try:
+            resp = requests.get(f"{self.server_url}/props", timeout=5)
+            resp.raise_for_status()
+            body = resp.json()
+        except Exception:
+            self._caps_supports_tool_calls = None
+            return None
+        caps = (body or {}).get("chat_template_caps") or {}
+        val = caps.get("supports_tool_calls")
+        self._caps_supports_tool_calls = val if isinstance(val, bool) else None
+        return self._caps_supports_tool_calls
 
     def _convert_to_openai_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
-        """Convert our tool format to OpenAI format for llama-server.
-
-        Our format: {"name", "description", "input_schema", "output_schema"}
-        OpenAI format: {"type": "function", "function": {"name", "description", "parameters"}}
-        """
-        return {
-            "type": "function",
-            "function": {
-                "name": tool.get("name", ""),
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {}),
-            },
-        }
-
-    def _parse_functiongemma_tool_calls(
-        self, text: str
-    ) -> list[dict[str, Any]] | None:
-        """Parse FunctionGemma text-based tool call format.
-
-        Tolerant parser per research report: accepts both fully closed and partially
-        open tool calls. Format: <start_function_call>call:name{arg1:value1,...}<end_function_call>
-        Values are wrapped in <escape>...<escape> for special chars.
-
-        Tolerates malformed tool names (e.g., material.disable → material) by extracting
-        the base tool name (first component before any dot).
-        """
-        import re
-
-        # First try JSON format (fallback).
-        # Only return JSON results if they're non-empty (empty list means malformed JSON).
-        json_result = _parse_json_tool_calls(text)
-        if json_result:  # Non-empty list means valid JSON was found
-            return json_result
-
-        calls = []
-
-        # Try fully closed calls first: <start_function_call>call:name{...}<end_function_call>
-        # Accept tool names with dots, dashes, underscores (e.g., material.disable, show-primal)
-        closed_pattern = (
-            r"<start_function_call>call:([\w.-]+)\{(.*?)\}<end_function_call>"
-        )
-        closed_matches = re.findall(closed_pattern, text, re.DOTALL)
-        for name, args_str in closed_matches:
-            # Extract base tool name (before any dot): material.disable → material
-            base_name = name.split('.')[0]
-            args = self._parse_function_arguments(args_str)
-            calls.append({"name": base_name, "arguments": args})
-
-        # If no fully closed calls found, try bare format: call:name{...}
-        if not calls:
-            bare_pattern = r"call:([\w.-]+)\{(.*?)\}(?:\s|$|<)"
-            bare_matches = re.findall(bare_pattern, text, re.DOTALL)
-            for name, args_str in bare_matches:
-                # Extract base tool name (before any dot)
-                base_name = name.split('.')[0]
-                args = self._parse_function_arguments(args_str)
-                calls.append({"name": base_name, "arguments": args})
-
-        return calls if calls else None
-
-    def _parse_function_arguments(self, args_str: str) -> dict[str, Any]:
-        """Parse function arguments from escape-wrapped format.
-
-        Handles: key:<escape>value<escape> or key:value (unescaped scalar)
-        Pattern based on Google's FunctionGemma example parser.
-        """
-        import re
-
-        args = {}
-        if not args_str:
-            return args
-
-        # Parse escape-wrapped and scalar values: key:<escape>val<escape> or key:val
-        # Matches: (word):(escaped content or scalar)
-        pattern = r"(\w+):<escape>(.*?)<escape>|(\w+):([^,}<\s]+)"
-        matches = re.findall(pattern, args_str)
-
-        for match in matches:
-            key, escaped_val, scalar_key, scalar_val = match
-            if key and escaped_val is not None:
-                args[key] = escaped_val
-            elif scalar_key and scalar_val:
-                args[scalar_key] = scalar_val
-
-        return args
+        """Delegate to the shared ``tool_format`` helper so train- and
+        inference-time can't drift on the W1 → FG/OpenAI projection."""
+        return w1_to_openai_tool(tool)
 
     def _normalize_openai_tool_calls(
         self, tool_calls_raw: Any

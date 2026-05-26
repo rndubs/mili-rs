@@ -33,8 +33,13 @@ matching the 🛑 items.
   `packing=False`, `adamw_torch_fused`). Any deviation from these is a
   deliberate, justified change — see §6.
 - ✅ **TRL API contract pinned** to `processing_class=` (not the
-  deprecated `tokenizer=`) and `trl>=0.11,<0.13`; transformers pinned
+  deprecated `tokenizer=`) and `trl>=1.0,<2`; transformers pinned
   to `>=4.50,<5` and `dtype=` (not the deprecated `torch_dtype=`).
+  The original rev-2 pin (`trl>=0.11,<0.13`) was bumped on
+  2026-05-25 — see `m5-sft-pipeline.md` rev 16: `assistant_only_loss`
+  (rev-2's stated justification for the pin) did not actually exist
+  on trl 0.11/0.12; it landed in trl 0.20+. The `<2` upper bound is
+  a defensive ceiling against a hypothetical trl 2.x API break.
 - ✅ **`tools.json` shape is `{name, description, input_schema,
   output_schema}`** (W1 proto-derived). FunctionGemma's chat template
   expects OpenAI-style `{"type": "function", "function": {"name",
@@ -45,9 +50,21 @@ matching the 🛑 items.
 - ✅ **v1 pilot uses `attn_implementation="eager"`** (matches Google's
   validated recipe). Move to `flash_attention_2` only after the v1
   pilot clears the regression tripwire.
-- ✅ **`assistant_only_loss=True`** is pinned in `SFTConfig`. Without
-  it, the 270M model gets gradient signal on user prompts and tool
-  stdout, which is actively harmful at this scale.
+- ✅ **Assistant-only loss masking** is wired via a custom data
+  collator (`mili_llm_bench.assistant_only_collator.MaskAssistantOnlyCollator`),
+  not TRL's native `assistant_only_loss=True` kwarg. The original
+  rev-12 seam claim ("`assistant_only_loss=True` is pinned in
+  `SFTConfig`") was vacuous: the kwarg didn't exist on the rev-2
+  pinned TRL 0.12.x (rev 15 / 16), and on rev-16's bumped TRL 1.5.0
+  the kwarg exists but `SFTTrainer.__init__` raises on FG's chat
+  template (lacks `{% generation %}` markers and is too macro-heavy
+  for TRL's auto-patch). See `m5-sft-pipeline.md` rev 17 and report
+  `data/posttraining/sft/preflight-4-loss-mask.md`. The custom
+  collator masks: developer / user / tool turns + the assistant-turn
+  `<start_of_turn>model\n` header + tool-response payloads inside
+  model turns. Without this masking, the 270M model gets gradient
+  signal on user prompts and tool stdout — actively harmful at this
+  scale.
 
 ### Must be resolved on-GPU before training (see `sft-preflight-gpu.md`)
 
@@ -55,20 +72,19 @@ matching the 🛑 items.
   not pass `row["tools"]` into `apply_chat_template`. Dump one
   tokenized sample and grep for `start_function_declaration`; if
   absent, use the explicit `formatting_func` in §6.
-- 🛑 **Train-vs-inference chat-template parity.** Training renders
-  via HF `apply_chat_template`; llama-server inference currently uses
-  the bespoke `providers/llamacpp.py::_build_functiongemma_prompt`
-  (not the GGUF's baked-in jinja). These two must produce
-  byte-identical strings for the same `(messages, tools)` input, or
-  every post-SFT L3 number is meaningless. Two acceptable paths:
-  (a) switch llama-server inference to `--jinja` (the GGUF-baked
-  template) and assert byte-equality with HF; or (b) keep the bespoke
-  builder and write a custom HF chat template at training time that
-  matches it byte-for-byte. **Pick one on day 1 of cluster bring-up.**
-- 🛑 **`assistant_only_loss=True` compatibility test.** Confirm the
-  feature works with FunctionGemma's chat template role tokens in
-  pinned TRL version — loss should be non-zero only on
-  `<start_of_turn>model …<end_of_turn>` spans.
+- ✅ **Train-vs-inference chat-template parity.** Resolved 2026-05-24
+  (m5-sft-pipeline.md rev 8) via Path A — `_build_functiongemma_prompt`
+  deleted; `LlamaCppProvider.generate` now POSTs
+  `/v1/chat/completions` with llama-server in `--jinja` mode. Single
+  template source: the FG jinja baked into the GGUF (and mirrored on
+  the HF tokenizer). Test pin in
+  `python/mili-llm-bench/tests/test_providers_llamacpp.py::
+  TestChatCompletionsPath`. **v5 floor re-baseline pending on a GPU
+  node** — see `sft-preflight-gpu.md` §2 "Required follow-on".
+- ✅ **`assistant_only_loss` mask check.** Cleared 2026-05-25 on
+  `matrix41` H100 via custom data collator (option B) — see above and
+  `m5-sft-pipeline.md` rev 17. TRL's native path failed on FG's
+  template; `MaskAssistantOnlyCollator` is the in-tree replacement.
 - 🛑 **GGUF chat-template baking.** `convert_hf_to_gguf.py` carries
   the tokenizer's `chat_template` into the GGUF. After conversion,
   `diff` the `tokenizer_config.json` between source HF model and saved
@@ -157,25 +173,35 @@ export PATH="$PWD/build/bin:$PATH"
 ## 2. Smoke-test inference
 
 ```bash
-llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16
+llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 --jinja
 ```
 
 This downloads the BF16 GGUF (~540MB) into `~/.cache/llama.cpp/`
 (or wherever `LLAMA_CACHE` points) and serves on `localhost:8080`.
-Test it:
+
+`--jinja` is **required** — `LlamaCppProvider` (m5-sft-pipeline.md
+rev 8) drives the server through `/v1/chat/completions` and relies
+on the server applying the FunctionGemma chat template baked into
+the GGUF. Without `--jinja`, the server returns plain text and the
+tool-calls field stays empty.
+
+Smoke-test it:
 
 ```bash
 curl -s http://localhost:8080/health
-curl -s http://localhost:8080/completion \
+# /v1/chat/completions exercises the --jinja path used in production:
+curl -s http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"prompt": "<start_of_turn>user\nhello<end_of_turn>\n<start_of_turn>model\n", "n_predict": 20}'
+  -d '{"model": "fg", "messages": [{"role": "user", "content": "hello"}],
+       "max_tokens": 20}'
 ```
 
-If text comes back, inference works. **Kill the server before SFT**
-— training wants the GPU.
+If a JSON response with `choices[0].message.content` comes back,
+inference works. **Kill the server before SFT** — training wants
+the GPU.
 
 On air-gapped clusters, download the GGUF on a login node and serve
-with `llama-server -m /path/to/local.gguf` instead.
+with `llama-server -m /path/to/local.gguf --jinja` instead.
 
 ---
 
@@ -199,7 +225,11 @@ train = [
   "transformers>=4.50,<5",     # `dtype=` arg; chat_template w/ tools
   "torch>=2.5,<3",             # CUDA 12.4-compatible build
   "accelerate>=0.34,<2",
-  "trl>=0.11,<0.13",           # SFTTrainer w/ assistant_only_loss
+  "trl>=1.0,<2",               # SFTTrainer w/ assistant_only_loss
+                                # (added in trl 0.20+; the original
+                                #  trl>=0.11,<0.13 pin pre-dated the
+                                #  feature — see m5-sft-pipeline.md
+                                #  rev 16)
   "peft>=0.13,<0.14",          # optional; we full-FT at 270M, see §4
   "datasets>=3.0,<5",
   "sentencepiece",             # Gemma tokenizer
@@ -333,18 +363,21 @@ that produces a worse-than-baseline model with no obvious cause.
 | `per_device_train_batch_size` | `4` | Google reference |
 | `gradient_accumulation_steps` | `1` | (no accumulation — Google reference uses `bs=4` raw) |
 | `lr_scheduler_type` | `"constant"` | Google reference |
-| `max_length` | `512` | Google reference — **but audit longest assembled rollout first (§0)** |
+| `max_length` | `4096` | **Deviation from Google's `512`** — preflight #5 audit observed `max=3341` on the rev-13 corpus's 82 rows; 4096 is the next power-of-2 ceiling. See `m5-sft-pipeline.md` rev 14. |
 | `packing` | `False` | Google reference |
 | `optim` | `"adamw_torch_fused"` | Google reference |
 | `bf16` | `True` | H100 native |
 | `eval_strategy` | `"epoch"` | Google reference |
-| `assistant_only_loss` | `True` | Critical for tool-calling SFT at 270M (not in Google's guide, but justified — Google's tiny 20-row toy set doesn't hit the failure mode; our ~200-scenario corpus does) |
+| `assistant_only_loss` | `False` at the TRL level | TRL 1.5.0's native path raises on FG's chat template (preflight #4, m5-sft-pipeline.md rev 17). Loss masking is supplied by `MaskAssistantOnlyCollator` via `data_collator=`. The training *intent* (loss only on assistant turns) is unchanged — see §0. |
 
 ### Training script
 
 ```python
+from transformers import DataCollatorForLanguageModeling
 from trl import SFTConfig, SFTTrainer
 from datasets import load_dataset
+
+from mili_llm_bench.assistant_only_collator import MaskAssistantOnlyCollator
 
 train_ds = load_dataset("json", data_files="data/posttraining/sft/train.jsonl")["train"]
 val_ds   = load_dataset("json", data_files="data/posttraining/sft/val.jsonl")["train"]
@@ -371,12 +404,14 @@ cfg = SFTConfig(
     gradient_accumulation_steps=1,
     learning_rate=5e-5,
     lr_scheduler_type="constant",
-    max_length=512,
+    max_length=4096,  # preflight #5 bumped from 512 — m5-sft-pipeline.md rev 14
     packing=False,
     optim="adamw_torch_fused",
     bf16=True,
-    # Tool-calling SFT specifics
-    assistant_only_loss=True,
+    # Tool-calling SFT specifics — TRL's native path raises on FG's template
+    # (preflight #4, m5-sft-pipeline.md rev 17). Mask via the custom collator
+    # passed below; keep this False to bypass TRL's broken auto-patch.
+    assistant_only_loss=False,
     # Reporting / checkpoints
     eval_strategy="epoch",
     save_strategy="epoch",
@@ -389,7 +424,11 @@ trainer = SFTTrainer(
     train_dataset=train_ds,
     eval_dataset=val_ds,
     processing_class=tok,           # TRL ≥0.11: replaces deprecated `tokenizer=`
-    formatting_func=formatting_func,
+    formatting_func=formatting_func,  # mandatory on trl 0.12.x (KeyError otherwise);
+                                      # optional on trl 1.x (auto-detect) but kept for drift-proofing
+    data_collator=MaskAssistantOnlyCollator(
+        DataCollatorForLanguageModeling(tokenizer=tok, mlm=False),
+    ),
 )
 trainer.train()
 trainer.save_model("data/posttraining/checkpoints/v1/final")
@@ -402,14 +441,60 @@ corpus size (~200 scenarios → a few hundred filtered SFT records).
 **Important constraints:**
 
 - Train on the `messages` field; `tools` is a **context prefix** shown
-  to the model at inference, never a target. `assistant_only_loss=True`
+  to the model at inference, never a target. `MaskAssistantOnlyCollator`
   enforces this at the token level (loss masked everywhere except
-  assistant turns).
+  assistant turns; see §0 and `m5-sft-pipeline.md` rev 17 for why
+  TRL's native `assistant_only_loss=True` path doesn't work on FG's
+  template).
 - **Do not change the tokenizer.** Any modification to
   `tokenizer_config.json` (chat template, special tokens, vocabulary)
   between source HF model and saved checkpoint will silently break
   GGUF conversion or inference. The §0 pre-flight diffs these to
   catch drift.
+
+### Launching the run
+
+The recipe above is realized as `python/scripts/sft_train.py`; submit
+via the slurm wrapper `scripts/sft_train.sbatch`. The launcher
+short-circuits with a recovery hint if invoked from a non-GPU host
+(catches the common "ran it from `matrix2`" failure mode where
+`device_map="cuda"` would otherwise crash several seconds into model
+loading).
+
+```bash
+# Queued, from a login node — 1h H100 job, logs to logs/sft-train-<JOBID>.{out,err}
+sbatch scripts/sft_train.sbatch
+
+# SBATCH overrides
+sbatch --partition=pdebug --time=00:30:00 scripts/sft_train.sbatch
+
+# Forwarded sft_train.py overrides (anything after the script name)
+sbatch scripts/sft_train.sbatch \
+  --num-train-epochs 4 \
+  --output-dir data/posttraining/checkpoints/v1-4ep
+
+# Interactive smoke — 1 epoch is ≈ 1–2 min on H100
+srun --partition=pbatch --time=00:15:00 --gres=gpu:1 \
+  ./scripts/sft_train.sbatch --num-train-epochs 1 --output-dir /tmp/sft-smoke
+
+# Direct execution from an existing GPU shell (matrix41 etc.)
+./scripts/sft_train.sbatch
+```
+
+`./scripts/sft_train.sbatch` as a direct command works because
+`#SBATCH` lines are bash comments outside of slurm; the script `exec`s
+into `uv run --directory python python scripts/sft_train.py "$@"` at
+the end. Defaults to the rev-4 §6 hyperparameter table; override only
+with a one-line justification in the run's `dataset_card.md` so silent
+drift is impossible.
+
+The launcher **does not** source `scripts/setup-gpu-env.sh` — that
+script loads `cuda/12.9.1` to keep llama.cpp's CUDA backend
+ABI-consistent with its build toolchain, which would shadow PyTorch's
+bundled CUDA 13 runtime via `LD_LIBRARY_PATH`. Same reasoning as the
+top-of-file comment in `scripts/gpu-sanity.sh`. The launcher inlines
+the training-safe subset (`HF_HUB_DISABLE_TELEMETRY=1`,
+`UV_LINK_MODE=copy`) instead.
 
 ---
 
@@ -438,26 +523,73 @@ llama-quantize \
 
 ## 8. Eval the new checkpoint
 
-Same harness as the v5 baseline, just pointed at the new GGUF:
+Two paths, gated on whether GGUF conversion has happened yet:
+
+### 8a. HF checkpoint — `--provider transformers` (canonical for v1 sweep)
+
+Grade an HF checkpoint directly. The provider re-uses
+`tokenizer.apply_chat_template(messages, tools=tools, …)` — the same
+call SFTTrainer rendered against — so the prompt distribution at eval
+matches training byte-for-byte; no chat-template mutation risk to debug.
 
 ```bash
-llama-server -m data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf \
-  --port 8080 &
-
-uv run --directory python/mili-llm-bench mili-llm-bench run \
-  --provider llamacpp \
-  --scenarios ../../data/posttraining/eval/bootstrap.jsonl \
-  --out ../../data/posttraining/runs/v6-sft-pilot-$(date +%Y%m%d-%H%M%S) \
+uv run --directory python mili-llm-bench run \
+  --provider transformers \
+  --model-path /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/checkpoints/v1/checkpoint-21 \
+  --scenarios /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/sft/eval/heldout.jsonl \
+  --out /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/runs/v1-sft-checkpoint-21-$(date +%Y%m%d-%H%M%S) \
   --step-cap 8 --per-turn-timeout-s 120 --max-new-tokens 256
 ```
 
-Grade against the M5 gates:
+- Use absolute paths for `--model-path`, `--scenarios`, `--out` (the
+  `uv run --directory python` cwd-shift makes relative paths break in
+  1 s; see memory `bench-cli-uv-cwd`).
+- Do **not** source `scripts/setup-gpu-env.sh` for this path — the
+  `cuda/12.9.1` module-load shadows torch's bundled CUDA 13 runtime on
+  `LD_LIBRARY_PATH` (same reasoning as `gpu-sanity.sh`'s top-of-file
+  comment).
+- The training stack already covers the runtime — `uv sync --directory
+  python --extra train` (`transformers`, `torch`, `accelerate`) is the
+  whole dependency set.
+
+The 8-checkpoint sweep is just the above command in a `for` loop over
+`data/posttraining/checkpoints/v1/checkpoint-*`. One H100 grades the
+full 81-row heldout split in ~3–5 s per scenario, so the entire 8 × 81
+sweep finishes in roughly 30 minutes.
+
+### 8b. GGUF checkpoint — `--provider llamacpp` (post-winner only)
+
+After the sweep picks a winner, convert that one HF checkpoint to GGUF
+(§7) and re-grade through llama-server to confirm the conversion didn't
+mutate the chat template or the model output. Same eval, different
+provider:
+
+```bash
+llama-server -m data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf \
+  --port 8080 --jinja &
+
+uv run --directory python mili-llm-bench run \
+  --provider llamacpp \
+  --scenarios /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/sft/eval/heldout.jsonl \
+  --out /p/vast1/whitmore/cadsat/mili-rs/data/posttraining/runs/v1-sft-winner-gguf-$(date +%Y%m%d-%H%M%S) \
+  --step-cap 8 --per-turn-timeout-s 120 --max-new-tokens 256
+```
+
+For the llamacpp path, *do* source `scripts/setup-gpu-env.sh` (same
+Bash invocation as `uv run`; see memory
+`bench-gpu-env-source-per-bash`) — the `llama-server` binary needs the
+matched CUDA runtime that torch must not see.
+
+### Gates
 
 - **Regression tripwire:** ≥ 40 % L3 (the GEPA-only ceiling). Below
   that means SFT is *harming* — stop and diagnose.
 - **v1 target:** ≥ 62 % L3 (half the FunctionGemma↔Claude gap).
-- **Per-intent floor:** ≥ 50 % L3 on `material`, `select`, `clrsel`,
-  `view-reset` (the four 0 %-L3 intents at floor).
+- **Per-intent floor:** ≥ 50 % L3 on the four 0-rate intents (`colormap`,
+  `select`, `show-primal`, `show-derived` per the v7 baseline). The
+  rev-2 list (`material`, `select`, `clrsel`, `view-reset`) was from
+  an earlier baseline; see `m5-sft-pipeline.md` v7 per-intent
+  breakdown for the live floor.
 
 ---
 
@@ -506,12 +638,81 @@ Grade against the M5 gates:
 
 ---
 
-**Last updated:** 2026-05-24. Treat the version-pinned ranges as
-ceilings-at-time-of-writing; bump and re-test as the upstream
+**Last updated:** 2026-05-25 (rev 6). Treat the version-pinned ranges
+as ceilings-at-time-of-writing; bump and re-test as the upstream
 libraries move.
 
 ## Changelog
 
+- **2026-05-25 (rev 6).** Eval path landed for HF checkpoints. §8 split
+  into 8a (HF via `--provider transformers`, canonical for the v1 sweep)
+  and 8b (GGUF via `--provider llamacpp`, post-winner only). The
+  `transformers` provider re-uses `tokenizer.apply_chat_template(...)`
+  — the same call SFTTrainer rendered against — so the prompt
+  distribution at eval matches training byte-for-byte; no
+  chat-template-mutation risk for the seven losing checkpoints in the
+  sweep. See `m5-sft-pipeline.md` rev 21 for the provider's landing,
+  the deleted `FunctionGemmaProvider` (broken parser, no functional
+  callers — replaced wholesale), and the v1-SFT-corpus JSON-literal
+  arguments-shape discovery (chat template's string-branch produced
+  double-braced tool-call bodies in the training tokens; parser now
+  handles both shapes — `TODO(v2)` to re-render the corpus with
+  dict-shaped arguments and retire the JSON branch). Per-intent
+  floor list corrected to match the v7 baseline's actual 0-rate
+  intents (colormap/select/show-primal/show-derived) — the rev-2
+  list (material/select/clrsel/view-reset) was from an earlier
+  baseline.
+
+- **2026-05-25 (rev 5).** Training entry point landed.
+  `python/scripts/sft_train.py` realizes the §6 recipe (rev 4) as a
+  runnable argparse-driven script with defaults matching the pinned
+  hyperparameter table. `scripts/sft_train.sbatch` is the slurm
+  submission wrapper — works either via `sbatch`, `srun`, or direct
+  execution from an existing GPU shell (since `#SBATCH` lines are
+  bash comments outside slurm, the script `exec`s into the `uv run`
+  invocation at the end). Fails loud via `nvidia-smi` gate + recovery
+  hint if invoked from a non-GPU host (`matrix2` etc.), with the
+  exact sbatch / srun fallback commands printed inline. Inlines the
+  training-safe subset of `setup-gpu-env.sh`'s exports
+  (`HF_HUB_DISABLE_TELEMETRY=1`, `UV_LINK_MODE=copy`) but does not
+  source it — avoids the `cuda/12.9.1` ↔ torch-bundled-CUDA-13
+  `LD_LIBRARY_PATH` shadow the `gpu-sanity.sh` comment block warns
+  about. Drive-by drift fix: §6 "Important constraints" first bullet
+  was still attributing assistant-only loss masking to TRL's native
+  `assistant_only_loss=True` kwarg — corrected to point at
+  `MaskAssistantOnlyCollator` per rev 4.
+
+- **2026-05-25 (rev 4).** Preflight #4 cleared via custom collator
+  (option B). TRL 1.5.0's native `assistant_only_loss=True` fails at
+  `SFTTrainer.__init__` on FG's chat template (`ValueError: not
+  training-compatible (missing prefix-preservation or {% generation %}
+  markers)`). The rev-2 §0 seam claim is now correctly attributed to
+  `MaskAssistantOnlyCollator` (`mili_llm_bench.assistant_only_collator`)
+  rather than the kwarg. §6 recipe updated: `assistant_only_loss=False`
+  at the TRL level; loss masking via `data_collator=` instead. Hyperparam
+  table row reworded; no other hyperparameters changed. New always-on
+  test pin
+  (`mili-llm-bench/tests/test_assistant_only_collator.py`, 8 cases).
+  Full mili-llm-bench suite: 229 / 229 + 1 skip (+8 from rev 3's
+  221 / 221). See `m5-sft-pipeline.md` rev 17 and report
+  `data/posttraining/sft/preflight-4-loss-mask.md`.
+
+- **2026-05-25 (rev 3).** Bumped `trl` pin from `>=0.11,<0.13` to
+  `>=1.0,<2`. The rev-2 pin was self-contradicting: its stated
+  justification was `assistant_only_loss`, but that kwarg was added
+  in trl 0.20+ — neither 0.11 nor 0.12 supported it. Verified TRL
+  1.5.0 against this repo: full `mili-llm-bench` test suite still
+  passes (221 / 221 + 1 skip — same as rev 14 baseline);
+  preflight #3 still PASSes (with `formatting_func`, and *also*
+  without — TRL 1.x auto-detects chat-shape rows and dispatches
+  `apply_chat_template`, which trl 0.12.1 did not). The recipe in §6
+  keeps `formatting_func` for drift-proofing against a hypothetical
+  TRL 2.x change in auto-detect behavior. Stop-loss option (if a
+  future bump breaks something): revert to `trl>=0.20,<0.21`, which
+  is the oldest release that still carries `assistant_only_loss`.
+  Also corrected `max_length=512` → `4096` to reflect the deliberate
+  preflight #5 bump that was already recorded in
+  `m5-sft-pipeline.md` rev 14 but not yet mirrored here.
 - **2026-05-24 (rev 2).** Added §0 pre-flight checklist (split into
   off-GPU ✅ and on-GPU 🛑 items). Pinned hyperparameters to Google's
   reference recipe (LR 5e-5 / 8 epochs / bs=4 / constant LR /

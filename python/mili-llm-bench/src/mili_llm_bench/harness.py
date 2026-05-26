@@ -159,6 +159,12 @@ class TurnResult:
     final_text: str | None = None
     error_kind: str | None = None
     tokens_used: int = 0
+    # Fine-grained per-category token breakdown when the provider
+    # exposes it (Anthropic does). Forwarded verbatim from
+    # ``ProviderOutput.usage``; ``None`` when the provider does not
+    # report it. Driver aggregates these per scenario for Stage 5 cost
+    # telemetry.
+    usage: dict[str, int] | None = None
     wall_ms: int = 0
 
 
@@ -427,6 +433,7 @@ def run_turn(
             kind="error",
             error_kind="timeout",
             tokens_used=getattr(output, "tokens_used", 0),
+            usage=getattr(output, "usage", None),
             wall_ms=int(elapsed * 1000),
         )
 
@@ -440,6 +447,7 @@ def run_turn(
             kind="final_text",
             final_text=output.final_text,
             tokens_used=output.tokens_used,
+            usage=output.usage,
             wall_ms=int((time.monotonic() - start) * 1000),
         )
 
@@ -473,6 +481,7 @@ def run_turn(
             kind="tool_calls",
             tool_calls=[executed],
             tokens_used=output.tokens_used,
+            usage=output.usage,
             wall_ms=int((time.monotonic() - start) * 1000),
         )
 
@@ -495,6 +504,7 @@ def run_turn(
                 error_kind="timeout",
                 tool_calls=executed_calls,
                 tokens_used=output.tokens_used,
+                usage=output.usage,
                 wall_ms=int((time.monotonic() - start) * 1000),
             )
 
@@ -505,6 +515,7 @@ def run_turn(
         kind="tool_calls",
         tool_calls=executed_calls,
         tokens_used=output.tokens_used,
+        usage=output.usage,
         wall_ms=int((time.monotonic() - start) * 1000),
     )
 

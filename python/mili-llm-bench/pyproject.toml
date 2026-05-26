@@ -44,16 +44,6 @@ gepa = [
 pygriz = [
   "pygriz",
 ]
-# Optional — needed only by `mili_llm_bench.providers.functiongemma`.
-# `accelerate` is the documented runtime for FunctionGemma-270M-it per
-# its model card; `transformers` carries the chat-template path; `torch`
-# is the inference runtime. Heavy by intent — the v0 baseline runs on
-# CPU but a GPU box is faster.
-functiongemma = [
-  "transformers>=4.50",
-  "torch>=2.2",
-  "accelerate>=0.30",
-]
 # Optional — needed only by `mili_llm_bench.providers.anthropic`. The
 # frontier-baseline provider; `anthropic` is the official SDK.
 anthropic = [
@@ -65,6 +55,14 @@ anthropic = [
 # (no package deps), but requests is needed for HTTP calls.
 llamacpp = [
   "requests>=2.31",
+]
+train = [
+    "accelerate>=0.34,<2",
+    "datasets>=3.0,<5",
+    "sentencepiece>=0.2.1",
+    "torch>=2.6,<3",
+    "transformers>=4.50,<5",
+    "trl>=1.0,<2",
 ]
 
 [project.scripts]

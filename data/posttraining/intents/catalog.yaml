@@ -1,0 +1,559 @@
+# v1-pilot intent catalog.
+#
+# Stage 2 deliverable of planning/mili-viz/mili-agent/m5-sft-pipeline.md.
+# Stage 3 (scenario synthesis) consumes this file as its only intent source.
+#
+# Scope (v1 pilot, intentionally narrow — see m5-sft-pipeline.md
+# "v1 scope — intentionally narrow"):
+#   - Atomic intents = intersect(tools.json, bootstrap.jsonl intent_ids) + query.
+#     11 rows. Everything else in tools.json (snapshot/legend/iso/contour/cutplane/
+#     named_view/close) is parked under `todo_v2:` so the v2 backlog is a diff,
+#     not a re-derivation.
+#   - Compound intents = 3 named two-step families (m5-sft-pipeline.md
+#     "Multi-step tool calls — first-class category"). The verifier grades the
+#     final state only (point 2 of that section).
+#
+# Postcondition kinds stay closed at 7 (Risk #2 resolved 2026-05-24).
+# New kinds (state_sequence, composite) live in todo_v2.verifier_kinds; adding
+# one is a deliberate verifier.py edit, not an implicit catalog extension.
+#
+# Fixture facts (material_ids, primal_svars, ...) are placeholders pulled from
+# interpret.c + bootstrap.jsonl. Stage 3 confirms them by running load+snapshot
+# against the real fixtures before grounding any parameter slot.
+
+schema_version: 1
+
+# Mirrors scenarios.VALID_POSTCONDITION_KINDS. The Stage-3 loader must reject
+# any postcondition_kind outside this list so drift fails loudly.
+postcondition_kinds:
+  - state_index           # {state: <int>}
+  - selection_set         # {selection: {<class>: <range_str>}}
+  - active_result         # {result: <str>}
+  - result_range          # {min: <num>, max: <num>}  (not used in v1 catalog)
+  - materials_visible     # {hidden_materials: <list[int]>}
+  - camera_named_view     # {action: reset|colormap|save|restore|list, name?: <str>}
+  - query_value           # {table: <obj>, arguments?: <obj>}
+
+# Must match _FIXTURE_PATHS in dispatchers/pygriz.py. Held-out fixture is
+# pending Risk #1 (shell_mat2 vs bar5) — not registered here until decided.
+fixtures:
+  d3samp6:
+    num_states: 101                 # bs-008 grounds "last state" at 101
+    classes: [brick, beam, shell, node]
+    material_ids: [1, 2, 3]         # bs-019..021 use ids 1 and 3
+    primal_svars: [sx, sy, sz, vx, vy, vz]
+    derived_results: [eff_stress, pressure]
+  cylinder:
+    num_states: 11                  # bs-032 grounds "last state" at 11
+    classes: [brick, node]
+    material_ids: [1, 2]            # bs-043..045 use ids 1 and 2
+    primal_svars: [sx, vy, vz]
+    derived_results: [eff_stress]
+
+# ---------------------------------------------------------------------------
+# Intents.
+#
+# Common row shape:
+#   shape:               atomic | compound
+#   prose:               one-line summary (used in dataset_card.md rollups)
+#   steps:               ordered list of {tool, arguments_template}
+#                          - atomic = exactly one step
+#                          - compound = >=2 steps; verifier grades only the
+#                            last step's postcondition (m5 §"Multi-step …" #2)
+#   params:              named parameter slots referenced by <param:name> /
+#                        <derived:...> in arguments_template / expect_template
+#   postcondition_kind:  one of postcondition_kinds above
+#   expect_template:     mirrors the kind's `expect` shape; values are
+#                        literals OR <param:name> OR <derived:...> tokens
+#                        resolved by Stage-3 synthesis
+#   fixture_bindings:    list of fixture ids from `fixtures:` this intent can
+#                        ground against
+#   paraphrase_seeds:    template strings ({slot} substitutions) — Stage 3
+#                        emits these directly + light-LLM paraphrases
+#   bootstrap_eval_rows: bs-NNN ids in bootstrap.jsonl that already exemplify
+#                        the intent (held pinned for comparability; NOT a
+#                        train-set source — eval rows stay held-out)
+#   todo_v2:             punted-to-v2 items specific to this intent
+# ---------------------------------------------------------------------------
+
+intents:
+
+  # ========== ATOMIC ==========
+
+  load:
+    shape: atomic
+    prose: "Load a Mili database by root name."
+    steps:
+      - tool: load
+        arguments_template:
+          root: "<str:fixture_name>"
+    params:
+      fixture_name:
+        type: str
+        binding: fixture.name           # the fixture id itself ("d3samp6")
+    postcondition_kind: state_index
+    expect_template:
+      state: 1                          # load opens at state 1
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "load the {fixture_name} database"
+      - "open {fixture_name}"
+      - "load fixture {fixture_name} from disk"
+    bootstrap_eval_rows: [bs-001, bs-002, bs-003, bs-025, bs-026, bs-027]
+
+  set-state:
+    shape: atomic
+    prose: "Jump to a specific 1-based state index."
+    steps:
+      - tool: set_state
+        arguments_template:
+          state: "<int:state_num>"
+    params:
+      state_num:
+        type: int
+        binding: instruction            # user picks the number
+        range_from: fixture.num_states  # synthesis clamps to [1, num_states]
+    postcondition_kind: state_index
+    expect_template:
+      state: "<param:state_num>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "jump to state {state_num}"
+      - "go to state {state_num}"
+      - "set the state cursor to {state_num}"
+    bootstrap_eval_rows: [bs-004, bs-005, bs-006, bs-028, bs-029, bs-030]
+
+  step:
+    shape: atomic
+    prose: "Step the state cursor (NEXT / PREV / FIRST / LAST)."
+    steps:
+      - tool: step
+        arguments_template:
+          dir: "<enum:dir>"
+    params:
+      dir:
+        type: enum
+        values: [NEXT, PREV, FIRST, LAST]
+        binding: instruction
+    postcondition_kind: state_index
+    # Derived: NEXT from state 1 -> 2; FIRST -> 1; LAST -> fixture.num_states.
+    # Stage 3 synthesizes the concrete `state` value from (fixture, dir,
+    # starting_state) — catalog only declares the shape.
+    expect_template:
+      state: "<derived:from_dir_and_fixture>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "step to the next state"
+      - "go to the last state"
+      - "rewind to the first state"
+      - "advance to the next state"
+    bootstrap_eval_rows: [bs-007, bs-008, bs-009, bs-031, bs-032, bs-033]
+
+  select:
+    shape: atomic
+    prose: "Add elements of one class to the selection by range string."
+    steps:
+      - tool: select
+        arguments_template:
+          class_name: "<str:class>"
+          range: "<str:range_spec>"
+    params:
+      class:
+        type: str
+        binding: fixture.classes
+      range_spec:
+        type: str                       # griz range syntax, e.g. "1-10" or "7"
+        binding: instruction
+    postcondition_kind: selection_set
+    expect_template:
+      selection:
+        "<param:class>": "<param:range_spec>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "select {class}s {range_spec}"
+      - "pick {class} {range_spec}"
+    bootstrap_eval_rows: [bs-010, bs-011, bs-034, bs-035]
+
+  clrsel:
+    shape: atomic
+    prose: "Clear a selection (one class or all)."
+    steps:
+      - tool: clrsel
+        arguments_template:
+          class_name: "<str:class_or_empty>"
+    params:
+      class_or_empty:
+        type: str
+        binding: instruction            # "" for "deselect everything"; else fixture.classes
+    postcondition_kind: selection_set
+    expect_template:
+      selection: {}
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "clear the {class_or_empty} selection"
+      - "deselect everything"
+      - "clear all selections"
+    bootstrap_eval_rows: [bs-012, bs-013, bs-036, bs-037]
+    todo_v2:
+      - "Stage 3 only synthesizes class-set variants of clrsel; the
+         'deselect everything' / 'clear all selections' paraphrases hit
+         the missing pygriz `selection.clear_all()` path (same gap as
+         the bootstrap Claude 2× clrsel dispatch_error in
+         posttraining-dataset.md §5). Wire `clear_all()` in pygriz
+         before re-enabling those seeds in synth."
+
+  show-primal:
+    shape: atomic
+    prose: "Color the mesh by a primal state variable."
+    steps:
+      - tool: show
+        arguments_template:
+          result: "<str:result_name>"
+    params:
+      result_name:
+        type: str
+        binding: fixture.primal_svars
+    postcondition_kind: active_result
+    expect_template:
+      result: "<param:result_name>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "color the mesh by {result_name}"
+      - "show {result_name}"
+      - "display {result_name} on the mesh"
+    bootstrap_eval_rows: [bs-014, bs-015, bs-016, bs-038, bs-039, bs-040]
+
+  show-derived:
+    shape: atomic
+    prose: "Color the mesh by a derived result family."
+    steps:
+      - tool: show
+        arguments_template:
+          result: "<str:result_name>"
+    params:
+      result_name:
+        type: str
+        binding: fixture.derived_results
+    postcondition_kind: active_result
+    expect_template:
+      result: "<param:result_name>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "color the mesh by {result_name}"
+      - "color the mesh by effective stress"      # eff_stress
+      - "show {result_name} on the mesh"
+    bootstrap_eval_rows: [bs-017, bs-018, bs-041, bs-042]
+    todo_v2:
+      - "Add the prose ↔ symbol map (effective stress ↔ eff_stress, etc.) so
+         paraphrase doesn't rely on the LLM knowing the symbol. Tracks the
+         v4-anthropic clrsel/eff_stress vocab-gap failures noted in
+         posttraining-dataset.md §5."
+
+  material:
+    shape: atomic
+    prose: "Toggle a material on or off by 1-based id."
+    steps:
+      - tool: material
+        arguments_template:
+          enable: "<bool:enable_verb>"
+          material: "<int:mat_id>"
+    params:
+      enable_verb:
+        type: bool
+        binding: instruction            # hide/disable/off -> false; enable/show/on -> true
+      mat_id:
+        type: int
+        binding: fixture.material_ids
+    postcondition_kind: materials_visible
+    # Derived: hidden_materials = [mat_id] when enable=false, [] when enable=true.
+    # The "[] when enabling" rule assumes the fixture starts with the material
+    # visible; Stage 3 enforces this by emitting only one toggle per scenario.
+    expect_template:
+      hidden_materials: "<derived:from_enable_and_mat_id>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "disable material {mat_id}"
+      - "hide material {mat_id}"
+      - "enable material {mat_id}"
+      - "turn material {mat_id} on"
+    bootstrap_eval_rows: [bs-019, bs-020, bs-021, bs-043, bs-044, bs-045]
+
+  view-reset:
+    shape: atomic
+    prose: "Reset the camera to the default view."
+    steps:
+      - tool: view
+        arguments_template:
+          reset: true
+    params: {}
+    postcondition_kind: camera_named_view
+    expect_template:
+      action: reset
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "reset the view"
+      - "reset camera"
+    bootstrap_eval_rows: [bs-022, bs-046, bs-047]
+
+  colormap:
+    shape: atomic
+    prose: "Switch the visualization colormap."
+    # NOTE: colormap uses camera_named_view as its kind via the verifier's
+    # "catch-all for visual settings" design (verifier.py:_pc_camera_named_view).
+    # The closed set has no per-tool kind, so this is intentional. TODO(v2)
+    # below tracks the kind-naming awkwardness.
+    steps:
+      - tool: colormap
+        arguments_template:
+          name: "<enum:colormap_name>"
+    params:
+      colormap_name:
+        type: enum
+        values: [jet, cool, hot, gray, viridis, plasma]
+        binding: instruction
+    postcondition_kind: camera_named_view
+    expect_template:
+      action: colormap
+      name: "<param:colormap_name>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "use the {colormap_name} colormap"
+      - "switch to the {colormap_name} colormap"
+      - "use {colormap_name}"
+    bootstrap_eval_rows: [bs-023, bs-024, bs-048, bs-049]
+    todo_v2:
+      - "Consider splitting camera_named_view into camera_action and
+         visual_setting kinds so 'colormap' isn't filed under 'camera'.
+         Verifier change; track in todo_v2.verifier_kinds."
+
+  query:
+    shape: atomic
+    prose: "Read result values for a subset of elements at a state."
+    # query has zero rows in bootstrap.jsonl; it ships in v1 so the SFT corpus
+    # exercises the read path. expect.table is pinned from the mili-rs parity
+    # suite during Stage 3 — no new oracle.
+    steps:
+      - tool: query
+        arguments_template:
+          result: "<str:result_name>"
+          class_name: "<str:class>"
+          labels: "<list[int]:labels>"
+          states: "<list[int]:states>"
+    params:
+      result_name:
+        type: str
+        binding: fixture.primal_svars   # v1 keeps query to primal svars only
+      class:
+        type: str
+        binding: fixture.classes
+      labels:
+        type: list[int]
+        binding: instruction            # e.g. [1] or [1,2,3]
+      states:
+        type: list[int]
+        binding: instruction            # null => current state
+    postcondition_kind: query_value
+    # Derived: Stage 3 fills `table` from the mili-rs parity-pinned value for
+    # the chosen (fixture, class, label, state, result) tuple — see
+    # crates/mili-rs/tests/parity_*.rs for the source of truth.
+    expect_template:
+      arguments:
+        result: "<param:result_name>"
+        class_name: "<param:class>"
+        labels: "<param:labels>"
+        states: "<param:states>"
+      table: "<derived:from_parity_suite>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "what is {result_name} on {class} {labels} at state {states}?"
+      - "query {result_name} for {class} {labels} at state {states}"
+      - "read {result_name} on {class} {labels}"
+    bootstrap_eval_rows: []
+    todo_v2:
+      - "Extend query to derived results (eff_stress, pressure) once the
+         parity suite has pinned values for those derived fields per
+         (fixture, class, label, state)."
+      - "Add multi-state and 'all labels' (labels=null) query variants."
+      - "Stage 6.5 (2026-05-24, rev 7): 4 / 12 query rows graded
+         wrong_final_state under Claude (synth-00124, 00127, 00130,
+         00133 — paraphrases that name a label but not a state). The
+         model first calls query(...) with states=\"null\" (string),
+         the dispatcher errors, the retry drops `states` entirely; the
+         postcondition exact-matches on states=[1]. Three options for
+         v2: (a) make the verifier lenient on default state when the
+         instruction omits one, (b) pin states=1 explicitly in the
+         atomic-query paraphrase seeds, or (c) ship a tool-schema
+         default (`states: default current`) so the model never has to
+         emit `null`. No fix in v1; Stage 5 is unaffected because
+         this miss is post-condition, not parse/dispatch."
+
+  # ========== COMPOUND ==========
+
+  compound-material-then-show:
+    shape: compound
+    prose: "Disable a material, then color the mesh by a derived result."
+    # bs-050 grounds this family. The synthesis target for v1 is ≥20%
+    # compound (m5 §"Multi-step …" point 3) — material-then-show is the
+    # cheapest compound to scale because it composes two well-covered atomic
+    # intents.
+    steps:
+      - tool: material
+        arguments_template:
+          enable: false
+          material: "<int:mat_id>"
+      - tool: show
+        arguments_template:
+          result: "<str:result_name>"
+    params:
+      mat_id:
+        type: int
+        binding: fixture.material_ids
+      result_name:
+        type: str
+        binding: fixture.derived_results
+    postcondition_kind: active_result      # final-state-only grading
+    expect_template:
+      result: "<param:result_name>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "disable material {mat_id} and then color the mesh by {result_name}"
+      - "hide material {mat_id}, then show {result_name}"
+      - "disable material {mat_id} and show {result_name}"
+    bootstrap_eval_rows: [bs-050]
+    todo_v2:
+      - "Switch to a composite postcondition once verifier.py adds the
+         `composite` kind — would let the grade also assert hidden_materials
+         contains mat_id, catching cases where the model skips step 1."
+
+  compound-select-then-show:
+    shape: compound
+    prose: "Select a subset of elements, then color the mesh by a result."
+    steps:
+      - tool: select
+        arguments_template:
+          class_name: "<str:class>"
+          range: "<str:range_spec>"
+      - tool: show
+        arguments_template:
+          result: "<str:result_name>"
+    params:
+      class:
+        type: str
+        binding: fixture.classes
+      range_spec:
+        type: str
+        binding: instruction
+      result_name:
+        type: str
+        binding: [fixture.primal_svars, fixture.derived_results]
+    postcondition_kind: active_result      # final-state-only grading
+    expect_template:
+      result: "<param:result_name>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "select {class}s {range_spec} and color them by {result_name}"
+      - "pick {class} {range_spec}, then show {result_name}"
+    bootstrap_eval_rows: []
+    todo_v2:
+      - "Add a composite postcondition asserting both `selection` matches and
+         `result` matches — the v1 active_result-only grade would mark a
+         no-select-just-show rollout as L3 pass."
+
+  compound-state-then-show:
+    shape: compound
+    prose: "Jump to a state, then color the mesh by a result."
+    steps:
+      - tool: set_state
+        arguments_template:
+          state: "<int:state_num>"
+      - tool: show
+        arguments_template:
+          result: "<str:result_name>"
+    params:
+      state_num:
+        type: int
+        binding: instruction
+        range_from: fixture.num_states
+      result_name:
+        type: str
+        binding: [fixture.primal_svars, fixture.derived_results]
+    postcondition_kind: active_result      # final-state-only grading
+    expect_template:
+      result: "<param:result_name>"
+    fixture_bindings: [d3samp6, cylinder]
+    paraphrase_seeds:
+      - "go to state {state_num} and color the mesh by {result_name}"
+      - "jump to state {state_num}, then show {result_name}"
+      - "at state {state_num}, display {result_name}"
+    bootstrap_eval_rows: []
+    todo_v2:
+      - "Composite postcondition would also assert `state == state_num` so a
+         rollout that skips set_state doesn't grade L3."
+
+# ---------------------------------------------------------------------------
+# v2 backlog. Anything we punted from v1 lands here so the next cycle has a
+# ready-made delta. Per m5-sft-pipeline.md "v1 scope" discipline, every
+# `TODO(v2)` in the intent rows above is replicated here in one of these
+# buckets (intents, fixtures, verifier_kinds, compound_families).
+# ---------------------------------------------------------------------------
+todo_v2:
+  intents:
+    - id: snapshot
+      tool: snapshot
+      reason: "Read tool; no closed kind grades 'snapshot returned'. Add a
+               snapshot_value kind alongside query_value, or fold both into a
+               unified read_value kind."
+    - id: legend
+      tool: legend
+      reason: "result_range kind exists but is unused in v1. Needs scenario
+               authoring + per-fixture legend range pins."
+    - id: iso
+      tool: iso
+      reason: "Final-state grading would need a new kind for 'isosurfaces on for
+               result X with N levels'. Not in the closed 7."
+    - id: contour
+      tool: contour
+      reason: "Same as iso — needs a new kind or stretch active_result."
+    - id: cutplane
+      tool: cutplane
+      reason: "Camera/geometry state grading; out of scope for v1."
+    - id: named_view
+      tool: named_view
+      reason: "camera_named_view kind already supports save/restore/list; the
+               punt is scenario authoring + fixture-local named-view inventory,
+               not the kind."
+    - id: close
+      tool: close
+      reason: "Single-tool intent with no postcondition kind (database closed).
+               Defer until the read-path tools are corpus'd."
+
+  fixtures:
+    - id: held_out          # Risk #1: shell_mat2 vs bar5
+      status: "Decide before Stage 3 grounds any param in fixture facts."
+    - id: bar1
+    - id: bar5
+    - id: basic2
+    - id: cylinder_4hex
+    - id: d3samp6_tfile
+    - id: ml40
+    - id: shell_mat2
+
+  verifier_kinds:
+    - id: state_sequence
+      reason: "Grade ordering of compound steps; m5 Risk #2 (parked, not added
+               in v1). Lets compound rows assert intermediate-step ordering."
+    - id: composite
+      reason: "AND-of-existing-kinds combinator. Each compound TODO(v2) above
+               wants this — would tighten compound grading without inventing a
+               new domain kind."
+    - id: snapshot_value
+      reason: "Pair with query_value so the snapshot read tool can be graded."
+
+  compound_families:
+    - id: compound-step-query
+      reason: "step + query — gates on adding query to compound synthesis."
+    - id: compound-clear-then-select
+      reason: "clrsel + select — exercises selection_set on two-step grading."
+    - id: compound-material-then-state-then-show
+      reason: "Three-step pattern; depth=3 to test the synthesis ratio gate
+               beyond depth=2."

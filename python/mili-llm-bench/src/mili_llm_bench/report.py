@@ -177,6 +177,62 @@ def _render_per_intent(records: list[dict[str, Any]]) -> str:
     )
 
 
+def _render_stage5(summary: dict[str, Any]) -> str | None:
+    """Stage 5 K-pass + retention + cost section.
+
+    Returns ``None`` when the run was bench-as-eval (K=1, no
+    retention metadata) so the report stays byte-identical to
+    pre-rev-11 reports. When ``k > 1`` or ``cost_estimate_usd`` is
+    populated, emits a section with the budget-gate-relevant
+    numbers: retention rate, retention-by-intent, total tokens by
+    category, and the USD cost estimate (against the model_id's
+    pinned per-Mtok pricing).
+    """
+    cfg = summary.get("config", {})
+    k = int(cfg.get("k", 1))
+    has_cost = "cost_estimate_usd" in summary
+    has_retention = "retention_rate" in summary
+    if k <= 1 and not has_cost and not has_retention:
+        return None
+
+    lines = ["## stage_5_telemetry", ""]
+    lines.append(f"* K (rollouts per scenario): **{k}**")
+    if has_retention:
+        scenarios_retained = int(summary.get("scenarios_retained", 0))
+        scenarios_total = int(summary.get("scenarios_total", 0))
+        rate = float(summary.get("retention_rate", 0.0))
+        lines.append(
+            f"* retention (≥1 passing rollout / scenario): "
+            f"**{scenarios_retained} / {scenarios_total}** ({rate * 100.0:.1f}%)"
+        )
+    if has_cost:
+        cost = float(summary.get("cost_estimate_usd", 0.0))
+        lines.append(f"* cost estimate (USD, against pinned pricing): **${cost:.2f}**")
+    totals = summary.get("usage_totals")
+    if isinstance(totals, dict) and totals:
+        in_t = int(totals.get("input_tokens", 0))
+        out_t = int(totals.get("output_tokens", 0))
+        cr_t = int(totals.get("cache_read_input_tokens", 0))
+        cc_t = int(totals.get("cache_creation_input_tokens", 0))
+        lines.append(
+            f"* tokens — input {in_t:,} / output {out_t:,} / "
+            f"cache_read {cr_t:,} / cache_creation {cc_t:,}"
+        )
+    by_intent = summary.get("retention_by_intent")
+    if isinstance(by_intent, dict) and by_intent:
+        lines.append("")
+        lines.append("### retention_by_intent")
+        lines.append("")
+        lines.append("| intent_id | scenarios | retained | retention_rate |")
+        lines.append("|-----------|-----------|----------|----------------|")
+        for intent, slot in sorted(by_intent.items()):
+            count = int(slot.get("count", 0))
+            retained = int(slot.get("retained", 0))
+            rate = float(slot.get("rate", 0.0)) * 100.0
+            lines.append(f"| {intent} | {count} | {retained} | {rate:.1f}% |")
+    return "\n".join(lines)
+
+
 def _render_raw_fallback(records: list[dict[str, Any]]) -> str:
     total = len(records) or 1
     raw_count = _raw_fallback_count(records)
@@ -226,8 +282,11 @@ def render(
         _render_timing(summary),
         _render_per_intent(records),
         _render_raw_fallback(records),
-        _render_pointers(rollouts_path, config_yaml_path, summary_path),
     ]
+    stage5 = _render_stage5(summary)
+    if stage5 is not None:
+        sections.append(stage5)
+    sections.append(_render_pointers(rollouts_path, config_yaml_path, summary_path))
     return "\n\n".join(sections) + "\n"
 
 
