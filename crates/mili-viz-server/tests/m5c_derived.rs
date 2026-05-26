@@ -205,12 +205,34 @@ async fn derived_surfstrain_and_nodal_time() {
     //    resolves to an `MVG2` scalar and its routing coverage moved to
     //    `m5d_alt_strain.rs`. They are deliberately no longer in this
     //    bare-hull list. ──────────────────────────────────────────────
-    for name in ["not_a_derived", ""] {
-        let g = show(&mut client, &mut sub, &svc, name).await.0;
+    // Empty svar still intentionally renders the bare hull (the
+    // "unmap result" affordance is preserved across M7 Delta 4).
+    {
+        let g = show(&mut client, &mut sub, &svc, "").await.0;
         assert!(
             g.layout.starts_with("MVG3:") && g.scalar.is_empty(),
-            "{name:?} → bare hull, no error"
+            "empty svar → bare hull, no error"
         );
+    }
+    // Unknown svar is now an M7 Delta 4 no-op (broadcast carries
+    // geometry: None; prior result preserved). See
+    // `m7-bench-live-parity.md`.
+    {
+        let mut req = Request::new(pb::Command {
+            cmd: Some(pb::command::Cmd::Show(pb::Show {
+                result: "not_a_derived".to_string(),
+                component: String::new(),
+                opts: HashMap::new(),
+            })),
+        });
+        req.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "m5c".parse().unwrap());
+        assert!(client.execute(req).await.unwrap().into_inner().ok);
+        let d = sub.message().await.unwrap().unwrap();
+        let Some(pb::state_delta::Payload::Result(r)) = d.payload else {
+            panic!("show must broadcast a ResultState");
+        };
+        assert!(r.geometry.is_none(), "M7 Delta 4: unresolved → geometry None");
     }
 
     // Step to a stressed/deformed state — state 1 is undeformed (all
