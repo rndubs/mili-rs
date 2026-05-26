@@ -17,7 +17,7 @@ between macOS and Linux.
 
 These items were resolved off-GPU (✅) or must be resolved **on the
 cluster, before the first real training run** (🛑). See
-[`sft-preflight-gpu.md`](sft-preflight-gpu.md) for the runnable scripts
+[`_sft-preflight-gpu.md`](_sft-preflight-gpu.md) for the runnable scripts
 matching the 🛑 items.
 
 ### Resolved off-GPU (2026-05-24)
@@ -66,7 +66,7 @@ matching the 🛑 items.
   signal on user prompts and tool stdout — actively harmful at this
   scale.
 
-### Must be resolved on-GPU before training (see `sft-preflight-gpu.md`)
+### Must be resolved on-GPU before training (see `_sft-preflight-gpu.md`)
 
 - 🛑 **`SFTTrainer` + `tools` field test.** TRL's default collator may
   not pass `row["tools"]` into `apply_chat_template`. Dump one
@@ -80,7 +80,7 @@ matching the 🛑 items.
   the HF tokenizer). Test pin in
   `python/mili-llm-bench/tests/test_providers_llamacpp.py::
   TestChatCompletionsPath`. **v5 floor re-baseline pending on a GPU
-  node** — see `sft-preflight-gpu.md` §2 "Required follow-on".
+  node** — see `_sft-preflight-gpu.md` §2 "Required follow-on".
 - ✅ **`assistant_only_loss` mask check.** Cleared 2026-05-25 on
   `matrix41` H100 via custom data collator (option B) — see above and
   `m5-sft-pipeline.md` rev 17. TRL's native path failed on FG's
@@ -108,7 +108,7 @@ matching the 🛑 items.
 
 ## What runs where
 
-| Stage (from `posttraining-dataset.md` §2)                | Platform              | Why                                            |
+| Stage (from `_posttraining-dataset.md` §2)                | Platform              | Why                                            |
 | -------------------------------------------------------- | --------------------- | ---------------------------------------------- |
 | Stage 2 — intent catalog                                 | macOS or Linux        | Pure authoring                                 |
 | Stage 3 — scenario synthesis                             | macOS or Linux        | Light LLM paraphrase; no GPU                   |

@@ -9,7 +9,7 @@ cleared on `matrix41` H100 in rev 17 via option (B) — custom
 data collator; TRL 1.5.0's native `assistant_only_loss=True` raised
 at `SFTTrainer.__init__` because FG's chat template lacks
 `{% generation %}` markers and is too macro-heavy for TRL's
-auto-patch. The rev-12 config-seam claim in `cluster-setup.md` §0
+auto-patch. The rev-12 config-seam claim in `_cluster-setup.md` §0
 turned out to be genuinely vacuous (kwarg exists on TRL 1.5.0 but
 trainer dies on the template); see report
 `data/posttraining/sft/preflight-4-loss-mask.md`**; #5 cleared
@@ -17,7 +17,7 @@ off-GPU in rev 14 — see below). **Stage 8 deferred 2026-05-25
 (rev 18)** — Stage 6.5's 97.71 % L3 already supplies the
 "strong model" signal; `google/gemma-{2b,7b}-it` parked as
 post-SFT fallbacks if the regression tripwire fires. Critical path
-is now `trainer.train()` (cluster-setup.md §6, rev 4 recipe)
+is now `trainer.train()` (_cluster-setup.md §6, rev 4 recipe)
 → preflight #6 → real Stage 7 eval. **rev 19 (2026-05-25):**
 training entry point landed — `scripts/sft_train.sbatch` +
 `python/scripts/sft_train.py`. **rev 20 (2026-05-25):**
@@ -83,7 +83,7 @@ directly (no synth.jsonl join); mock-provider smoke against the real
 81-row heldout split confirms end-to-end load. **Preflight #5
 cleared in rev 14** at max=3341 / gate=4096 (deliberate bump above
 Google's `max_length=512` recipe pin — recorded here per
-sft-preflight-gpu.md §5). Preflight #3/#6 + Stage 8 still
+_sft-preflight-gpu.md §5). Preflight #3/#6 + Stage 8 still
 **unblocked** (GPU-bound). Matched-tools ceiling 97.71 % L3 (Claude
 Sonnet 4.5 on synth.jsonl, rev 7) stands.
 
@@ -93,7 +93,8 @@ historical milestone records — they do not move. This one does.
 
 For *why* SFT (vs. GEPA / vs. nothing), read
 [`GEPA-vs-POSTTRAINING.md`](GEPA-vs-POSTTRAINING.md) and the pipeline
-design in [`posttraining-dataset.md`](posttraining-dataset.md).
+design in [`_posttraining-dataset.md`](_posttraining-dataset.md) and
+[`reference/gepa-vs-posttraining.md`](reference/gepa-vs-posttraining.md).
 This tracker is the *how* and *when*.
 
 ---
@@ -194,7 +195,7 @@ own synthesis recipe, not a residual category sprinkled in at the end:
 
 ## Stage status
 
-Stage numbering matches [`posttraining-dataset.md`](posttraining-dataset.md) §2.
+Stage numbering matches [`_posttraining-dataset.md`](_posttraining-dataset.md) §2.
 
 - [x] **Stage 0** — `GrizSession` seam exists (`mili-viz-server`'s
       pygriz dispatcher; the M1 stub-fallback gap is closed, fixture
@@ -291,7 +292,7 @@ plenty for 270M full BF16 fine-tune). The toolchain bring-up
 (CUDA-enabled `llama.cpp`, `transformers` + `trl` + `flash-attn`
 training stack, HF → GGUF conversion, and re-serving the trained
 checkpoint through the existing bench harness) is documented in
-[`cluster-setup.md`](cluster-setup.md). Data synthesis (Stages 2–4
+[`_cluster-setup.md`](_cluster-setup.md). Data synthesis (Stages 2–4
 / 6 / 6.5) and Claude-API rollouts (Stage 5) can run anywhere — the
 cluster is only on the critical path for **training + post-SFT eval**.
 
@@ -319,7 +320,7 @@ stage runs.
 ## Risks and open questions
 
 Carried, not resolved here. Most are pinned in
-[`posttraining-dataset.md`](posttraining-dataset.md) §6 — listing
+[`_posttraining-dataset.md`](_posttraining-dataset.md) §6 — listing
 them here too so the live tracker shows the live unknowns.
 
 1. **Held-out fixture choice.** `shell_mat2` vs. `bar5`. Needs decision
@@ -378,7 +379,7 @@ them here too so the live tracker shows the live unknowns.
 - **`TODO(v2)` is a real label.** Anything we punt for the pilot
   lands there with one sentence on *what* and *why deferred*.
 - **External pointers stay external.** This doc references but does
-  not duplicate `posttraining-dataset.md`, the verifier source, or
+  not duplicate `_posttraining-dataset.md`, the verifier source, or
   the memory entries — they are the source of truth.
 
 ---
@@ -433,7 +434,7 @@ them here too so the live tracker shows the live unknowns.
   fix; the two are independent improvements.
 
 - **2026-05-25 (rev 22)** — **GGUF round-trip clean; v1 SFT ships.**
-  Preflight #6 (`sft-preflight-gpu.md` §6) cleared on `winner →
+  Preflight #6 (`_sft-preflight-gpu.md` §6) cleared on `winner →
   checkpoint-126`; GGUF conversion produced
   `data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf` (236
   tensors, 542 MB); llamacpp re-eval on the same 81-row heldout split
@@ -699,10 +700,10 @@ them here too so the live tracker shows the live unknowns.
     cell. No action needed.
 
   **Path forward (winner-only).** Preflight #6 (GGUF chat-template
-  baking diff, `sft-preflight-gpu.md` §6) on `winner →
-  checkpoint-126` → GGUF conversion (`cluster-setup.md` §7) →
+  baking diff, `_sft-preflight-gpu.md` §6) on `winner →
+  checkpoint-126` → GGUF conversion (`_cluster-setup.md` §7) →
   `--provider llamacpp` re-eval on the same heldout split
-  (`cluster-setup.md` §8b) to confirm the GGUF round-trips the same
+  (`_cluster-setup.md` §8b) to confirm the GGUF round-trips the same
   95.1 % L3 as the HF path. If the llamacpp number matches, ship.
 
   **Test deltas.** 229 / 229 + 1 skip before → 250 / 250 + 1 skip
@@ -765,7 +766,7 @@ them here too so the live tracker shows the live unknowns.
   the winner → ship.
 
 - **2026-05-25 (rev 19)** — **Training entry point landed.**
-  `python/scripts/sft_train.py` realizes the `cluster-setup.md` §6
+  `python/scripts/sft_train.py` realizes the `_cluster-setup.md` §6
   recipe (rev 4) as a runnable argparse-driven script. Defaults match
   the pinned hyperparameter table verbatim; overrides require a
   one-line justification in the run's `dataset_card.md` so silent
@@ -783,7 +784,7 @@ them here too so the live tracker shows the live unknowns.
   source it — the `cuda/12.9.1` module-load would put system CUDA on
   `LD_LIBRARY_PATH` and risk shadowing torch's bundled CUDA 13
   runtime (same reasoning as `gpu-sanity.sh`'s top-of-file comment).
-  Launch instructions live in `cluster-setup.md` §6 "Launching the
+  Launch instructions live in `_cluster-setup.md` §6 "Launching the
   run". Drive-by drift fix in §6's constraints bullet (TRL native
   `assistant_only_loss=True` → `MaskAssistantOnlyCollator` per rev 4)
   rolled in.
@@ -811,7 +812,7 @@ them here too so the live tracker shows the live unknowns.
   for DPO pairs) don't recover.
 
   **Path forward.** Critical path collapses to `trainer.train()`
-  (cluster-setup.md §6, rev 4 recipe) → preflight #6 (GGUF
+  (_cluster-setup.md §6, rev 4 recipe) → preflight #6 (GGUF
   chat-template baking, gated on a trained checkpoint) → real
   Stage 7 eval pass against `eval/heldout.jsonl`. No tracker artifacts
   modified; the stage entry above flips to `[~]` (deferred) with
@@ -829,7 +830,7 @@ them here too so the live tracker shows the live unknowns.
   (`format_parameters`, `format_function_declaration`,
   `format_argument`) and TRL's auto-patch can't infer assistant
   boundaries from the substituted-`role` rendering pattern. The
-  rev-12 config-seam claim in `cluster-setup.md` §0 (line 53-55) was
+  rev-12 config-seam claim in `_cluster-setup.md` §0 (line 53-55) was
   therefore genuinely vacuous — the kwarg exists on TRL 1.5.0
   (rev-16's bump made it accept) but the trainer dies before any
   batch is produced. Option A (patching the FG template to add
@@ -885,7 +886,7 @@ them here too so the live tracker shows the live unknowns.
   pass + 1 skip on the full `mili-llm-bench` suite (+8 from rev 16's
   221).
 
-  **§6 recipe landed in `cluster-setup.md` rev 4.**
+  **§6 recipe landed in `_cluster-setup.md` rev 4.**
   `SFTConfig(assistant_only_loss=False)` at the TRL level;
   `SFTTrainer(...)` constructor now passes
   `data_collator=MaskAssistantOnlyCollator(
@@ -901,7 +902,7 @@ them here too so the live tracker shows the live unknowns.
   before `trainer.train()` so the SFT lift is measurable.
 
 - **2026-05-25 (rev 16)** — **TRL pin bumped from `>=0.11,<0.13`
-  to `>=1.0,<2`.** The rev-2 pin (in `cluster-setup.md` line 211)
+  to `>=1.0,<2`.** The rev-2 pin (in `_cluster-setup.md` line 211)
   was self-contradicting: its stated justification was
   `assistant_only_loss`, but that kwarg was added in trl 0.20+ —
   neither 0.11 nor 0.12 supported it. Preflight #3 exposed the gap
@@ -916,7 +917,7 @@ them here too so the live tracker shows the live unknowns.
   - `python/scripts/sft_dump_one_batch.py`: `max_seq_length`
     (0.12.x spelling) → `max_length` (trl 1.x spelling); dropped
     the drift apology in the docstring.
-  - `cluster-setup.md` §0 pin paragraph + §6 recipe knob table +
+  - `_cluster-setup.md` §0 pin paragraph + §6 recipe knob table +
     §6 recipe block: pin updated; `max_length=4096` mirrored from
     rev-14 preflight #5 (was stale at `512` here); `formatting_func`
     comment annotated as "mandatory on 0.12.x, optional on 1.x".
@@ -963,7 +964,7 @@ them here too so the live tracker shows the live unknowns.
   **Path forward.** Preflight #4 (`assistant_only_loss=True` mask
   check) is now genuinely runnable — TRL 1.5.0 actually has the
   kwarg, so we can run the on-GPU compat check the §4 recipe in
-  `sft-preflight-gpu.md` describes. Stage 8 (pre-experiment gate)
+  `_sft-preflight-gpu.md` describes. Stage 8 (pre-experiment gate)
   is also still runnable in parallel.
 
 - **2026-05-25 (rev 15)** — **Preflight #3 cleared on `matrix41`
@@ -984,7 +985,7 @@ them here too so the live tracker shows the live unknowns.
   used by the script. Report:
   `data/posttraining/sft/preflight-3-tokenized-batch.md`.
 
-  **Two API drifts in the `cluster-setup.md` §6 recipe surfaced
+  **Two API drifts in the `_cluster-setup.md` §6 recipe surfaced
   and recorded (not fixed here):** (a) `SFTConfig(max_length=…)`
   doesn't exist on TRL 0.12.1 — the 0.12.x spelling is
   `max_seq_length` (renamed `max_length` in trl 0.13+). (b)
@@ -1063,7 +1064,7 @@ them here too so the live tracker shows the live unknowns.
   driver is the ~18-tool inventory (~2700 tokens/row); messages
   contribute a few hundred more. **Verdict: PASS at gate = 4096
   (deliberate bump from Google's recipe pin of 512)**. The bump is
-  recorded here per `sft-preflight-gpu.md` §5's instruction (the
+  recorded here per `_sft-preflight-gpu.md` §5's instruction (the
   trained checkpoint's context window must be traceable to a
   decision in this tracker). VRAM cost on H100 is the headroom-side
   of "small" — the linear bump from 512 → 4096 is 8× the per-row
@@ -1073,7 +1074,7 @@ them here too so the live tracker shows the live unknowns.
   inference, so we pin the inventory-wide bump for v1 and revisit
   in v2 only if VRAM forces it.
 
-  **(4) Preflight #5's runtime label was wrong.** The `sft-preflight-gpu.md`
+  **(4) Preflight #5's runtime label was wrong.** The `_sft-preflight-gpu.md`
   §5 entry was queued as "pending GPU node + sft/train.jsonl"; in
   practice the audit is tokenizer-only (login-node safe — needs only
   the HF tokenizer cache populated by preflight #1) and gates the
@@ -1489,7 +1490,7 @@ them here too so the live tracker shows the live unknowns.
   conversion, tool-call normalization, and the no-bespoke-renderer
   guard — 15 / 15 pass. The deletion makes Path B (custom HF jinja)
   unrecoverable without a re-add discussion. **v5 floor re-baseline
-  is required** — see `sft-preflight-gpu.md` §2 "Required follow-on";
+  is required** — see `_sft-preflight-gpu.md` §2 "Required follow-on";
   GPU-blocked because llama-server is not on the matrix login
   `$PATH`. Until that lands, the 40 % v5 floor in the baselines
   table is stale (measured against the wrong system prompt). The
@@ -1634,25 +1635,25 @@ them here too so the live tracker shows the live unknowns.
   caps; ≥40-row/intent floor added to Stage 6 gates; Stage 6.5 gate
   reworded (dropped infeasible GBNF qualifier for Claude). GPU-blocked
   items split into a new pre-flight doc
-  ([`sft-preflight-gpu.md`](sft-preflight-gpu.md)) and `cluster-setup.md` §0.
+  ([`_sft-preflight-gpu.md`](_sft-preflight-gpu.md)) and `_cluster-setup.md` §0.
 - **2026-05-24 (rev 1)** — Doc created. v5 floor (40 % L3) reproduced
   and pinned. Stage 2 marked active. Cluster bring-up doc
-  ([`cluster-setup.md`](cluster-setup.md)) added for the H100
+  ([`_cluster-setup.md`](_cluster-setup.md)) added for the H100
   training environment.
 
 ---
 
 ## Pointers
 
-- Build plan: [`posttraining-dataset.md`](posttraining-dataset.md)
+- Build plan: [`_posttraining-dataset.md`](_posttraining-dataset.md)
 - Cluster bring-up (H100 + llama.cpp + training stack):
-  [`cluster-setup.md`](cluster-setup.md)
+  [`_cluster-setup.md`](_cluster-setup.md)
 - Training entry point (script + slurm launcher; instructions in
-  `cluster-setup.md` §6 "Launching the run"):
+  `_cluster-setup.md` §6 "Launching the run"):
   `python/scripts/sft_train.py`, `scripts/sft_train.sbatch`
 - GPU-blocked pre-flight checklist (must clear before `trainer.train()`):
-  [`sft-preflight-gpu.md`](sft-preflight-gpu.md)
-- Why SFT vs. GEPA: [`GEPA-vs-POSTTRAINING.md`](GEPA-vs-POSTTRAINING.md)
+  [`_sft-preflight-gpu.md`](_sft-preflight-gpu.md)
+- Why SFT vs. GEPA: [`reference/gepa-vs-posttraining.md`](reference/gepa-vs-posttraining.md)
 - Original strategy (superseded as a tracker, kept as design rationale):
   [`m3-posttraining-strategy.md`](m3-posttraining-strategy.md)
 - Verifier (reuse, do not rebuild):

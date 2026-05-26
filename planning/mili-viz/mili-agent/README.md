@@ -1,88 +1,61 @@
-# mili-agent: Local LLM for griz Command Writing
+# mili-agent: Local LLM for griz command writing
 
-Train and evaluate a local LLM to autonomously write griz visualization commands.
+Train and evaluate a local LLM to write griz visualization commands autonomously.
 
-**Current Status (2026-05-24):** M1, M2, M4 complete. GEPA prompt ceiling
-reached at 40 % L3 (FunctionGemma-270M floor). Claude Sonnet 4.5 ceiling
-is 92 % L3. **SFT is now the active phase** — see [M5](m5-sft-pipeline.md).
+**Status (2026-05-25):** v1 SFT ships. Winner GGUF at **95.06 % L3** on the 81-row heldout. Active phase: [M6 client integration](m6-client-integration-v1.md).
 
 ---
 
-## Where to start
+## Results
 
-**[M5: SFT Pipeline (live tracker)](m5-sft-pipeline.md)** — 🚧 Active.
-The single entry point for SFT progress: pinned baselines, stage
-status, v1 narrow-scope decisions, scale-up backlog, multi-step
-coverage plan, gate thresholds.
+| Run | Model | Eval set | L3 | Notes |
+|-----|-------|----------|----|-------|
+| v4 floor (pre-GEPA) | FunctionGemma-270M | bootstrap (50) | 32 % | Historical floor |
+| v5 floor (post-GEPA) | FunctionGemma-270M | bootstrap (50) | 40 % | GEPA-promoted tool descriptions |
+| v7 floor (canonical) | FunctionGemma-270M | bootstrap (50) | 26 % | `--jinja` path, rev-10 fallback |
+| v4 ceiling | Claude Sonnet 4.5 | bootstrap (50) | 92 % | Pre-promotion tools |
+| v7 ceiling | Claude Sonnet 4.5 | synth (175) | 97.7 % | Post-promotion tools |
+| **v1 SFT winner** | functiongemma-v1 (SFT) | heldout (81) | **95.1 %** | HF and GGUF paths identical |
 
-The other documents in this directory are historical milestone
-records; they pin past decisions and do not move once a milestone
-completes. Read them for context, not for current status.
+GEPA ran 100 iterations (4 × 25); converged at 40 % L3 — the prompt-engineering ceiling. System prompt never improved; only four tool descriptions (`clrsel`, `colormap`, `material`, `query`) moved the number. SFT closed the 52-point gap: **checkpoint-126** at 95.1 % L3 on the heldout split, 13/14 intents at 100 %. Four residual `select` semantic-disambiguation misses are the v2 paraphrase-multiplier target.
 
----
-
-## Milestone history
-
-**[M1: Baseline Design](m1-baseline-design.md)** — ✅ Complete
-Establish v0 baseline methodology: FunctionGemma-270M on 50-scenario
-bootstrap set, 4-tier grading (L0–L3). v0 absolute numbers later
-invalidated by the M1-stub-fallback bug (fixed 2026-05-24); the
-*methodology* survives, the original 2 % number does not. The
-post-fix floor is 32 % (v4) / 40 % (v5 with GEPA-promoted tools).
-
-**[M2: GEPA Optimization](m2-gepa-optimization.md)** — ✅ Complete
-Evolutionary system-prompt search. 100 iterations (4 × 25-iter runs)
-converged at **40 % L3**: prompt itself was unimproved, but four
-tool descriptions (`clrsel`, `colormap`, `material`, `query`) were
-promoted into `schemas.py:TOOL_DESCRIPTIONS`. Prompt engineering
-alone cannot close the 52-point gap to the Claude ceiling — that is
-SFT's job.
-
-**[M3: Post-Training Strategy](m3-posttraining-strategy.md)** —
-✅ Strategy locked, **superseded as a tracker by [M5](m5-sft-pipeline.md)**.
-Kept for the design rationale (why zero-human-label data works, why
-the verifier doubles as filter + reward + eval).
-
-**[M4: Client Integration Status](m4-client-integration-status.md)** —
-✅ Complete. FunctionGemma wired into the griz client via
-`LlamaCppAgent` → `llama-server`. End-to-end signal path verified.
-
-**[M5: SFT Pipeline](m5-sft-pipeline.md)** — ✅ v1 ships (rev 22,
-2026-05-25). Winner GGUF
-`data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf` at
-**95.06 % L3** on the 81-row heldout (HF and GGUF paths
-byte-identical). v2 lifts (corpus shape #6, `select` floor #7)
-parked in the Risks section.
-
-**[M6: v1 Client Integration](m6-client-integration-v1.md)** — 📋
-Planned. Wire the M5 winner GGUF into the existing
-M4 `LlamaCppAgent`. Five narrow deltas (model swap, prompt path,
-parser, system-prompt unification, heuristic-guard relaxation)
-plus a validation gate that the bench's 95.06 % L3 survives the
-live serving path.
+Artifacts: `data/posttraining/checkpoints/v1/winner → checkpoint-126` (HF) + `data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf` (GGUF).
 
 ---
 
-## Decision docs
+## Milestones
 
-**[GEPA vs Post-Training](GEPA-vs-POSTTRAINING.md)** — when to use
-prompt optimization vs. model training, why GEPA hit a ceiling,
-where SFT picks up. (Status section is intentionally lagging the M5
-tracker; treat M5 as authoritative for *current* state.)
+| Milestone | Status | Key finding |
+|-----------|--------|-------------|
+| [M1: Baseline Design](m1-baseline-design.md) | ✅ | Eval methodology established: bootstrap.jsonl (50 scenarios), L0–L3 grading, 4 failure-mode families |
+| [M2: GEPA Optimization](m2-gepa-optimization.md) | ✅ | 100 iters → 40 % L3 ceiling; system prompt never moved; 4 tool descriptions rewritten and promoted |
+| [M3: Post-Training Strategy](m3-posttraining-strategy.md) | ✅ superseded | Zero-human-label SFT design rationale; superseded as tracker by M5 |
+| [M4: Client Integration](m4-client-integration-status.md) | ✅ | FunctionGemma wired via `LlamaCppAgent`; load-bearing gap: no dispatch feedback |
+| [M5: SFT Pipeline](m5-sft-pipeline.md) | ✅ v1 ships | 175-scenario synth corpus → Claude teacher → H100 training → 95.06 % L3 GGUF |
+| [M6: v1 Client Integration](m6-client-integration-v1.md) | 📋 planned | Swap model, fix prompt path, port rev-21 parser to Rust, unify system prompt |
 
 ---
 
-## Quick runs
+## Quick commands
 
-Reproduce the v5 FunctionGemma floor:
+Reproduce the v7 FunctionGemma floor:
 
 ```bash
-llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 &
+llama-server -hf ggml-org/functiongemma-270m-it-GGUF:BF16 --jinja &
 uv run --directory python/mili-llm-bench mili-llm-bench run \
   --provider llamacpp \
   --scenarios ../../data/posttraining/eval/bootstrap.jsonl \
-  --out ../../data/posttraining/runs/v5-repro-$(date +%Y%m%d-%H%M%S) \
+  --out ../../data/posttraining/runs/v7-repro-$(date +%Y%m%d-%H%M%S) \
   --step-cap 8 --per-turn-timeout-s 120 --max-new-tokens 256
+```
+
+Serve the v1 SFT winner (cluster only):
+
+```bash
+source scripts/setup-gpu-env.sh
+llama-server \
+  -m data/posttraining/checkpoints/v1/functiongemma-v1.bf16.gguf \
+  --port 8080 --jinja
 ```
 
 Reproduce the Claude ceiling (`ANTHROPIC_API_KEY` required):
@@ -91,31 +64,38 @@ Reproduce the Claude ceiling (`ANTHROPIC_API_KEY` required):
 uv run --directory python/mili-llm-bench mili-llm-bench run \
   --provider anthropic \
   --scenarios ../../data/posttraining/eval/bootstrap.jsonl \
-  --out ../../data/posttraining/runs/v4-anthropic-repro-$(date +%Y%m%d-%H%M%S)
-```
-
-GEPA optimization loop (best artifact already promoted into
-`schemas.py`; re-run only when adding new tools):
-
-```bash
-uv run --directory python/mili-llm-bench mili-llm-bench run-gepa \
-  --scenarios ../../data/posttraining/eval/bootstrap.jsonl \
-  --provider llamacpp \
-  --out ../../data/posttraining/gepa-runs/gepa-run-$(date +%Y%m%d-%H%M%S)
+  --out ../../data/posttraining/runs/claude-repro-$(date +%Y%m%d-%H%M%S)
 ```
 
 ---
 
-## Related
+## Files
 
+**Active tracker:**
+- [m5-sft-pipeline.md](m5-sft-pipeline.md) — single source of truth for SFT status, baselines, gates, changelog
+- [m6-client-integration-v1.md](m6-client-integration-v1.md) — planned client wiring (model swap + parser port)
+
+**SFT pipeline companions:**
+- [_posttraining-dataset.md](_posttraining-dataset.md) — dataset construction plan (stage-by-stage build order)
+- [_cluster-setup.md](_cluster-setup.md) — H100 cluster setup, training recipe, §6 launch instructions
+- [_sft-preflight-gpu.md](_sft-preflight-gpu.md) — pre-flight checklist (all 6 checks cleared for v1)
+
+**Completed milestones:**
+- [m1-baseline-design.md](m1-baseline-design.md), [m2-gepa-optimization.md](m2-gepa-optimization.md), [m3-posttraining-strategy.md](m3-posttraining-strategy.md), [m4-client-integration-status.md](m4-client-integration-status.md)
+
+**Background / reference (`reference/`):**
+- `agent-local-llm*.md` — early design docs (pre-milestone)
+- `baseline-setup-guide.md` — step-by-step environment setup
+- `functiongemma-debug-report.md` — tool-calling failure analysis
+- `gepa-runs-summary.md` — per-run GEPA data (all 4 runs, failure-mode breakdown)
+- `gepa-vs-posttraining.md` — conceptual guide: when to use GEPA vs. post-training
+
+---
+
+**Code pointers:**
 - `python/mili-llm-bench/src/mili_llm_bench/verifier.py` — L0–L3 grader
-- `python/mili-llm-bench/src/mili_llm_bench/gepa_integration.py` — GEPA loop
-- `crates/mili-viz-server/src/llamacpp_agent.rs` — M4 client agent
-- CLAUDE.md — project setup, parity test instructions
-- `reference/baseline-setup-guide.md` — step-by-step environment setup
-- `reference/functiongemma-debug-report.md` — tool-calling failure analysis
-- `reference/` — historical docs and implementation details
+- `python/mili-llm-bench/src/mili_llm_bench/schemas.py:TOOL_DESCRIPTIONS` — GEPA-promoted tool descriptions
+- `crates/mili-viz-server/src/llamacpp_agent.rs` — M4 client agent (M6 target)
+- `data/posttraining/eval/bootstrap.jsonl` — 50-scenario bootstrap eval (do not edit without re-pinning baselines)
 
----
-
-**Last Updated:** 2026-05-24
+**Last Updated:** 2026-05-25

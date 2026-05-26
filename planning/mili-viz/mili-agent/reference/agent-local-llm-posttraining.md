@@ -68,7 +68,7 @@ enough for RL, strict enough for SFT rejection sampling.
 > **Build plan:** the concrete, ordered dataset-construction plan
 > (interface seam, record schema, stage-by-stage build order, what is
 > buildable now vs. gated on the Griz-python interface) lives in
-> `posttraining-dataset.md`. §3 below is the sketch it operationalizes.
+> `_posttraining-dataset.md`. §3 below is the sketch it operationalizes.
 
 ## 3. Minimal post-training pipeline (sketch — revisit)
 

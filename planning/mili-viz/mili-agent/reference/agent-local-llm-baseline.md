@@ -3,7 +3,7 @@
 **Status: In progress — W4a/W4b implementation with response enrichment.**
 Concrete next milestone under the exploratory umbrella of
 `agent-local-llm.md` / `agent-local-llm-posttraining.md` /
-`posttraining-dataset.md`. W4a (harness) and W4b (driver) are
+`_posttraining-dataset.md`. W4a (harness) and W4b (driver) are
 completed with response enrichment enhancements (Task 3) to signal
 completion and prevent looping. Ready for baseline run. Tracked in
 `status.md` § "Local LLM agent (exploratory)".
@@ -15,12 +15,12 @@ a 50-scenario bootstrap eval set under a pinned config.** That number
 is the baseline every later step is measured against. If it already
 clears the bar, the post-training work in
 `agent-local-llm-posttraining.md` is **moot for v1** — the *good*
-outcome that `posttraining-dataset.md` Stage 8 calls out.
+outcome that `_posttraining-dataset.md` Stage 8 calls out.
 
 Non-goals for v0:
 
 - No fine-tune, no teacher rollouts, no DPO, no GRPO.
-- No in-process Rust adapter (`posttraining-dataset.md` §0
+- No in-process Rust adapter (`_posttraining-dataset.md` §0
   `GrizSession`) — v0 drives the existing `mili-viz-server` via
   pygriz, which works *today*.
 - No GUI pixel snapshots in the scoring path (`agent-local-llm.md`
@@ -37,7 +37,7 @@ Non-goals for v0:
 
 JSON Schemas for each tool the model is shown, **derived from the
 frozen `mili_viz.proto` `Command` oneof, pinned, and kept honest by a
-diff test** — the typed-tool analogue of `posttraining-dataset.md`
+diff test** — the typed-tool analogue of `_posttraining-dataset.md`
 Stage 1's grammar artifact.
 
 Inventory (≈18 tools):
@@ -54,7 +54,7 @@ Inventory (≈18 tools):
 - **Fallback** (1): `griz_raw(line: str)` — the long-tail escape
   hatch; lowers to `Command{raw}`. Its argument is graded against the
   Stage-1 grammar artifact at L0/L1 (verifier two-column table in
-  `posttraining-dataset.md` Stage 4).
+  `_posttraining-dataset.md` Stage 4).
 
 **Each tool has both an input and an output schema.** Output schemas
 matter as much as input schemas for v0 — the model can only chain
@@ -111,7 +111,7 @@ Outputs:
 - A schema-derivation script that re-walks `mili_viz.proto` and a
   pinned `python/mili-llm-bench/tests/test_schemas.py` honest-diff
   test — drift fails CI and forces a deliberate regenerate, matching
-  `posttraining-dataset.md` Stage 1's discipline.
+  `_posttraining-dataset.md` Stage 1's discipline.
 
 No interface dependency — runs entirely off the proto.
 
@@ -139,13 +139,13 @@ No interface dependency — runs entirely off the proto.
     }
   }
   ```
-- Closed post-condition kinds (mirror `posttraining-dataset.md`
+- Closed post-condition kinds (mirror `_posttraining-dataset.md`
   Stage 4): `state_index`, `selection_set`, `active_result`,
   `result_range`, `materials_visible`, `camera_named_view`,
   `query_value`.
 - Fixture-fact grounding: real material ids / class names / state
   counts pulled from the existing parity suite, not invented
-  (`posttraining-dataset.md` Stage 3 discipline).
+  (`_posttraining-dataset.md` Stage 3 discipline).
 
 Output: `data/posttraining/eval/bootstrap.jsonl`.
 
@@ -155,9 +155,9 @@ on compound", which is the v0 discrimination we need.
 
 ### W3 — Verifier (single source of truth for scoring)
 
-The `posttraining-dataset.md` Stage 4 L0–L3 verifier, implemented as
+The `_posttraining-dataset.md` Stage 4 L0–L3 verifier, implemented as
 one Python module reused by v0 *and* by the future training pipeline.
-Refold of the two-column table from `posttraining-dataset.md` Stage 4:
+Refold of the two-column table from `_posttraining-dataset.md` Stage 4:
 
 | Tier | Typed tool call | `griz_raw` |
 |---|---|---|
@@ -174,7 +174,7 @@ not in place of them. Closed set:
 - `dispatch_error`, `nonexistent_material`, `nonexistent_class`,
   `nonexistent_result`, `state_out_of_range` (L2 — argument-level
   semantic failures the schema check cannot catch; this is exactly
-  the L2-carries-more-weight load `posttraining-dataset.md` Stage 4
+  the L2-carries-more-weight load `_posttraining-dataset.md` Stage 4
   calls out)
 - `wrong_final_state`, `wrong_selection`, `wrong_result`,
   `wrong_range`, `wrong_materials` (L3)
@@ -188,7 +188,7 @@ fine-tuning, more macros, or richer tool responses.
 
 W4 splits into a **factored harness** (W4a) reused by three
 consumers — the eval driver here, the future teacher-rollout loop
-(`posttraining-dataset.md` Stage 5), and the live production
+(`_posttraining-dataset.md` Stage 5), and the live production
 `AgentChat` handler (`client.md` decision 4 + the frozen
 `AgentChat`/`Interrupt` RPCs already in `mili_viz.proto`) — and the
 **v0-specific eval driver** (W4b) that wraps W4a, calls the verifier,
@@ -415,7 +415,7 @@ v0 implementations:
   available. Same seam as the eventual local-runtime decision in
   `agent-local-llm.md` Decision 2 — Candle/llama-cpp swap is later.
 - `AnthropicProvider` — for the *frontier baseline* line in the
-  report and as the future teacher (`posttraining-dataset.md` Stage
+  report and as the future teacher (`_posttraining-dataset.md` Stage
   5). Standard `tool_use` / `tool_result` blocks.
 - `MockLlmProvider` — scripted, deterministic, for tests.
 - `ReplayLlmProvider` — yields pre-recorded outputs from a
@@ -441,7 +441,7 @@ Outputs in the run dir:
   hash, tools.json hash, scenarios.jsonl hash). **Without
   config.yaml, the number is unfalsifiable.**
 - `rollouts.jsonl` — one canonical record per scenario, same shape
-  as `posttraining-dataset.md` §1 (so v0 rollouts can be reused as
+  as `_posttraining-dataset.md` §1 (so v0 rollouts can be reused as
   training data later if they happen to pass L3).
 - `summary.json` — counts by `max_tier`, counts by `failure_mode`,
   mean turns to completion, total wall time, L3 pass-rate.
@@ -548,7 +548,7 @@ Decision tree once the baseline number is in hand:
   Wire the bench as a regression test for the agent layer. Stop.
 - **L3 pass-rate inadequate, but L0/L1 mostly green** → the model
   understands the schema; the gap is intent/argument grounding.
-  Proceed to `posttraining-dataset.md` Stage 5 (teacher rollouts)
+  Proceed to `_posttraining-dataset.md` Stage 5 (teacher rollouts)
   with the dispatch + verifier already built.
 - **L0/L1 mostly red** → the chat template is wrong for the model,
   or schemas are too rich. Try a code-specialist base

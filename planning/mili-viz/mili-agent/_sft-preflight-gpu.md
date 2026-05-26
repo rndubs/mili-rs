@@ -7,7 +7,7 @@ ship an SFT model that scores 0 % L3 for a reason that has nothing to
 do with the training data or hyperparameters.
 
 This is the runnable companion to
-[`cluster-setup.md`](cluster-setup.md) §0. The off-GPU items are
+[`_cluster-setup.md`](_cluster-setup.md) §0. The off-GPU items are
 already resolved in that doc; this one is the to-do list for day 1 of
 cluster bring-up.
 
@@ -255,7 +255,7 @@ fails with `KeyError: 'text'` (the `dataset_text_field` default).
 On **TRL 1.5.0 (now the pinned version, see m5-sft-pipeline.md
 rev 16)** the auto-detect path also passes — TRL 1.x dispatches
 `apply_chat_template` when it sees `messages` + `tools` columns.
-**The §6 recipe in `cluster-setup.md` keeps `formatting_func`**
+**The §6 recipe in `_cluster-setup.md` keeps `formatting_func`**
 not because it's mandatory but for drift-proofing against a
 future TRL 2.x auto-detect change. The original API drifts
 (`SFTConfig.max_length` not on 0.12.x; `assistant_only_loss` not
@@ -301,7 +301,7 @@ print("PASS: tool declarations present in tokenized training batch")
 
 **Pass criteria:** assertion holds. If it fails *without*
 `formatting_func`, the `formatting_func` is mandatory (matches the
-recipe in `cluster-setup.md` §6). If it fails *with* `formatting_func`
+recipe in `_cluster-setup.md` §6). If it fails *with* `formatting_func`
 too, the tokenizer's chat template itself doesn't render tools —
 file a bug, do not train.
 
@@ -474,14 +474,14 @@ Record the pass/fail of each check in the v1 training run's
 
 ## Pointers
 
-- Off-GPU pre-flight (✅ resolved 2026-05-24): `cluster-setup.md` §0
+- Off-GPU pre-flight (✅ resolved 2026-05-24): `_cluster-setup.md` §0
 - Runtime serving path (`--jinja` prompt + rev-10 client-side
   response fallback):
   `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`
   (`LlamaCppProvider.generate`, `_parse_fg_envelopes`,
   `_fetch_caps_supports_tool_calls`)
 - Tool-format conversion helper (lift to shared module per
-  `posttraining-dataset.md` Stage 6):
+  `_posttraining-dataset.md` Stage 6):
   `python/mili-llm-bench/src/mili_llm_bench/providers/llamacpp.py`
   (`LlamaCppProvider._convert_to_openai_tool`)
 - Google FunctionGemma fine-tuning guide:

@@ -51,7 +51,7 @@ Griz exposes the *same* operations through three projections:
 
 1. **Layer-0 raw DSL** — `disable mat 3; rfit` strings, parsed by
    `interpret.c`'s `parse_command` dispatch (~318 keywords; see
-   `posttraining-dataset.md` Stage 1).
+   `_posttraining-dataset.md` Stage 1).
 2. **Layer-1 typed `Command`** — the `mili-viz-proto` `Command` oneof:
    ~15 variants (`load`, `set_state`, `step`, `select`, `clrsel`,
    `show`, `iso`, `contour`, `material`, `cutplane`, `colormap`,
@@ -133,7 +133,7 @@ ground than grammar-parse did. The verifier's L1 tier accordingly
 thins; L2 must catch most argument-level errors. This matches the
 vLLM caveat the deep-research report cites — structured decoding
 guarantees parseable, not semantically correct. See
-`posttraining-dataset.md` Stage 4 for the verifier-side fold-in.
+`_posttraining-dataset.md` Stage 4 for the verifier-side fold-in.
 
 ## Decisions (proposed, to revisit)
 
@@ -153,7 +153,7 @@ guarantees parseable, not semantically correct. See
    has to get *intent and argument mapping* right, not syntax.
    Secondary constraint, scoped to the `griz_raw` fallback only: the
    griz GBNF derived from `interpret.c` (Stage-1 artifact in
-   `posttraining-dataset.md`) — kept because it is independently
+   `_posttraining-dataset.md`) — kept because it is independently
    useful and because it constrains the one tool whose argument is a
    free-form command string. This is what collapses the model-size
    requirement.

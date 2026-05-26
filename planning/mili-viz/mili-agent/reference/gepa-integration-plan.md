@@ -84,7 +84,7 @@ Contents:
 
 **Location:** `data/posttraining/runs/v0-llamacpp-baseline/rollouts.jsonl`
 
-**Per-record schema (posttraining-dataset.md §1):**
+**Per-record schema (_posttraining-dataset.md §1):**
 ```python
 {
   "id": str,                          # scenario ID

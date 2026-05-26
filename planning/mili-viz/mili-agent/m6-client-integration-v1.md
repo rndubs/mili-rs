@@ -92,7 +92,7 @@ renderer that hand-builds the FG prompt string) and POSTs to
 in M5 rev 8 that the bespoke FG renderer (`_build_functiongemma_prompt`
 in Python) diverged from HF `apply_chat_template` on at least six
 axes — dropped developer message, flattened tool schema, etc.
-(See [`sft-preflight-gpu.md` §2](sft-preflight-gpu.md) for the
+(See [`_sft-preflight-gpu.md` §2](_sft-preflight-gpu.md) for the
 verbatim list.) The training distribution used `apply_chat_template`;
 serving with a bespoke renderer means the v1 model sees a different
 prompt than it trained on. The 95.06 % number measured on the bench
