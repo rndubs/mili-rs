@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>SFT JSONL Viewer</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #161b22;
+    --panel-2: #1c232c;
+    --border: #2a3441;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --role-developer: #6e7681;
+    --role-user: #3fb950;
+    --role-assistant: #58a6ff;
+    --role-tool: #d29922;
+    --json-key: #79c0ff;
+    --json-string: #a5d6ff;
+    --json-number: #f0883e;
+    --json-bool: #ff7b72;
+    --json-null: #ff7b72;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Pro Text", Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.45; }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+
+  header.top {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 10px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  }
+  header.top h1 { margin: 0; font-size: 14px; font-weight: 600; color: var(--muted); margin-right: auto; }
+  header.top .file-info { color: var(--muted); font-size: 12px; }
+
+  button, input[type="number"], input[type="text"] {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font-size: 13px; font-family: inherit;
+  }
+  button { cursor: pointer; }
+  button:hover { background: #232c38; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  input[type="number"] { width: 72px; }
+  input[type="text"] { width: 200px; }
+  input[type="file"] { color: var(--text); font-size: 12px; }
+  label.file-pick {
+    display: inline-block; cursor: pointer;
+    background: var(--accent); color: #0d1117; padding: 6px 12px;
+    border-radius: 6px; font-weight: 600;
+  }
+  label.file-pick input { display: none; }
+
+  main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+
+  .meta-grid {
+    display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 16px;
+  }
+  .meta-grid .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; align-self: center; }
+  .meta-grid .v { font-family: ui-monospace, SFMono-Regular, monospace; word-break: break-word; }
+  .meta-grid .v.instruction { font-family: inherit; font-style: italic; }
+
+  .section-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 16px 0 8px; font-weight: 600;
+  }
+
+  .msg {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 10px; overflow: hidden;
+  }
+  .msg-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; background: var(--panel-2); border-bottom: 1px solid var(--border);
+    font-size: 12px;
+  }
+  .msg-head .role-badge {
+    text-transform: uppercase; letter-spacing: 0.06em; font-weight: 700; font-size: 11px;
+    padding: 2px 8px; border-radius: 4px; color: #0d1117;
+  }
+  .role-developer .role-badge { background: var(--role-developer); }
+  .role-user .role-badge { background: var(--role-user); }
+  .role-assistant .role-badge { background: var(--role-assistant); }
+  .role-tool .role-badge { background: var(--role-tool); }
+  .msg-head .meta { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
+  .msg-head .spacer { flex: 1; }
+  .msg-head button.toggle {
+    padding: 2px 8px; font-size: 11px; background: transparent; color: var(--muted);
+  }
+  .msg-body { padding: 12px 16px; }
+  .msg-body.collapsed { display: none; }
+
+  .toolcall {
+    background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 8px;
+  }
+  .toolcall:first-child { margin-top: 0; }
+  .toolcall-head {
+    padding: 6px 12px; display: flex; gap: 12px; align-items: center;
+    border-bottom: 1px solid var(--border); font-size: 12px;
+  }
+  .toolcall-name {
+    font-family: ui-monospace, monospace; font-weight: 700; color: var(--accent);
+  }
+  .toolcall-id { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11px; }
+  .toolcall-body { padding: 8px 12px; font-size: 13px; }
+
+  .json {
+    background: #0d1117; border-radius: 6px; padding: 10px 12px;
+    font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12.5px;
+    overflow-x: auto;
+  }
+  .json .k { color: var(--json-key); }
+  .json .s { color: var(--json-string); }
+  .json .n { color: var(--json-number); }
+  .json .b { color: var(--json-bool); }
+  .json .null { color: var(--json-null); }
+  .json .punct { color: var(--muted); }
+  .json .raw-note {
+    color: var(--muted); font-style: italic; font-size: 11px; margin-bottom: 4px; display: block;
+  }
+
+  details.tools-block, details.postcond-block {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 12px;
+  }
+  details > summary {
+    cursor: pointer; padding: 10px 16px; user-select: none;
+    color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  details[open] > summary { border-bottom: 1px solid var(--border); }
+  details .details-body { padding: 12px 16px; }
+
+  .tool-schema {
+    background: #0d1117; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 12px; margin-bottom: 8px;
+  }
+  .tool-schema-name { font-family: ui-monospace, monospace; color: var(--accent); font-weight: 700; }
+  .tool-schema-desc { color: var(--muted); font-size: 12px; margin-top: 4px; white-space: pre-wrap; }
+
+  .empty-state {
+    text-align: center; color: var(--muted); padding: 80px 20px;
+  }
+  .empty-state h2 { color: var(--text); margin-bottom: 8px; }
+  .empty-state code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+
+  .text-content { white-space: pre-wrap; word-break: break-word; }
+  .chip {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    font-size: 11px; font-family: ui-monospace, monospace; color: var(--muted);
+  }
+  .kbd-hint { color: var(--muted); font-size: 11px; }
+  .err { color: #ff7b72; padding: 12px; background: var(--panel); border: 1px solid #ff7b72; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <h1>SFT JSONL Viewer</h1>
+  <label class="file-pick">
+    Open .jsonl
+    <input type="file" id="file-input" accept=".jsonl,.json,.txt" />
+  </label>
+  <button id="btn-first" title="First (Home)">⏮</button>
+  <button id="btn-prev" title="Previous (←)">◀</button>
+  <input type="number" id="idx-input" min="1" value="1" />
+  <span id="total-label" class="file-info">/ 0</span>
+  <button id="btn-next" title="Next (→)">▶</button>
+  <button id="btn-last" title="Last (End)">⏭</button>
+  <span class="kbd-hint">← →  jump  Home/End</span>
+  <span class="spacer"></span>
+  <span id="file-info" class="file-info"></span>
+</header>
+
+<main id="main">
+  <div class="empty-state" id="empty">
+    <h2>Open a JSONL file to begin</h2>
+    <p>Click <strong>Open .jsonl</strong> above, or drop a file anywhere on the page.</p>
+    <p style="margin-top: 24px;">Try one of these:</p>
+    <p>
+      <code>data/posttraining/sft/sft/train.jsonl</code><br/>
+      <code>data/posttraining/sft/sft/val.jsonl</code><br/>
+      <code>data/posttraining/sft/eval/heldout.jsonl</code>
+    </p>
+  </div>
+  <div id="view" style="display:none;"></div>
+</main>
+
+<script>
+"use strict";
+
+const state = {
+  records: [],
+  idx: 0,
+  filename: "",
+};
+
+const el = (id) => document.getElementById(id);
+
+// --- JSON syntax highlighting -------------------------------------------------
+function escapeHTML(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function highlightJSON(value) {
+  // value is an already-parsed JS value; we re-stringify with 2-space indent
+  // and then tokenize the resulting string for syntax coloring.
+  let json;
+  try {
+    json = JSON.stringify(value, null, 2);
+  } catch (e) {
+    return escapeHTML(String(value));
+  }
+  if (json === undefined) json = "undefined";
+  json = escapeHTML(json);
+  // Order matters: strings (including keys) first, then numbers, then bools/null.
+  return json.replace(
+    /("(?:\\.|[^"\\])*"\s*:)|("(?:\\.|[^"\\])*")|\b(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b|\b(true|false)\b|\b(null)\b/g,
+    (m, key, str, num, bool, nul) => {
+      if (key) return `<span class="k">${key}</span>`;
+      if (str) return `<span class="s">${str}</span>`;
+      if (num) return `<span class="n">${num}</span>`;
+      if (bool) return `<span class="b">${bool}</span>`;
+      if (nul) return `<span class="null">${nul}</span>`;
+      return m;
+    }
+  );
+}
+
+function jsonBlock(value, noteIfReparsed) {
+  const html = highlightJSON(value);
+  const note = noteIfReparsed
+    ? `<span class="raw-note">↳ parsed from JSON string</span>`
+    : "";
+  return `<div class="json">${note}<pre>${html}</pre></div>`;
+}
+
+// --- Try to parse a string as JSON; return [parsedOrOriginal, didParse] -------
+function tryParseJSON(s) {
+  if (typeof s !== "string") return [s, false];
+  const trimmed = s.trim();
+  if (!trimmed) return [s, false];
+  const c = trimmed[0];
+  if (c !== "{" && c !== "[") return [s, false];
+  try {
+    return [JSON.parse(trimmed), true];
+  } catch {
+    return [s, false];
+  }
+}
+
+// --- Message rendering --------------------------------------------------------
+function renderToolCall(tc) {
+  const fn = (tc.function && tc.function.name) || tc.name || "?";
+  const rawArgs = (tc.function && tc.function.arguments) ?? tc.arguments;
+  let argsHTML = "";
+  if (rawArgs === undefined || rawArgs === null || rawArgs === "") {
+    argsHTML = `<div class="json"><pre><span class="punct">(no arguments)</span></pre></div>`;
+  } else if (typeof rawArgs === "string") {
+    const [parsed, ok] = tryParseJSON(rawArgs);
+    argsHTML = ok ? jsonBlock(parsed, true) : `<pre class="json">${escapeHTML(rawArgs)}</pre>`;
+  } else {
+    argsHTML = jsonBlock(rawArgs, false);
+  }
+  const id = tc.id ? `<span class="toolcall-id">${escapeHTML(tc.id)}</span>` : "";
+  return `
+    <div class="toolcall">
+      <div class="toolcall-head">
+        <span class="toolcall-name">${escapeHTML(fn)}</span>
+        ${id}
+      </div>
+      <div class="toolcall-body">${argsHTML}</div>
+    </div>
+  `;
+}
+
+function renderMessage(msg, i) {
+  const role = msg.role || "?";
+  const klass = `msg role-${role}`;
+  // Collapse the developer/system prompt by default — it's huge and repetitive.
+  const startCollapsed = role === "developer" || role === "system";
+
+  let bodyHTML = "";
+  const parts = [];
+
+  if (typeof msg.content === "string" && msg.content.length > 0) {
+    if (role === "tool") {
+      const [parsed, ok] = tryParseJSON(msg.content);
+      if (ok) {
+        parts.push(jsonBlock(parsed, true));
+      } else {
+        parts.push(`<div class="text-content">${escapeHTML(msg.content)}</div>`);
+      }
+    } else {
+      parts.push(`<div class="text-content">${escapeHTML(msg.content)}</div>`);
+    }
+  } else if (msg.content != null && typeof msg.content !== "string") {
+    parts.push(jsonBlock(msg.content, false));
+  }
+
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+    parts.push(msg.tool_calls.map(renderToolCall).join(""));
+  }
+
+  if (parts.length === 0) {
+    parts.push(`<div class="text-content" style="color: var(--muted); font-style: italic;">(empty)</div>`);
+  }
+
+  // Meta line: turn index, tool name, tool_call_id where useful.
+  const metaBits = [`#${i}`];
+  if (role === "tool") {
+    if (msg.name) metaBits.push(`name=${msg.name}`);
+    if (msg.tool_call_id) metaBits.push(`for ${msg.tool_call_id}`);
+  }
+
+  bodyHTML = parts.join("");
+
+  return `
+    <div class="${klass}">
+      <div class="msg-head">
+        <span class="role-badge">${escapeHTML(role)}</span>
+        <span class="meta">${metaBits.map(escapeHTML).join(" · ")}</span>
+        <span class="spacer"></span>
+        <button class="toggle" data-target="msg-body-${i}">${startCollapsed ? "expand" : "collapse"}</button>
+      </div>
+      <div class="msg-body ${startCollapsed ? "collapsed" : ""}" id="msg-body-${i}">${bodyHTML}</div>
+    </div>
+  `;
+}
+
+// --- Top-level record render --------------------------------------------------
+function renderRecord(rec) {
+  const view = el("view");
+  const metaRows = [];
+  const metaKeys = ["scenario_id", "intent_id", "fixture", "instruction_source", "instruction"];
+  for (const k of metaKeys) {
+    if (rec[k] !== undefined) {
+      const vClass = k === "instruction" ? "v instruction" : "v";
+      metaRows.push(`<div class="k">${k}</div><div class="${vClass}">${escapeHTML(String(rec[k]))}</div>`);
+    }
+  }
+
+  // Surface a compact tool_calls_flat summary chip line if present.
+  let flatHTML = "";
+  if (Array.isArray(rec.tool_calls_flat) && rec.tool_calls_flat.length > 0) {
+    const chips = rec.tool_calls_flat.map((tc) => {
+      const name = tc.name || "?";
+      return `<span class="chip">${escapeHTML(name)}</span>`;
+    }).join(" ");
+    flatHTML = `
+      <div class="section-title">tool_calls_flat summary</div>
+      <div style="margin-bottom: 12px;">${chips}</div>
+    `;
+  }
+
+  // Messages.
+  const messages = Array.isArray(rec.messages) ? rec.messages : [];
+  const msgsHTML = messages.map((m, i) => renderMessage(m, i)).join("");
+
+  // Tools schema (collapsed).
+  let toolsHTML = "";
+  if (Array.isArray(rec.tools) && rec.tools.length > 0) {
+    const inner = rec.tools.map((t) => {
+      const f = t.function || t;
+      const name = f.name || "?";
+      const desc = f.description || "";
+      return `
+        <div class="tool-schema">
+          <div class="tool-schema-name">${escapeHTML(name)}</div>
+          ${desc ? `<div class="tool-schema-desc">${escapeHTML(desc)}</div>` : ""}
+          <details style="margin-top:6px;">
+            <summary style="padding:4px 0; font-size: 11px;">parameters</summary>
+            ${jsonBlock(f.parameters || {}, false)}
+          </details>
+        </div>
+      `;
+    }).join("");
+    toolsHTML = `
+      <details class="tools-block">
+        <summary>Available tools (${rec.tools.length})</summary>
+        <div class="details-body">${inner}</div>
+      </details>
+    `;
+  }
+
+  // Postcondition (open by default — small).
+  let postcondHTML = "";
+  if (rec.postcondition !== undefined) {
+    postcondHTML = `
+      <details class="postcond-block" open>
+        <summary>Postcondition</summary>
+        <div class="details-body">${jsonBlock(rec.postcondition, false)}</div>
+      </details>
+    `;
+  }
+
+  // Any unknown top-level keys, dumped at the bottom for completeness.
+  const knownKeys = new Set([
+    "scenario_id", "intent_id", "fixture", "instruction", "instruction_source",
+    "messages", "tools", "tool_calls_flat", "postcondition",
+  ]);
+  const extras = {};
+  for (const k of Object.keys(rec)) {
+    if (!knownKeys.has(k)) extras[k] = rec[k];
+  }
+  let extrasHTML = "";
+  if (Object.keys(extras).length > 0) {
+    extrasHTML = `
+      <details class="tools-block">
+        <summary>Other fields (${Object.keys(extras).length})</summary>
+        <div class="details-body">${jsonBlock(extras, false)}</div>
+      </details>
+    `;
+  }
+
+  view.innerHTML = `
+    <div class="meta-grid">${metaRows.join("")}</div>
+    ${flatHTML}
+    <div class="section-title">Conversation (${messages.length} ${messages.length === 1 ? "turn" : "turns"})</div>
+    ${msgsHTML}
+    ${toolsHTML}
+    ${postcondHTML}
+    ${extrasHTML}
+  `;
+
+  // Wire up collapse toggles.
+  view.querySelectorAll("button.toggle").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = el(btn.dataset.target);
+      if (!target) return;
+      const collapsed = target.classList.toggle("collapsed");
+      btn.textContent = collapsed ? "expand" : "collapse";
+    });
+  });
+}
+
+// --- Navigation ---------------------------------------------------------------
+function show(idx) {
+  if (state.records.length === 0) return;
+  state.idx = Math.max(0, Math.min(state.records.length - 1, idx));
+  el("idx-input").value = state.idx + 1;
+  el("total-label").textContent = `/ ${state.records.length}`;
+  el("btn-prev").disabled = state.idx === 0;
+  el("btn-first").disabled = state.idx === 0;
+  el("btn-next").disabled = state.idx === state.records.length - 1;
+  el("btn-last").disabled = state.idx === state.records.length - 1;
+  el("empty").style.display = "none";
+  el("view").style.display = "block";
+  try {
+    renderRecord(state.records[state.idx]);
+  } catch (e) {
+    el("view").innerHTML = `<div class="err">Render error on record ${state.idx + 1}: ${escapeHTML(e.message)}</div>`;
+  }
+  // Scroll back to top of the page each navigation so the header is in view.
+  window.scrollTo({ top: 0, behavior: "instant" });
+}
+
+el("btn-prev").addEventListener("click", () => show(state.idx - 1));
+el("btn-next").addEventListener("click", () => show(state.idx + 1));
+el("btn-first").addEventListener("click", () => show(0));
+el("btn-last").addEventListener("click", () => show(state.records.length - 1));
+el("idx-input").addEventListener("change", () => {
+  const v = parseInt(el("idx-input").value, 10);
+  if (!Number.isNaN(v)) show(v - 1);
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")) return;
+  if (e.key === "ArrowLeft") { show(state.idx - 1); e.preventDefault(); }
+  else if (e.key === "ArrowRight") { show(state.idx + 1); e.preventDefault(); }
+  else if (e.key === "Home") { show(0); e.preventDefault(); }
+  else if (e.key === "End") { show(state.records.length - 1); e.preventDefault(); }
+});
+
+// --- File loading -------------------------------------------------------------
+function loadText(text, filename) {
+  const lines = text.split(/\r?\n/);
+  const records = [];
+  const errors = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    try {
+      records.push(JSON.parse(line));
+    } catch (e) {
+      errors.push(`line ${i + 1}: ${e.message}`);
+    }
+  }
+  state.records = records;
+  state.filename = filename || "";
+  el("file-info").textContent = filename
+    ? `${filename} — ${records.length} record${records.length === 1 ? "" : "s"}${errors.length ? ` (${errors.length} parse errors)` : ""}`
+    : "";
+  if (errors.length > 0) {
+    console.warn(`JSONL parse errors:`, errors.slice(0, 10));
+  }
+  if (records.length === 0) {
+    el("empty").style.display = "block";
+    el("view").style.display = "none";
+    el("view").innerHTML = "";
+    el("empty").innerHTML = `<h2>No records found</h2><p>${escapeHTML(filename || "(no file)")} produced 0 records${errors.length ? ` (${errors.length} parse errors — see console)` : ""}.</p>`;
+    return;
+  }
+  show(0);
+}
+
+el("file-input").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => loadText(String(reader.result || ""), file.name);
+  reader.onerror = () => alert("Failed to read file: " + reader.error);
+  reader.readAsText(file);
+});
+
+// Drag-and-drop anywhere on the page.
+document.addEventListener("dragover", (e) => { e.preventDefault(); });
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => loadText(String(reader.result || ""), file.name);
+  reader.onerror = () => alert("Failed to read file: " + reader.error);
+  reader.readAsText(file);
+});
+</script>
+</body>
+</html>
