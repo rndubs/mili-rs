@@ -343,7 +343,94 @@ when it lands.
 `set_state(81)`, the prin_stress1 binding survives. The user keeps
 their colored bar.
 
-### Delta 5 — Bench regression baseline
+### Delta 5 — `list_results` tool + lookup-pattern training
+
+**Today:** When a user says *"first principal stress"*, the v1 model has
+no learned mapping to `prin_stress1`. It emits `show({"result": "first principal stress"})`,
+the show fails to resolve, and (after Delta 4) the dispatch becomes a
+no-op. The user sees no result rendered. The model has no escape: it
+can't look up what's actually in the database.
+
+**Change:** Add a new `list_results` tool the model can call to fetch
+the loaded database's queriable-result catalog merged with a static
+alias table (`data/posttraining/grammar/result_aliases.json`). The tool
+is **agent-local** — the agent intercepts it before the typed-Cmd
+dispatcher and returns the catalog directly, so no proto change, no
+new `Cmd` variant. The agent's `AgentTurnCtx` gains a
+`catalog_provider: Arc<dyn Fn() -> Vec<ResultEntry> + Send + Sync>`
+closure plumbed in by `VizService::agent_chat`.
+
+The model is trained on three flavors of result-selection scenarios:
+
+| Flavor | Example | Trained tool sequence |
+| --- | --- | --- |
+| Direct canonical | "show prin_stress1" | `show({"result":"prin_stress1"})` (no lookup) |
+| Lookup-then-show | "show the first principal stress" | `list_results({})` → `show({"result":"prin_stress1"})` |
+| Recovery | "show foo" (unresolvable typo) | `show({"result":"foo"})` → tool returns `ok=false, error_kind=nonexistent_result` → `list_results({})` → `show({"result":"<closest>"})` or terminating text |
+
+The catalog is **not** injected into the developer prompt on every
+turn. Most prompts (`set state to 5`, `next state`, `disable material 2`,
+`reset view`, `colormap rainbow`, `select brick 1-10`, `clear selection`)
+do not need the catalog; lazy-load only pays the ~600–1000 token cost
+on the ~30% of turns that actually need it.
+
+**Tool inventory addition (`tools.json`):**
+
+```json
+{
+  "name": "list_results",
+  "description": "List queriable result names available in the currently loaded database, with common natural-language aliases. Call this when the user refers to a result by descriptive language ('first principal stress', 'x velocity') instead of by canonical name, or as a recovery step after a `show` fails with `nonexistent_result`. Returns a JSON list of {name, aliases, type, description}.",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}
+```
+
+**Tool response shape (agent-local):**
+
+```json
+{
+  "ok": true,
+  "results": [
+    {"name": "prin_stress1", "type": "derived",
+     "aliases": ["first principal stress", "principal stress 1", "σ₁"],
+     "description": "First principal stress eigenvalue"},
+    {"name": "vel_x", "type": "primal",
+     "aliases": ["x velocity", "velocity x", "vx"],
+     "description": "Velocity x component"},
+    "..."
+  ]
+}
+```
+
+**Alias-table content** (`result_aliases.json`) — hand-curated and/or
+teacher-generated table covering the ~155 queriable svars in the test
+corpora. **This file's content design lives in the M8 plan**
+([`m8-corpus-distillation.md`](m8-corpus-distillation.md) §"Static
+content artifacts").
+
+**Why this design over alternatives:**
+
+- *Always-inject the catalog into the developer prompt* — burns ~600–1000
+  tokens on every turn, ~70% of which don't need it. The model also has
+  no signal for "this catalog matters" vs "ignore it."
+- *Server-side fuzzy match in `apply(Cmd::Show)`* — silent
+  reinterpretation of user/agent intent. Lossy; no way to surface
+  "this is a guess." Easy to misdirect.
+- *Train the canonical mappings into model weights directly* — the
+  270M parameter budget is small; database-specific catalog memorization
+  doesn't generalize to new mili files. Fails on every fixture the model
+  didn't see at training time.
+
+The lookup-tool approach keeps the **mapping table as data** (versioned
+JSON, easy to update without retraining), keeps **catalog-specific
+knowledge runtime-resolved** (works for any database), and uses the
+model's general language understanding for the natural-language →
+canonical mapping (no memorization burden).
+
+### Delta 6 — Bench regression baseline
 
 **Today:** The headline metric is rev-22's 77/81 L3 (95.06%) under the
 inflating-mechanisms.
@@ -453,24 +540,41 @@ typing `show foo_nonexistent` after a valid `show vx` preserves the
 
 ---
 
+## Scope split: M7 (this doc) vs M8
+
+M7 is **the code-only milestone**. Every Delta here is a code change
+plus a retrain on the *existing* 82-record corpus re-rendered through
+the new `assemble.py`. No new training data is generated.
+
+**M8** ([`m8-corpus-distillation.md`](m8-corpus-distillation.md)) is
+the **corpus campaign** that follows: scale the SFT corpus by ~50×–500×
+via teacher-model distillation (Gemma-4-31B as teacher → FG-270M as
+student), with model-in-the-loop validation to keep junk out of the
+training set. M8 is sequenced *after* M7's Gate 3 honest baseline so we
+know what the corpus regeneration is buying.
+
+Delta 5's `list_results` tool wiring (Rust + Python sides) lands in M7
+so the runtime supports the tool the M8 corpus is generated against;
+M8 produces the **training scenarios that use it**. The split keeps
+M7 reviewable and gives M8 a working runtime to generate against.
+
 ## v2 deferrals
 
 | Item | Why deferred |
 | --- | --- |
-| Claude-generated corpus expansion | M7 is structural; need to know what the honest baseline is before paying for more data. After M7 Gate 3, if the bench L3 drops below ~60% and the failure-mode histogram concentrates on `wrong_termination` even after retraining, the existing corpus has hit its ceiling and Claude rollouts become the next move. |
-| Compound-instruction coverage ("last plot state", "first state", "next 10 states") | The v1 model failed on these because the corpus has thin coverage. Earned-when after M7 lands and we have an honest gap to close. |
 | Tool coverage (7 unmapped tools in the M4 list) | Independent of model; this is griz surface area, not training. |
 | Streaming / cancellation polish | Independent of M7; carries over from M4 "next moves." |
 | GEPA re-tuning of the system prompt | The current prompt's sha256 prefix `9f36d0deb5e98a89` is pinned. Re-tuning is its own milestone with its own measurement. Don't combine. |
+| Catalog injection on every turn (the rejected design) | Considered for Delta 5 and rejected in favor of the lazy-lookup `list_results` pattern — see Delta 5 §"Why this design over alternatives." If `list_results` proves insufficient (model never calls it when it should), revisit. |
 
 ---
 
 ## Path forward
 
-1. **Delta 4 first (server, defensive).** Smallest risk, biggest
-   immediate UX win for the existing v1 GGUF without retraining. Lets
-   us continue smoke-testing while the training-side fixes are in
-   flight.
+1. **Delta 4 (server, defensive).** ✅ **LANDED 2026-05-25
+   (commit 679bd48).** Smallest risk, biggest immediate UX win for the
+   existing v1 GGUF without retraining. Lets us continue smoke-testing
+   while the training-side fixes are in flight.
 2. **Delta 1 (assemble.py + re-render).** Re-tokenize, re-run loss
    probe (§B). Confirm visibility rises and decoded region contains
    the termination.
@@ -478,10 +582,20 @@ typing `show foo_nonexistent` after a valid `show vx` preserves the
    so the first re-trained run is graded under the new rule.
 4. **Delta 3 (driver no-oracle).** Land alongside Delta 2; they
    compose.
-5. **Retrain (§C → SFT cluster run).** Probably 5–10 min wall clock.
-6. **Validation §D → §E.** Record the v2 baseline. Update the M5/M6
-   "Resolved questions log" with the new numbers.
-7. **Decide on v2 deferrals based on the §D failure-mode histogram.**
+5. **Delta 5 (`list_results` tool + agent wiring).** Land the runtime
+   side before the M8 corpus generation needs to produce scenarios
+   that use it. Pure code; no retraining required for the runtime
+   itself.
+6. **Retrain on the re-rendered 82-record corpus (§C → SFT cluster).**
+   Probably 5–10 min wall clock. The terminating-text fix is the only
+   training change here; the corpus content stays the same.
+7. **Validation §D → §E.** Record the v2 baseline under the new
+   verifier/driver. Update the M5/M6 "Resolved questions log" with the
+   new numbers.
+8. **Gate to M8** — review the §D failure-mode histogram. If the
+   honest baseline is < the M8 target (see m8-corpus-distillation.md
+   §"Success criteria"), proceed to M8's teacher-distillation campaign.
 
 Each step is independently revertable. Deltas 1–3 can land in any
-order on the Python side; Delta 4 is independent of all of them.
+order on the Python side; Delta 5 is independent of Deltas 1–3
+(different files, different layers) and can land in parallel.
