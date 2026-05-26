@@ -1,9 +1,15 @@
-//! FunctionGemma agent via llama-server (Phase 6+ development milestone).
+//! FunctionGemma agent via llama-server (M4 — stock FG-270M path).
 //! Connects to a locally-running llama-server on the `/completion` endpoint,
 //! builds FunctionGemma-format prompts, parses tool calls, and dispatches them
 //! through the griz command vocabulary.
 //!
-//! Activation: `--agent llamacpp` at server startup.
+//! **Status (M6, 2026-05-25):** superseded by [`crate::llamacpp_agent_v1`].
+//! This module stays compiled for its unit-test fixture coverage of the
+//! bespoke prompt renderer + escape-form parser, but is no longer
+//! re-exported as `LlamaCppAgent`. `--agent llamacpp` now resolves to the
+//! v1 module.
+
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::pin::Pin;

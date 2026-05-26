@@ -38,6 +38,7 @@ mod clip;
 mod flight;
 mod geometry;
 mod llamacpp_agent;
+mod llamacpp_agent_v1;
 mod raw;
 pub use agent::{
     encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, DispatchOutcome, MockAgent,
@@ -45,7 +46,10 @@ pub use agent::{
 };
 pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
-pub use llamacpp_agent::LlamaCppAgent;
+// M6 (`planning/mili-viz/mili-agent/m6-client-integration-v1.md`) — the v1
+// SFT agent is the live `LlamaCppAgent`. The M4 module stays compiled for
+// fallback / fixture-test continuity but is no longer re-exported.
+pub use llamacpp_agent_v1::LlamaCppAgent;
 pub use raw::{parse_line, parse_raw, to_raw};
 
 /// Conventional Flight ticket for the result catalog
