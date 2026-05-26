@@ -19,7 +19,7 @@
   array; layout becomes `MVG2:verts_f32x3+idx_u32+trimat_u32+scalar_f32`
   when a scalar is present, falls back to the M2 `MVG1` when not (so
   unknown/empty `show` still draws the bare hull — `show` never
-  errors).
+  errors). **Superseded by M7 Delta 4** — see "Supersessions" below.
 - `ResultState.{min,max}` carries the griz autoscale (the finite-data
   range at the current state); the `legend` command stays a
   client-side display clamp over this range.
@@ -37,3 +37,19 @@ and bare-hull fallback for unknown results.
   git history; the index lives in [`status.md`](status.md). Any
   decision that *superseded* an earlier one is called out in
   status.md's TL;DR.
+
+## Supersessions
+
+- **2026-05-25 (M7 Delta 4)** — Decision 13's "unknown/empty `show`
+  falls back to the bare hull" is split: empty svar still renders the
+  bare hull (the "unmap result" affordance), but an **unresolvable
+  non-empty svar is now a no-op** — the broadcast carries
+  `geometry: None` and the session's prior result binding is preserved.
+  Driving incident: live griz panel against the v1 SFT model issued
+  `show("81")` after a successful `set_state(81)`, which clobbered the
+  prior `prin_stress1` binding. The M7 fix protects the user's state
+  from runaway agent emissions; the typed-command surface also benefits
+  (a typo no longer drops the current result). See
+  [`mili-agent/m7-bench-live-parity.md`](mili-agent/m7-bench-live-parity.md)
+  §"Delta 4" and the new gating test
+  `crates/mili-viz-server/tests/m3_primal.rs::show_failure_preserves_prior_result`.

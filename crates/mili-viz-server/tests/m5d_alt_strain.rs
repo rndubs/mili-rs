@@ -191,11 +191,36 @@ async fn derived_alt_principal_strain() {
     // ── totality: unknown / empty still fall to the M3 bare hull;
     //    `prin_strain1_alt` now RESOLVES to an MVG2 scalar (the explicit
     //    closure of phase-4-m5c.md Decision 28). ─────────────────────
-    for name in ["not_a_derived_xyz", ""] {
-        let g = show(&mut client, &mut sub, &svc, name).await.0;
+    // Empty svar still intentionally renders the bare hull (the
+    // "unmap result" affordance is preserved across M7 Delta 4).
+    {
+        let g = show(&mut client, &mut sub, &svc, "").await.0;
         assert!(
             g.layout.starts_with("MVG3:") && g.scalar.is_empty(),
-            "{name:?} → bare hull, no error"
+            "empty svar → bare hull, no error"
+        );
+    }
+    // Unknown svar is now an M7 Delta 4 no-op (broadcast carries
+    // geometry: None; prior result preserved). See
+    // `m7-bench-live-parity.md`.
+    {
+        let mut req = Request::new(pb::Command {
+            cmd: Some(pb::command::Cmd::Show(pb::Show {
+                result: "not_a_derived_xyz".to_string(),
+                component: String::new(),
+                opts: HashMap::new(),
+            })),
+        });
+        req.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "m5d".parse().unwrap());
+        assert!(client.execute(req).await.unwrap().into_inner().ok);
+        let d = sub.message().await.unwrap().unwrap();
+        let Some(pb::state_delta::Payload::Result(r)) = d.payload else {
+            panic!("show must broadcast a ResultState");
+        };
+        assert!(
+            r.geometry.is_none(),
+            "M7 Delta 4: unresolved → geometry None"
         );
     }
 

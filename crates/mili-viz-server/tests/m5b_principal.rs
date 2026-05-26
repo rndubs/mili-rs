@@ -236,12 +236,30 @@ async fn derived_principal_families() {
         .into_inner();
     let _snap = sub.message().await.unwrap().unwrap();
 
-    // ── unknown derived name → graceful M3 bare-hull fallback ─────────
-    let unknown = show(&mut client, &mut sub, &svc, "not_a_derived").await.0;
-    assert!(
-        unknown.layout.starts_with("MVG3:") && unknown.scalar.is_empty(),
-        "unsupported derived → bare hull, no error"
-    );
+    // ── unknown derived name → M7 Delta 4 no-op ──────────────────────
+    // Pre-M7 fell back to the bare hull; M7 makes the dispatch a no-op
+    // (broadcast carries geometry: None, prior result preserved). See
+    // `m7-bench-live-parity.md`.
+    {
+        let mut req = Request::new(pb::Command {
+            cmd: Some(pb::command::Cmd::Show(pb::Show {
+                result: "not_a_derived".to_string(),
+                component: String::new(),
+                opts: HashMap::new(),
+            })),
+        });
+        req.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "m5b".parse().unwrap());
+        assert!(client.execute(req).await.unwrap().into_inner().ok);
+        let d = sub.message().await.unwrap().unwrap();
+        let Some(pb::state_delta::Payload::Result(r)) = d.payload else {
+            panic!("show must broadcast a ResultState");
+        };
+        assert!(
+            r.geometry.is_none(),
+            "M7 Delta 4: unresolved → geometry None"
+        );
+    }
 
     // Step to a stressed state — state 1 is the undeformed initial
     // state (all stresses/strains zero), where the identities are

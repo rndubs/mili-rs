@@ -175,13 +175,37 @@ async fn primal_result_colors_the_mesh() {
         "no scalar bit when no result mapped"
     );
 
-    // ── unknown result → graceful fallback to the bare hull ──────────
-    let unknown = show(&mut client, &mut sub, &svc, "no_such_svar").await;
-    assert!(
-        unknown.layout.starts_with("MVG3:"),
-        "unknown → bare hull (MVG3)"
-    );
-    assert!(unknown.scalar.is_empty());
+    // ── unknown result → no-op (M7 Delta 4) ──────────────────────────
+    // Pre-M7 this was a graceful "fallback to bare hull" per
+    // phase-4-m3.md Decision 13. M7 (`m7-bench-live-parity.md`) flips
+    // this so the dispatch is a no-op: the broadcast carries
+    // `geometry: None` (the agent reads that as ok=false) and the
+    // session's prior `result` binding is preserved. This protects
+    // the live UI from runaway agent calls that would otherwise
+    // clobber a valid result with a typo. Tested via raw broadcast
+    // since the `show` helper expects a GeometryRef.
+    {
+        let mut req = Request::new(pb::Command {
+            cmd: Some(pb::command::Cmd::Show(pb::Show {
+                result: "no_such_svar".to_string(),
+                component: String::new(),
+                opts: std::collections::HashMap::new(),
+            })),
+        });
+        req.metadata_mut()
+            .insert(CLIENT_ID_HEADER, "m3".parse().unwrap());
+        let reply = client.execute(req).await.unwrap().into_inner();
+        assert!(reply.ok, "show no_such_svar still dispatches");
+        let d = sub.message().await.unwrap().unwrap();
+        let Some(pb::state_delta::Payload::Result(res)) = d.payload else {
+            panic!("show must broadcast a ResultState");
+        };
+        assert_eq!(res.result, "no_such_svar");
+        assert!(
+            res.geometry.is_none(),
+            "M7 Delta 4: unresolvable svar carries geometry: None"
+        );
+    }
 
     // ── element scalar (`sand` on `brick`) → MVG3 with scalar column ─
     let sand = show(&mut client, &mut sub, &svc, "sand").await;
@@ -209,4 +233,85 @@ async fn primal_result_colors_the_mesh() {
     let bare2 = show(&mut client, &mut sub, &svc, "").await;
     assert!(bare2.layout.starts_with("MVG3:"));
     assert!(bare2.scalar.is_empty());
+}
+
+/// M7 Delta 4 (`m7-bench-live-parity.md`): an unresolvable non-empty
+/// `show` must not clobber a prior valid result binding. Live trigger
+/// is a runaway agent emission like `show("81")` after `set_state(81)`.
+#[tokio::test]
+async fn show_failure_preserves_prior_result() {
+    let path = corpus_path(&["serial", "basic1", "basic1.pltA"]);
+    if !path.exists() {
+        eprintln!("skip: serial/basic1 absent (run scripts/setup-parity.sh)");
+        return;
+    }
+    let svc = VizService::builder().build();
+    let (mut client, _h) = spawn_in_process(svc.clone()).await.unwrap();
+
+    let mut load = Request::new(pb::Command {
+        cmd: Some(pb::command::Cmd::Load(pb::Load {
+            root: path.to_string_lossy().into_owned(),
+        })),
+    });
+    load.metadata_mut()
+        .insert(CLIENT_ID_HEADER, "m3".parse().unwrap());
+    assert!(client.execute(load).await.unwrap().into_inner().ok);
+
+    let mut sub = client
+        .subscribe(Request::new(pb::SubscribeRequest::default()))
+        .await
+        .unwrap()
+        .into_inner();
+    let _snap = sub.message().await.unwrap().unwrap();
+
+    // Bind a real result first.
+    let sand = show(&mut client, &mut sub, &svc, "sand").await;
+    assert!(sand.layout.starts_with("MVG3:"));
+    assert!(!sand.scalar.is_empty());
+
+    // Fire the unresolvable show — the destructive shape an agent
+    // would emit after a state-nav call.
+    let mut bad = Request::new(pb::Command {
+        cmd: Some(pb::command::Cmd::Show(pb::Show {
+            result: "81".to_string(),
+            component: String::new(),
+            opts: std::collections::HashMap::new(),
+        })),
+    });
+    bad.metadata_mut()
+        .insert(CLIENT_ID_HEADER, "m3".parse().unwrap());
+    let bad_reply = client.execute(bad).await.unwrap().into_inner();
+    assert!(bad_reply.ok, "execute itself still succeeds (dispatch ran)");
+    let bad_delta = sub.message().await.unwrap().unwrap();
+    let Some(pb::state_delta::Payload::Result(bad_res)) = bad_delta.payload else {
+        panic!("show broadcast must carry a ResultState");
+    };
+    assert_eq!(bad_res.result, "81");
+    assert!(
+        bad_res.geometry.is_none(),
+        "M7 Delta 4: unresolvable svar carries geometry: None"
+    );
+
+    // Subscribe with a fresh stream — its opening snapshot exposes
+    // server-side `session.result`. Under M7 Delta 4 this is still the
+    // `sand` binding; pre-M7 it would have been overwritten with the
+    // bare-hull view of `result: "81"`.
+    let mut sub2 = client
+        .subscribe(Request::new(pb::SubscribeRequest::default()))
+        .await
+        .unwrap()
+        .into_inner();
+    let snap = sub2.message().await.unwrap().unwrap();
+    let Some(pb::state_delta::Payload::Snapshot(s)) = snap.payload else {
+        panic!("opening delta must be a snapshot");
+    };
+    let preserved = s.result.expect("snapshot carries result state");
+    assert_eq!(
+        preserved.result, "sand",
+        "prior valid `sand` binding preserved across unresolvable show"
+    );
+    assert!(
+        preserved.geometry.is_some(),
+        "preserved result keeps its geometry blob"
+    );
 }

@@ -38,6 +38,7 @@ mod clip;
 mod flight;
 mod geometry;
 mod llamacpp_agent;
+mod llamacpp_agent_v1;
 mod raw;
 pub use agent::{
     encode_placeholder_frame, ran_summary, AgentBackend, AgentTurnCtx, DispatchOutcome, MockAgent,
@@ -45,7 +46,10 @@ pub use agent::{
 };
 pub use flight::FlightGeometryService;
 use geometry::MeshTopology;
-pub use llamacpp_agent::LlamaCppAgent;
+// M6 (`planning/mili-viz/mili-agent/m6-client-integration-v1.md`) — the v1
+// SFT agent is the live `LlamaCppAgent`. The M4 module stays compiled for
+// fallback / fixture-test continuity but is no longer re-exported.
+pub use llamacpp_agent_v1::LlamaCppAgent;
 pub use raw::{parse_line, parse_raw, to_raw};
 
 /// Conventional Flight ticket for the result catalog
@@ -797,26 +801,57 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
         Cmd::Show(show) => {
             // M3: the queried svar is `component` if set, else
             // `result` (griz leaf-scalar semantics, phase-4-m3.md
-            // Decision 13). An unresolvable result falls back to the
-            // M2 bare hull; an empty result is the no-scalar mesh view.
+            // Decision 13).
+            //
+            // M7 Delta 4 (m7-bench-live-parity.md): an *unresolvable
+            // non-empty* svar is a no-op — preserve any prior valid
+            // result binding instead of clobbering it with the M3
+            // "fallback to bare hull." This protects the live griz
+            // panel from runaway agent emissions like `show("81")`
+            // after a successful `set_state(81)`. An empty svar still
+            // intentionally renders the bare hull (the "unmap result"
+            // affordance). The broadcast for an unresolvable show
+            // still carries `result: <bad name>` with `geometry: None`
+            // so the agent's `outcome_to_response` reads ok=false and
+            // signals the failure back to the model.
             let svar = if show.component.is_empty() {
                 show.result.clone()
             } else {
                 show.component.clone()
             };
-            let (geometry, min, max) = match s.geometry_ref(&svar) {
-                Some((g, lo, hi)) => (Some(g), lo, hi),
-                None => (None, 0.0, 0.0),
-            };
-            let r = pb::ResultState {
-                result: show.result,
-                component: show.component,
-                min,
-                max,
-                geometry,
-            };
-            s.result = Some(r.clone());
-            (D::DeltaResult, P::Result(r))
+            let resolves = svar.is_empty()
+                || s.topo
+                    .as_ref()
+                    .zip(s.db.as_ref())
+                    .is_some_and(|(topo, db)| topo.vertex_scalar(db, &svar, s.state).is_some());
+            if resolves {
+                let (geometry, min, max) = match s.geometry_ref(&svar) {
+                    Some((g, lo, hi)) => (Some(g), lo, hi),
+                    None => (None, 0.0, 0.0),
+                };
+                let r = pb::ResultState {
+                    result: show.result,
+                    component: show.component,
+                    min,
+                    max,
+                    geometry,
+                };
+                s.result = Some(r.clone());
+                (D::DeltaResult, P::Result(r))
+            } else {
+                // Failed resolution — broadcast carries the failure
+                // (geometry: None on the requested name) so the agent
+                // reports ok=false to the model, but session.result
+                // stays put. The client's prior valid render survives.
+                let r = pb::ResultState {
+                    result: show.result,
+                    component: show.component,
+                    min: 0.0,
+                    max: 0.0,
+                    geometry: None,
+                };
+                (D::DeltaResult, P::Result(r))
+            }
         }
         Cmd::Contour(c) => {
             let (geometry, min, max) = match s.geometry_ref(&c.result) {
