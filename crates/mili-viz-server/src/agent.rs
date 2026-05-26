@@ -60,6 +60,31 @@ pub(crate) type SeqAllocator = Arc<dyn Fn() -> u64 + Send + Sync>;
 pub(crate) type Dispatcher = Arc<dyn Fn(pb::command::Cmd, &str) -> DispatchOutcome + Send + Sync>;
 /// Folds an emitted agent event into the running per-turn transcript.
 pub(crate) type EventRecorder = Arc<dyn Fn(&str, &pb::agent_event::Ev) + Send + Sync>;
+/// Snapshot of the queriable result catalog for the currently-loaded
+/// database, surfaced to the agent when it calls the
+/// **agent-local** `list_results` tool
+/// ([`planning/mili-viz/mili-agent/m7-bench-live-parity.md`](../../planning/mili-viz/mili-agent/m7-bench-live-parity.md)
+/// §"Delta 5"). The tool is intentionally not a proto `Cmd` — the
+/// agent intercepts it before the typed dispatcher and returns this
+/// list directly, so the model can map natural-language references
+/// ("first principal stress") to canonical svars (`prin_stress1`)
+/// without a round-trip through the typed command surface.
+pub(crate) type CatalogProvider = Arc<dyn Fn() -> Vec<ResultEntry> + Send + Sync>;
+
+/// One queriable-result row served to the agent by the
+/// `list_results` tool. `kind` is `"primal"` for a directly stored
+/// svar and `"derived"` for a computed result; `aliases` is the
+/// (possibly empty) list of natural-language phrasings curated in
+/// `data/posttraining/grammar/result_aliases.json` (M8 Stage B1 —
+/// `m8-corpus-distillation.md` §"Artifact 1"). `description` is a
+/// short human-readable summary, or empty if no alias entry exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultEntry {
+    pub name: String,
+    pub kind: String,
+    pub description: String,
+    pub aliases: Vec<String>,
+}
 
 /// What a `Dispatcher` returns: the broadcast seq (for tool-end
 /// correlation with the `StateDelta` stream) plus the structured
@@ -97,6 +122,10 @@ pub struct AgentTurnCtx {
     /// (`phase-5-m6.md` Decision 97). Late joiners see the assistant
     /// text + tool-line summaries via the opening `DELTA_SNAPSHOT`.
     pub(crate) recorder: EventRecorder,
+    /// Snapshot of the queriable result catalog (m7 Delta 5). The
+    /// backend calls this in response to a `list_results` tool emit
+    /// and replies to the model with the JSON-serialized list.
+    pub(crate) catalog: CatalogProvider,
     /// `Interrupt` (M6e) flips this; the backend must observe it.
     pub(crate) cancel: Arc<AtomicBool>,
 }
@@ -121,6 +150,16 @@ impl AgentTurnCtx {
     /// resolvable returns a `Payload::Result` with `geometry: None`).
     pub fn dispatch(&self, cmd: pb::command::Cmd) -> DispatchOutcome {
         (self.dispatcher)(cmd, &self.origin_client_id)
+    }
+
+    /// Snapshot the queriable-result catalog of the loaded database
+    /// merged with the curated alias table. Empty when no database is
+    /// loaded — the agent's `list_results` handler signals this to the
+    /// model as `ok: true` with an empty `results` array so the model
+    /// can prompt the user to load a database.
+    #[must_use]
+    pub fn catalog(&self) -> Vec<ResultEntry> {
+        (self.catalog)()
     }
 
     /// Broadcast an `AgentStatus` for this turn. Empty `detail` is

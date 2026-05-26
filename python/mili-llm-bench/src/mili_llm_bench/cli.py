@@ -384,6 +384,7 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
     # synth never expose it. ``getattr`` with the pinned default
     # keeps both code paths shape-compatible.
     temperature = getattr(args, "temperature", None)
+    allow_oracle_early_exit = getattr(args, "allow_oracle_early_exit", False)
     return EvalConfig(
         step_cap=args.step_cap if args.step_cap is not None else base.step_cap,
         max_new_tokens=(
@@ -399,6 +400,7 @@ def _resolve_eval_config(args: argparse.Namespace) -> EvalConfig:
             else base.per_turn_timeout_s
         ),
         system_prompt=base.system_prompt,
+        allow_oracle_early_exit=bool(allow_oracle_early_exit),
     )
 
 
@@ -759,6 +761,16 @@ def _add_run_common_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--seed", type=int, default=None, help="Provider RNG seed (default: 0)."
+    )
+    parser.add_argument(
+        "--allow-oracle-early-exit",
+        action="store_true",
+        help=(
+            "Restore the pre-M7 behavior where the driver short-circuits "
+            "the loop as soon as the postcondition oracle grades L3 "
+            "mid-rollout. Off by default — m7-bench-live-parity.md "
+            "Delta 3 — so bench numbers reflect live-UX behavior."
+        ),
     )
 
 

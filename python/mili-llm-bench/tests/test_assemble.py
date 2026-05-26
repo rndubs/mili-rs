@@ -480,6 +480,64 @@ class TestProjectRecord:
         args = assistant["tool_calls"][0]["function"]["arguments"]
         assert args == {"root": "d3samp6"}
 
+    def test_terminating_assistant_text_appended(self, tmp_path: Path) -> None:
+        """m7 Delta 1 — every projected SFT record must end on a
+        content-only assistant message so the trainer's loss-mask
+        includes a positive "stop after success" signal. See
+        m7-bench-live-parity.md §"Delta 1" and the loss-mask probe
+        in preflight-4-loss-mask.md §"Single-row probe"."""
+        path = tmp_path / "rollouts.jsonl"
+        _write_rollouts(
+            path,
+            [
+                _make_rollout(
+                    scenario_id="synth-001",
+                    intent_id="load",
+                    fixture="d3samp6",
+                    instruction="load d3samp6",
+                    tool_calls_flat=[
+                        {"name": "load", "arguments": {"root": "d3samp6"}}
+                    ],
+                )
+            ],
+        )
+        rollouts = A.dedup_retained(A.load_rollouts([path]))
+        rec = A.project_sft_record(rollouts[0], _build_minimal_registry())
+        last = rec["messages"][-1]
+        assert last == {"role": "assistant", "content": A.DEFAULT_TERMINATING_TEXT}
+        # The penultimate message is still the tool response — the
+        # helper appends, it doesn't replace.
+        assert rec["messages"][-2]["role"] == "tool"
+
+    def test_terminating_assistant_text_idempotent(self, tmp_path: Path) -> None:
+        """If the source rollout already terminates on a content-only
+        assistant message (a future training corpus that emits final
+        text natively), the projector leaves it alone — no duplicate
+        terminator, no overwrite."""
+        path = tmp_path / "rollouts.jsonl"
+        rec_dict = _make_rollout(
+            scenario_id="synth-001",
+            intent_id="load",
+            fixture="d3samp6",
+            instruction="load d3samp6",
+            tool_calls_flat=[{"name": "load", "arguments": {"root": "d3samp6"}}],
+        )
+        rec_dict["messages"].append({"role": "assistant", "content": "Loaded."})
+        _write_rollouts(path, [rec_dict])
+        rollouts = A.dedup_retained(A.load_rollouts([path]))
+        rec = A.project_sft_record(rollouts[0], _build_minimal_registry())
+        assert rec["messages"][-1] == {"role": "assistant", "content": "Loaded."}
+        # No extra "Done." appended.
+        ack_count = sum(
+            1
+            for m in rec["messages"]
+            if m.get("role") == "assistant"
+            and isinstance(m.get("content"), str)
+            and m["content"].strip()
+            and not m.get("tool_calls")
+        )
+        assert ack_count == 1
+
     def test_tool_call_arguments_normalized_multi_call(
         self, tmp_path: Path
     ) -> None:
@@ -609,6 +667,47 @@ class TestEndToEnd:
             ("material", "cylinder"),
             ("compound-material-then-show", "cylinder"),
         }
+
+    def test_every_assembled_record_terminates_on_assistant_content(
+        self, tmp_path: Path
+    ) -> None:
+        """m7 Delta 1 validation §A — the audit script the M7 plan
+        prescribes, codified as a unit test. Every record across
+        train / val / heldout must end on a content-only assistant
+        message so the loss-mask covers the "stop after success"
+        signal. If this fails, ``assemble.project_sft_record`` is no
+        longer appending the terminator — investigate before retraining."""
+        rollouts_path = tmp_path / "rollouts.jsonl"
+        self._seed_two_intent_two_fixture(rollouts_path)
+        out_dir = tmp_path / "out"
+        A.assemble(
+            [rollouts_path],
+            out_dir,
+            registry=_build_minimal_registry(),
+            floor_per_intent=1,
+            compound_ratio_min=0.20,
+            val_fraction=0.10,
+        )
+        for split in ("sft/train.jsonl", "sft/val.jsonl", "eval/heldout.jsonl"):
+            path = out_dir / split
+            if not path.exists():
+                continue
+            for line in path.read_text().splitlines():
+                rec = json.loads(line)
+                last = rec["messages"][-1]
+                assert last.get("role") == "assistant", (
+                    f"{split}/{rec['scenario_id']} must end on assistant; "
+                    f"got role={last.get('role')!r}"
+                )
+                content = last.get("content")
+                assert isinstance(content, str) and content.strip(), (
+                    f"{split}/{rec['scenario_id']} terminating assistant "
+                    f"message must carry non-empty content"
+                )
+                assert not last.get("tool_calls"), (
+                    f"{split}/{rec['scenario_id']} terminator must not "
+                    f"carry tool_calls"
+                )
 
     def test_contamination_clean(self, tmp_path: Path) -> None:
         rollouts_path = tmp_path / "rollouts.jsonl"

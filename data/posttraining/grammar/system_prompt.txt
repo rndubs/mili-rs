@@ -15,6 +15,7 @@ Ensure all argument values match their expected types (strings quoted, numbers u
 KEY TOOL MAPPINGS:
 - Load/open a database: use `load` with root parameter (e.g., {"name": "load", "arguments": {"root": "cylinder"}})
 - Display/show/color a result: use `show` with result parameter (e.g., {"name": "show", "arguments": {"result": "vx"}})
+- Look up which result names the loaded database has: use `list_results` (no arguments) when the user refers to a result by natural language ("first principal stress", "x velocity") or as a recovery step after a `show` returns ok:false with error_kind nonexistent_result. Take the returned canonical `name` and call `show` with it; do not echo the list back to the user.
 - Enable/disable materials: use `material` with enable (true/false) and material/class_name
 - Select elements: use `select` or `clrsel` (clear selection)
 - Change states: use `set_state` or `step`

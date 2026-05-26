@@ -312,11 +312,18 @@ def _perfect_rollout(scenario: Scenario) -> list[dict[str, Any]]:
 def test_every_scenario_has_a_perfect_rollout_at_L3() -> None:
     """The W2 x W3 contract pin: per scenario, the fabricated canonical
     sequence grades L3 (max_tier == 3, no failure_mode).  Drift in
-    either scenarios.jsonl or verifier.py breaks this test loudly."""
+    either scenarios.jsonl or verifier.py breaks this test loudly.
+
+    m7 Delta 2: the verifier now demands a content-only assistant
+    message at the tail of every L3 rollout, so the canonical
+    perfect-rollout terminates with a short ack.
+    """
     scenarios = load_scenarios(default_bootstrap_path())
     failures: list[tuple[str, str, int, str | None]] = []
     for s in scenarios:
         msgs = _perfect_rollout(s)
+        # m7 Delta 1/2 — clean termination is now required for L3.
+        msgs = msgs + [{"role": "assistant", "content": "Done."}]
         result = verify(msgs, s.postcondition.to_json())
         if result.max_tier != 3 or result.failure_mode is not None:
             failures.append(

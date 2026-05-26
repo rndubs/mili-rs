@@ -1,8 +1,29 @@
 # M7 — close the bench-vs-live parity gap
 
-**Status (2026-05-25):** Plan only. M6 wired the v1 SFT GGUF end-to-end
-into the griz client AI panel ([m6-client-integration-v1.md](m6-client-integration-v1.md)).
-Live smoke-test against `bar71.pltA` immediately exposed the headline
+**Status (2026-05-25):** **Code-only deltas landed locally; awaiting
+cluster retrain + bench (Gate 7) before declaring done.** Branch:
+`setup-posttraining-m7`.
+
+| Delta | What it does | Status |
+| --- | --- | --- |
+| 1 | `assemble.py` appends `{"role": "assistant", "content": "Done."}` after the final tool message in every SFT record | ✅ landed (idempotent helper, audit test in `test_assemble.py`) |
+| 2 | `verifier.py` adds `wrong_termination` failure mode that downgrades pc-ok rollouts lacking a content-only assistant tail to L2 | ✅ landed (3 new tests; 10 L3 happy-paths updated to include the terminator) |
+| 3 | Driver loop runs to natural termination by default; legacy oracle early-exit gated behind `EvalConfig.allow_oracle_early_exit=False` + `--allow-oracle-early-exit` CLI flag | ✅ landed |
+| 4 | `apply(Cmd::Show)` preserves prior `session.result` on resolution failure | ✅ landed on `main` (commit 679bd48) |
+| 5 | `list_results` agent-local tool wired through `AgentTurnCtx::catalog` closure + Rust handler + `tools.json` + `system_prompt.txt` (sha256[:16] now `34cc473118246dfb`, 2415 bytes) | ✅ landed (4 new Rust tests; tools.json regenerated to 19 entries) |
+
+**What's not done locally:** Gate 7 (validation §D — bench re-run
+under the new verifier/driver against the retrained corpus). Requires
+GPU + the SFT cluster. The plan below remains the source of truth for
+what Gate 7 must measure.
+
+---
+
+## Context (pre-fix problem statement)
+
+M6 wired the v1 SFT GGUF end-to-end into the griz client AI panel
+([m6-client-integration-v1.md](m6-client-integration-v1.md)). Live
+smoke-test against `bar71.pltA` immediately exposed the headline
 problem: **the rev-22 95.06% L3 bench number is not a faithful predictor
 of live UX**. The model runs to `max_tokens=256` on every generation,
 emits one well-formed `<start_function_call>` envelope followed by ~17

@@ -602,8 +602,11 @@ def test_registry_loads_from_artifact() -> None:
     assert _REGISTRY.has("load")
     assert _REGISTRY.has("snapshot")
     assert _REGISTRY.has("griz_raw")
-    # 18 tools per W1 (15 typed Command variants + query + snapshot + griz_raw).
-    assert len(_REGISTRY.all()) == 18
+    # m7 Delta 5 — agent-local `list_results` joins the inventory.
+    assert _REGISTRY.has("list_results")
+    # 19 tools per W1 (15 typed Command variants + query + snapshot
+    # + griz_raw + list_results).
+    assert len(_REGISTRY.all()) == 19
     assert "type" in _REGISTRY.input_schema("load")
 
 

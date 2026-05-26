@@ -128,6 +128,15 @@ class EvalConfig:
     seed: int = 0
     per_turn_timeout_s: float = 60.0
     system_prompt: str = _DEFAULT_SYSTEM_PROMPT
+    # m7 Delta 3 — when False (the honest default), the driver loop
+    # runs until the model emits final_text or the step_cap fires;
+    # the postcondition oracle is *only* used for grading after the
+    # rollout completes, never to short-circuit the loop. When True,
+    # the legacy auto-terminate behavior is restored (the rollout
+    # stops as soon as the verifier grades L3 mid-loop). Off by
+    # default so bench numbers reflect live-UX behavior rather than
+    # oracle-truncated tool-call sequences.
+    allow_oracle_early_exit: bool = False
 
 
 # Constant string for v0 — every record in the W4b rollout writer
@@ -274,14 +283,25 @@ def run_one_scenario(
             if turn.kind == "error" and turn.error_kind == "timeout":
                 _append_stop(messages, "timeout")
                 break
-            # tool_calls turn — keep looping unless the postcondition
-            # is already met. Weak open-weight models often emit
-            # repeat-the-call-N-times trajectories and never produce a
-            # final_text; this auto-terminate keeps the harness from
-            # converting a correct first call into a step_cap_hit.
-            if verifier.verify(messages, postcondition).max_tier == 3:
-                terminated_cleanly = True
-                break
+            # tool_calls turn — keep looping. m7 Delta 3: by default we
+            # let the loop run to natural termination (final_text or
+            # step_cap), since the live agent has no postcondition
+            # oracle. The legacy auto-terminate behavior is preserved
+            # behind ``EvalConfig.allow_oracle_early_exit`` for callers
+            # that need to reproduce pre-M7 bench numbers. Under the
+            # opt-in flag the loop uses the pre-M7 pc-satisfied
+            # contract (``wrong_termination`` did not exist), so a
+            # rollout that meets the postcondition but doesn't close
+            # on content still short-circuits the loop.
+            if config.allow_oracle_early_exit:
+                vr_mid = verifier.verify(messages, postcondition)
+                pre_m7_pc_satisfied = vr_mid.max_tier == 3 or (
+                    vr_mid.max_tier == 2
+                    and vr_mid.failure_mode == "wrong_termination"
+                )
+                if pre_m7_pc_satisfied:
+                    terminated_cleanly = True
+                    break
 
         if not terminated_cleanly and not any(
             t.kind == "error" and t.error_kind == "timeout" for t in turns

@@ -135,7 +135,11 @@ def test_run_eval_k_pass_writes_k_rollouts_per_scenario(tmp_path: Path) -> None:
         scenarios,
         provider_factory=lambda _s: provider,
         dispatcher_factory=_loader_dispatcher_factory,
-        config=EvalConfig(),
+        # m7 Delta 3 — Stage 5 unit tests scripted around the
+        # auto-terminate mock pathway; opt back into the oracle so the
+        # retention mechanics under test are preserved without giving
+        # every mock script an explicit final_text turn.
+        config=EvalConfig(allow_oracle_early_exit=True),
         out_dir=out_dir,
         provider_name="mock",
         registry=_REGISTRY,
@@ -183,10 +187,14 @@ def test_run_eval_retention_filters_by_l3_verdict_under_passing(
     failing_call = ProviderOutput(
         tool_calls=[{"name": "load", "arguments": "not-a-dict"}]  # type: ignore[arg-type]
     )
+    # m7 Delta 1/2 — the rollout must close on a content-only
+    # assistant message for the verifier to award L3, so the first
+    # pass's second turn emits a short ack.
+    final_text_call = ProviderOutput(final_text="done.")
 
     @dataclass
     class _AlternatingProvider:
-        _idx: int = 0
+        _pass_idx: int = 0
 
         def generate(
             self,
@@ -197,9 +205,14 @@ def test_run_eval_retention_filters_by_l3_verdict_under_passing(
             max_new_tokens: int,
             seed: int,
         ) -> ProviderOutput:
-            out = passing_call if self._idx == 0 else failing_call
-            self._idx += 1
-            return out
+            # When the model has already responded to a tool call in
+            # this pass, emit the terminating ack so the pass closes
+            # cleanly.
+            has_tool_response = any(m.get("role") == "tool" for m in messages)
+            if has_tool_response:
+                self._pass_idx += 1
+                return final_text_call
+            return passing_call if self._pass_idx == 0 else failing_call
 
     provider = _AlternatingProvider()
 
@@ -208,6 +221,10 @@ def test_run_eval_retention_filters_by_l3_verdict_under_passing(
         [scenario],
         provider_factory=lambda _s: provider,
         dispatcher_factory=_loader_dispatcher_factory,
+        # m7 Delta 3 — natural-termination default. The mock provider
+        # above scripts an explicit final_text turn after the tool
+        # response so the passing pass grades L3 under the strict
+        # verifier.
         config=EvalConfig(),
         out_dir=out_dir,
         provider_name="mock",
@@ -255,7 +272,7 @@ def test_run_eval_per_k_seed_differs_across_passes(tmp_path: Path) -> None:
         scenarios,
         provider_factory=lambda _s: provider,
         dispatcher_factory=_loader_dispatcher_factory,
-        config=EvalConfig(seed=42),
+        config=EvalConfig(seed=42, allow_oracle_early_exit=True),
         out_dir=out_dir,
         provider_name="mock",
         registry=_REGISTRY,
@@ -320,7 +337,11 @@ def test_run_eval_k_eq_1_preserves_pre_rev11_record_shape(tmp_path: Path) -> Non
         scenarios,
         provider_factory=lambda _s: provider,
         dispatcher_factory=_loader_dispatcher_factory,
-        config=EvalConfig(),
+        # m7 Delta 3 — Stage 5 unit tests scripted around the
+        # auto-terminate mock pathway; opt back into the oracle so the
+        # retention mechanics under test are preserved without giving
+        # every mock script an explicit final_text turn.
+        config=EvalConfig(allow_oracle_early_exit=True),
         out_dir=out_dir,
         provider_name="mock",
         registry=_REGISTRY,

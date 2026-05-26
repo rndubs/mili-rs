@@ -60,6 +60,13 @@ def _stop(reason: str) -> dict[str, Any]:
     return {"role": "system", "content": f"stop:{reason}"}
 
 
+def _final_text(text: str = "Done.") -> dict[str, Any]:
+    """m7 Delta 1 terminator — content-only assistant message that
+    closes a clean rollout so the verifier's ``_terminates_cleanly``
+    check accepts L3."""
+    return {"role": "assistant", "content": text}
+
+
 # ---------------------------------------------------------------------------
 # L0 / L1 / L2 / L3 tier tests.
 # ---------------------------------------------------------------------------
@@ -134,6 +141,7 @@ def test_tier_l3_perfect_rollout() -> None:
                 "current_time": 0.0,
             },
         ),
+        _final_text(),
     ]
     result = verify(msgs, {"kind": "state_index", "expect": {"state": 1}})
     assert result.max_tier == 3
@@ -304,6 +312,64 @@ def test_failure_mode_driver_level(reason: str) -> None:
     assert r.failure_mode == reason
 
 
+def test_failure_mode_wrong_termination_pc_holds_but_no_final_text() -> None:
+    """m7 Delta 2 — postcondition holds, all calls graded L2, but the
+    rollout never emits a content-only assistant message → downgrade
+    to L2 / wrong_termination so the bench reflects the live-UX gap."""
+    msgs = [
+        _user("show eff_stress"),
+        _assistant(_call("1", "show", {"result": "eff_stress"})),
+        _tool(
+            "1",
+            "show",
+            {"ok": True, "result": "eff_stress", "range": [0.0, 1.0]},
+        ),
+        # No terminating final_text — the v1 SFT model never learned
+        # to emit one (see m7-bench-live-parity.md §"Root-cause").
+    ]
+    r = verify(msgs, {"kind": "active_result", "expect": {"result": "eff_stress"}})
+    assert r.max_tier == 2
+    assert r.failure_mode == "wrong_termination"
+
+
+def test_failure_mode_wrong_termination_trailing_tool_calls_only() -> None:
+    """A trailing assistant turn that contains only ``tool_calls`` (no
+    content) is also not a clean termination."""
+    msgs = [
+        _user("show eff_stress"),
+        _assistant(_call("1", "show", {"result": "eff_stress"})),
+        _tool(
+            "1",
+            "show",
+            {"ok": True, "result": "eff_stress", "range": [0.0, 1.0]},
+        ),
+        # Runaway-style: emits another tool_calls turn after success.
+        _assistant(_call("2", "show", {"result": "eff_stress"})),
+    ]
+    r = verify(msgs, {"kind": "active_result", "expect": {"result": "eff_stress"}})
+    assert r.max_tier == 2
+    assert r.failure_mode == "wrong_termination"
+
+
+def test_failure_mode_wrong_termination_driver_stop_dominates() -> None:
+    """A driver-level stop (step_cap_hit / timeout) outranks the
+    termination check — the rollout is reported as ``step_cap_hit``,
+    not ``wrong_termination``, so the bench histogram pins blame on
+    the most informative cause."""
+    msgs = [
+        _user("show eff_stress"),
+        _assistant(_call("1", "show", {"result": "eff_stress"})),
+        _tool(
+            "1",
+            "show",
+            {"ok": True, "result": "eff_stress", "range": [0.0, 1.0]},
+        ),
+        _stop("step_cap_hit"),
+    ]
+    r = verify(msgs, {"kind": "active_result", "expect": {"result": "eff_stress"}})
+    assert r.failure_mode == "step_cap_hit"
+
+
 def test_failure_modes_taxonomy_is_complete_and_closed() -> None:
     """All 16 entries in the closed taxonomy are reachable above."""
     expected = {
@@ -320,6 +386,7 @@ def test_failure_modes_taxonomy_is_complete_and_closed() -> None:
         "wrong_result",
         "wrong_range",
         "wrong_materials",
+        "wrong_termination",
         "step_cap_hit",
         "token_cap_hit",
         "timeout",
@@ -340,6 +407,7 @@ def test_pc_state_index_happy_via_step() -> None:
         _tool("1", "load", {"ok": True, "num_states": 101}),
         _assistant(_call("2", "step", {"dir": "NEXT"})),
         _tool("2", "step", {"ok": True, "state": 2, "num_states": 101}),
+        _final_text(),
     ]
     r = verify(msgs, {"kind": "state_index", "expect": {"state": 2}})
     assert r.max_tier == 3
@@ -361,6 +429,7 @@ def test_pc_selection_set_happy() -> None:
         _user("brick 1-10"),
         _assistant(_call("1", "select", {"class_name": "brick", "range": "1-10"})),
         _tool("1", "select", {"ok": True, "selection": {"brick": "1-10"}}),
+        _final_text(),
     ]
     r = verify(
         msgs, {"kind": "selection_set", "expect": {"selection": {"brick": "1-10"}}}
@@ -388,6 +457,7 @@ def test_pc_active_result_happy() -> None:
             "show",
             {"ok": True, "result": "eff_stress", "range": [0.0, 1.0]},
         ),
+        _final_text(),
     ]
     r = verify(msgs, {"kind": "active_result", "expect": {"result": "eff_stress"}})
     assert r.max_tier == 3
@@ -412,6 +482,7 @@ def test_pc_result_range_happy_within_tol() -> None:
             "show",
             {"ok": True, "result": "eff_stress", "range": [0.0, 9.9999995]},
         ),
+        _final_text(),
     ]
     r = verify(
         msgs,
@@ -442,6 +513,7 @@ def test_pc_materials_visible_happy() -> None:
         _user("hide 1"),
         _assistant(_call("1", "material", {"enable": False, "material": 1})),
         _tool("1", "material", {"ok": True, "hidden_materials": [1]}),
+        _final_text(),
     ]
     r = verify(
         msgs, {"kind": "materials_visible", "expect": {"hidden_materials": [1]}}
@@ -466,6 +538,7 @@ def test_pc_camera_named_view_reset_happy() -> None:
         _user("reset"),
         _assistant(_call("1", "view", {"reset": True})),
         _tool("1", "view", {"ok": True}),
+        _final_text(),
     ]
     r = verify(msgs, {"kind": "camera_named_view", "expect": {"action": "reset"}})
     assert r.max_tier == 3
@@ -476,6 +549,7 @@ def test_pc_camera_named_view_colormap_happy() -> None:
         _user("cool"),
         _assistant(_call("1", "colormap", {"name": "cool"})),
         _tool("1", "colormap", {"ok": True}),
+        _final_text(),
     ]
     r = verify(
         msgs,
@@ -489,6 +563,7 @@ def test_pc_camera_named_view_named_view_save_happy() -> None:
         _user("save view as front"),
         _assistant(_call("1", "named_view", {"op": "SAVE", "name": "front"})),
         _tool("1", "named_view", {"ok": True}),
+        _final_text(),
     ]
     r = verify(
         msgs,
@@ -523,6 +598,7 @@ def test_pc_query_value_happy() -> None:
             )
         ),
         _tool("1", "query", {"ok": True, "table": {"sx": [12.3]}}),
+        _final_text(),
     ]
     r = verify(
         msgs,

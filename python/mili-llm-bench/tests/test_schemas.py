@@ -77,9 +77,10 @@ def test_render_and_raw_are_absent() -> None:
     assert EXCLUDED_COMMANDS == {"raw", "render"}
 
 
-def test_total_tool_count_is_eighteen() -> None:
-    # 15 typed Command variants + 2 read tools + 1 fallback = 18.
-    assert len(derive_tools()) == 18
+def test_total_tool_count_is_nineteen() -> None:
+    # 15 typed Command variants + 2 read tools + 1 fallback
+    # + 1 agent-local lookup tool (m7 Delta 5 `list_results`) = 19.
+    assert len(derive_tools()) == 19
 
 
 def test_tools_are_sorted_by_name_for_stable_diffs() -> None:
