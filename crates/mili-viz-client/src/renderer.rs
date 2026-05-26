@@ -879,6 +879,12 @@ pub fn render_shell_to_image(
     let mut renderer = Renderer::new(device, queue, OFFSCREEN_FORMAT);
     renderer.upload_mesh(mesh, range, "cool");
     let mut egui = crate::egui_layer::EguiPaint::new(&renderer.device, OFFSCREEN_FORMAT);
+    // VB-006: pre-apply the theme's visuals **before** `EguiPaint::paint`
+    // runs `ctx.run_ui`. `egui::Context::set_visuals` only takes effect
+    // on the next `begin_pass`, but the headless path runs exactly one;
+    // the windowed app's in-`run_ui` `set_visuals` line is fine because
+    // it has a next frame, but a one-shot composite never gets there.
+    egui.set_visuals(state.theme.visuals());
 
     let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen shell target"),

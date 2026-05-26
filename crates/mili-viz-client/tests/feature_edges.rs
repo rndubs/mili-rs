@@ -50,6 +50,7 @@ fn coplanar_quad_keeps_boundary_drops_diagonal() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     let feats = edge_set(&quad.compute_feature_edges(DEFAULT_THRESHOLD));
     let want: std::collections::BTreeSet<(u32, u32)> =
@@ -106,6 +107,7 @@ fn cube_mesh() -> Mesh {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     }
 }
 
@@ -191,6 +193,7 @@ fn cylinder_wall_at_30deg_keeps_zero_lateral_edges() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     let feats = mesh.compute_feature_edges(DEFAULT_THRESHOLD);
     // Boundary edges only: 2N (top rim + bottom rim).
@@ -267,6 +270,7 @@ fn icosahedron_below_threshold_drops_all_edges() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     let n_unique = mesh.edge_indices().len() / 2;
     assert_eq!(n_unique, 30, "icosahedron has 30 edges");
@@ -289,6 +293,7 @@ fn empty_mesh_compute_returns_empty() {
         scalars: None,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     };
     assert!(m.compute_feature_edges(DEFAULT_THRESHOLD).is_empty());
 }

@@ -88,6 +88,12 @@ pub struct ClipBuffers {
     pub tri_flags: Vec<u32>,
     pub edges: Vec<u32>,
     pub scalar: Option<Vec<f32>>,
+    /// Packed `(class_idx, elem_row)` per triangle (wireframe-parity
+    /// #6 path (a)). Kept triangles inherit the source element's
+    /// member id; cap triangles carry [`crate::geometry::TRI_MEMBER_NONE`]
+    /// since the cap is a geometric intersection without a single
+    /// owning element.
+    pub tri_member_id: Vec<u32>,
 }
 
 /// Per-element output, accumulated by the parallel pass and merged
@@ -475,6 +481,7 @@ pub fn clip_topology(
     let mut indices: Vec<u32> = Vec::new();
     let mut tri_material: Vec<u32> = Vec::new();
     let mut tri_flags: Vec<u32> = Vec::new();
+    let mut tri_member_id: Vec<u32> = Vec::new();
     let mut edges: Vec<u32> = Vec::new();
 
     let resolve = |vr: &VertexRef, vert_base: u32| -> u32 {
@@ -484,7 +491,12 @@ pub fn clip_topology(
         }
     };
 
-    for out in outputs.into_iter().flatten() {
+    for (out, &(ci, ei)) in outputs
+        .into_iter()
+        .zip(work.iter())
+        .filter_map(|(o, w)| o.map(|x| (x, w)))
+    {
+        let kept_member = crate::geometry::pack_tri_member_id(ci as u32, ei as u32);
         let vert_base = (verts.len() / 3) as u32;
         for (i, v) in out.new_verts.iter().enumerate() {
             verts.extend_from_slice(v);
@@ -527,6 +539,7 @@ pub fn clip_topology(
             indices.push(resolve(&tri[2], vert_base));
             tri_material.push(mat);
             tri_flags.push(0);
+            tri_member_id.push(kept_member);
         }
         for tri in &out.cap_tris {
             indices.push(resolve(&tri[0], vert_base));
@@ -534,6 +547,7 @@ pub fn clip_topology(
             indices.push(resolve(&tri[2], vert_base));
             tri_material.push(out.cap_mat);
             tri_flags.push(0);
+            tri_member_id.push(crate::geometry::TRI_MEMBER_NONE);
         }
         for e in &out.edges {
             edges.push(resolve(&e[0], vert_base));
@@ -548,6 +562,7 @@ pub fn clip_topology(
         tri_flags,
         edges,
         scalar,
+        tri_member_id,
     }
 }
 
@@ -589,6 +604,7 @@ pub fn append_clip(
     }
     into.tri_material.extend_from_slice(&tail.tri_material);
     into.tri_flags.extend_from_slice(&tail.tri_flags);
+    into.tri_member_id.extend_from_slice(&tail.tri_member_id);
     for &e in &tail.edges {
         let rebased = if (e as usize) < base_n_verts {
             e

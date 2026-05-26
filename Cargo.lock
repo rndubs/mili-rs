@@ -1741,6 +1741,8 @@ dependencies = [
  "egui-winit",
  "egui_plot",
  "glam",
+ "hyper-util",
+ "image",
  "mili-viz-proto",
  "mili-viz-server",
  "pollster",
@@ -1748,6 +1750,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tonic",
+ "tower",
  "wgpu",
  "winit",
 ]

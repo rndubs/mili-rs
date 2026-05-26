@@ -96,6 +96,7 @@ fn json_round_trip_is_loss_free() {
         overlay_bbox: false,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        show_bottom_tabs: false,
         interactive_clip: false,
     };
     let back = PersistedTweaks::from_json(&t.to_json()).expect("valid JSON round-trips");
@@ -128,6 +129,7 @@ fn apply_to_is_pure_and_touches_only_persisted_fields() {
         overlay_bbox: false,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        show_bottom_tabs: false,
         interactive_clip: false,
     };
     t.apply_to(&mut s);
@@ -135,6 +137,7 @@ fn apply_to_is_pure_and_touches_only_persisted_fields() {
     // Persisted fields took the tweak values.
     assert_eq!(s.theme, Theme::Light);
     assert!(s.dock_collapsed);
+    assert!(!s.show_bottom_tabs);
     assert!(!s.overlays.title && !s.overlays.bbox);
     // Round-trips back out exactly.
     assert_eq!(PersistedTweaks::from_state(&s), t);
@@ -152,6 +155,7 @@ fn is_persisted_action_classifies_exactly_the_tweak_actions() {
         UiAction::ToggleOverlay(Overlay::Bbox),
         UiAction::SetTheme(Theme::Light),
         UiAction::SetDockCollapsed(true),
+        UiAction::SetShowBottomTabs(false),
     ] {
         assert!(is_persisted_action(&a), "{a:?} is a persisted tweak");
     }
@@ -182,6 +186,7 @@ fn save_to_then_load_from_round_trips_on_disk() {
         overlay_bbox: true,
         theme: ThemePref::Light,
         dock_collapsed: true,
+        show_bottom_tabs: false,
         interactive_clip: false,
     };
     t.save_to(&path)
@@ -259,10 +264,18 @@ async fn composite_render() {
     let lpx = render_shell_to_image(w, h, &camera, &mesh, None, &mut light)
         .expect("adapter was present for render (a)");
     common::assert_mesh_visible(&lpx, 20, "light: viewport centre should still be the mesh");
-    // TODO(VB-006): the menu-chrome relight assertion is disabled —
-    // `Theme` switching is a no-op in single-frame headless renders
-    // (`egui::Context::set_visuals` only takes effect on the next
-    // frame's `begin_pass`, but `render_shell_to_image` runs one).
-    // See `planning/mili-viz/bug-tracker.md` VB-006.
-    let _ = (dpx, lpx);
+    // VB-006: the menu-chrome relight assertion (re-enabled). Pre-fix,
+    // a JSON-roundtripped Light config still composed byte-identical to
+    // Dark because the in-`run_ui` `set_visuals` queued for the next
+    // frame that never happens. The fix pre-applies visuals on the
+    // `EguiPaint` context before `run_ui` (see
+    // `crate::render_shell_to_image`).
+    let dark_lum = common::mean_chrome_luminance_top(&dpx, w, 26);
+    let light_lum = common::mean_chrome_luminance_top(&lpx, w, 26);
+    assert!(
+        light_lum - dark_lum > 100.0,
+        "VB-006: roundtripped Light config should relight menu chrome \
+         (dark mean luminance {dark_lum:.1}, light mean luminance \
+         {light_lum:.1} — expected light - dark > 100)"
+    );
 }

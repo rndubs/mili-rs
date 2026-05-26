@@ -130,13 +130,45 @@ async fn catalog_blob_is_well_formed_and_flight_byte_identical() {
     ded.sort_unstable();
     ded.dedup();
     assert_eq!(ded.len(), derived.len(), "derived section is deduped");
-    // Every non-empty line is a tagged primal or derived entry
-    // (no stray bytes); time-indep (`T`) stays unenumerated (Dec 69).
+    // Every non-empty line is a tagged primal / derived / member
+    // entry (no stray bytes); time-indep (`T`) stays unenumerated
+    // (Dec 69).
     assert!(
-        body.lines()
-            .all(|l| l.is_empty() || l.starts_with("P\t") || l.starts_with("D\t")),
-        "every catalog line is a P- or D-tagged entry"
+        body.lines().all(|l| l.is_empty()
+            || l.starts_with("P\t")
+            || l.starts_with("D\t")
+            || l.starts_with("M\t")),
+        "every catalog line is a P-, D-, or M-tagged entry"
     );
+
+    // Wireframe-parity #6 path (a): the per-class membership rows
+    // resolve a picked element's `tri_member_id` back to a
+    // (class_name, label) pair locally. Each `M\t<class_idx>\t<name>\t
+    // <labels.csv>` line walks `MeshTopology::elem_classes` in
+    // build-order, so `class_idx` is dense from 0 and matches the
+    // packed high byte the geometry blob carries.
+    let member_rows: Vec<&str> = body.lines().filter(|l| l.starts_with("M\t")).collect();
+    assert!(
+        !member_rows.is_empty(),
+        "serial/basic1 has at least one element class with elements"
+    );
+    let mut prev_idx: Option<u32> = None;
+    for row in &member_rows {
+        let parts: Vec<&str> = row.split('\t').collect();
+        // M, class_idx, name, labels-csv
+        assert_eq!(parts.len(), 4, "M row shape: tag, idx, name, labels");
+        let class_idx: u32 = parts[1].parse().expect("class_idx is u32");
+        if let Some(p) = prev_idx {
+            assert!(class_idx > p, "class_idx walks elem_classes order");
+        }
+        prev_idx = Some(class_idx);
+        assert!(!parts[2].is_empty(), "class name non-empty");
+        let labels: Vec<i32> = parts[3]
+            .split(',')
+            .map(|s| s.parse().expect("label is i32"))
+            .collect();
+        assert!(!labels.is_empty(), "non-empty element class");
+    }
 
     // Real Arrow Flight DoGet of the conventional ticket returns the
     // byte-identical blob — the transport swap is format-stable

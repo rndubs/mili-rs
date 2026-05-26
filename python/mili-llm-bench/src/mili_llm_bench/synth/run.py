@@ -315,10 +315,43 @@ def _build_live_query_oracle(catalog: Catalog) -> QueryOracle:
             "labels": list(bound.get("labels") or []),
             "states": list(bound.get("states") or []),
         }
-        table = s.query(**kwargs)
-        return table if isinstance(table, dict) else {}
+        try:
+            qr = s.query(**kwargs)
+        except griz.QueryError as exc:
+            return {"ok": False, "error": str(exc)}
+        return _project_query_result(qr)
 
     return oracle
+
+
+def _project_query_result(qr: Any) -> dict[str, Any]:
+    """Project a ``griz.QueryResult`` into the JSON-stable dict shape
+    the synth verifier compares against ``expect.table`` cell-by-cell.
+    Reshapes the row-major ``[state][label][component]`` flat values
+    to nested lists so plain ``==`` works without numpy."""
+    labels = [int(x) for x in qr.labels]
+    states = [int(x) for x in qr.states]
+    components = int(qr.components)
+    flat = [float(x) for x in qr.values]
+    rows: list[list[list[float]]] = []
+    if states and labels and components:
+        stride = len(labels) * components
+        for si in range(len(states)):
+            row = []
+            base = si * stride
+            for li in range(len(labels)):
+                cell = flat[base + li * components : base + (li + 1) * components]
+                row.append(cell)
+            rows.append(row)
+    return {
+        "ok": True,
+        "result": str(qr.result),
+        "class_name": str(qr.class_name),
+        "labels": labels,
+        "states": states,
+        "components": components,
+        "values": rows,
+    }
 
 
 def _import_griz() -> Any:

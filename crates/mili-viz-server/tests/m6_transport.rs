@@ -238,7 +238,11 @@ async fn remote_transport_grpc_and_flight_over_tcp() {
     let scalar: Vec<f32> = (0..nv)
         .map(|k| f32::from_le_bytes(blob[soff + k * 4..soff + k * 4 + 4].try_into().unwrap()))
         .collect();
-    assert_eq!(soff + nv * 4, blob.len(), "MVG3 blob fully consumed");
+    let mut consumed = soff + nv * 4;
+    if flags_mask & 16 != 0 {
+        consumed += n_tri * 4; // tri_member_id (wireframe-parity #6 path (a))
+    }
+    assert_eq!(consumed, blob.len(), "MVG3 blob fully consumed");
     let finite: Vec<f32> = scalar.iter().copied().filter(|v| v.is_finite()).collect();
     assert!(!finite.is_empty(), "sand colors resulted elements");
     let lo = finite.iter().copied().fold(f32::INFINITY, f32::min);

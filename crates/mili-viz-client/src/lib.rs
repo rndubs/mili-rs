@@ -32,6 +32,7 @@ mod mesh;
 mod renderer;
 mod session;
 mod shell;
+mod snapshot;
 mod tweaks;
 
 pub use ai_panel::{
@@ -39,8 +40,8 @@ pub use ai_panel::{
 };
 pub use app::run;
 pub use camera::Camera;
-pub use catalog::{decode_catalog, ResultCatalog};
-pub use cli::{parse_args, CliArgs, CliOutcome, TransportChoice};
+pub use catalog::{decode_catalog, ClassMembership, ResultCatalog};
+pub use cli::{parse_args, CliArgs, CliOutcome, SnapshotArgs, TransportChoice};
 pub use colormap::{
     normalize as colormap_normalize, sample as colormap_sample,
     sample_named as colormap_sample_named, NAMES as COLORMAP_NAMES,
@@ -52,9 +53,15 @@ pub use renderer::{
 };
 pub use session::{fetch_server_mesh, Session};
 pub use shell::{
-    build_shell_ui, control_menu_items, cutplane_cmd, dock_rail_glyphs, slice_cmd, BottomTab,
-    CutPlaneState, CutThrottle, LoadedInfo, Overlay, Overlays, RenderMode, ResultInfo,
-    SessionPhase, ShellState, Theme, TimeSample, TranscriptKind, TranscriptLine, UiAction,
-    CUT_GIZMO_COLOR, CUT_PREVIEW_INTERVAL, DERIVED_RESULTS, SLICE_GIZMO_COLOR,
+    build_shell_ui, control_menu_items, cutplane_cmd, dock_rail_glyphs, slice_cmd, time_menu_items,
+    BottomTab, CutPlaneState, CutThrottle, ElementSeries, ElementSeriesSample, LoadedInfo, Overlay,
+    Overlays, RenderMode, ResultInfo, SessionPhase, ShellState, Theme, TimeSample, TranscriptKind,
+    TranscriptLine, UiAction, CUT_GIZMO_COLOR, CUT_PREVIEW_INTERVAL, DERIVED_RESULTS,
+    SLICE_GIZMO_COLOR,
+};
+pub use snapshot::{
+    latest_path as snapshot_latest_path, request_file as snapshot_request_file, run_snapshot_cli,
+    snapshots_dir, timestamped_path as snapshot_timestamped_path, try_consume_request_file,
+    write_png as write_snapshot_png, write_request_file, CaptureRequest,
 };
 pub use tweaks::{is_persisted_action, PersistedTweaks, ThemePref};

@@ -14,6 +14,7 @@
 //!    (Decision 45). **Skip-on-absent** when the corpus or a `wgpu`
 //!    adapter is missing (CLAUDE.md convention; not a failure).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use mili_viz_client::{
@@ -182,6 +183,169 @@ fn time_history_accumulates_from_result_stream() {
     s.state = 3;
     s.record_time_sample();
     assert_eq!(s.time_history.len(), 2, "bare-hull view adds no sample");
+}
+
+/// VB-007 regression: switching between bottom tabs must not drift
+/// the panel rect. Before the fix, the three tab bodies had
+/// inherent vertical demands of ~22 px (`command line`), ~158 px
+/// (`scripting`), and Plot-min (`time-history`); egui's
+/// `Panel::bottom("tabs").resizable(true)` honors the inner
+/// content's min-size and so silently grew / shrank the stored
+/// `PanelState` rect on each switch. The unified `tab_body` shape
+/// ([`crate::shell::tab_body`]) makes every tab present the same
+/// inherent demand, so the stored rect is constant.
+#[test]
+fn tab_switch_does_not_drift_panel_height() {
+    let ctx = egui::Context::default();
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 700.0),
+        )),
+        ..Default::default()
+    };
+
+    let mut s = ShellState {
+        bottom_tab: Some(BottomTab::CommandLine),
+        ..ShellState::default()
+    };
+    // Bulk up the scripting state so the body has real content
+    // demand to push against (the bug pre-fix walked the rect even
+    // on empty bodies, so this is overkill — but it pins the worst
+    // case the bug-tracker description was reported against).
+    s.script = (0..40).fold(String::new(), |mut out, i| {
+        let _ = writeln!(out, "# scripting editor line {i}");
+        out
+    });
+    s.script_output = (0..40).fold(String::new(), |mut out, i| {
+        let _ = writeln!(out, "stdout chunk {i}");
+        out
+    });
+
+    let snapshot = |ctx: &egui::Context| -> Option<f32> {
+        egui::PanelState::load(ctx, egui::Id::new("tabs")).map(|p| p.rect.height())
+    };
+
+    let paint = |ctx: &egui::Context, s: &mut ShellState| {
+        let _ = ctx.run_ui(raw(), |ui| {
+            let _ = build_shell_ui(ui, s);
+        });
+    };
+
+    // Warm-up: two paints on CommandLine so egui's resizable-panel
+    // state settles (the first frame writes the PanelState, the
+    // second reads it back through the get_size_from_state_or_default
+    // path — egui-0.34.2 panel.rs:218-223).
+    paint(&ctx, &mut s);
+    paint(&ctx, &mut s);
+    let h_cmdline = snapshot(&ctx).expect("PanelState stored after first tab paint");
+
+    s.bottom_tab = Some(BottomTab::Scripting);
+    paint(&ctx, &mut s);
+    paint(&ctx, &mut s);
+    let h_scripting = snapshot(&ctx).expect("PanelState stored after scripting paint");
+
+    s.bottom_tab = Some(BottomTab::TimeHistory);
+    paint(&ctx, &mut s);
+    paint(&ctx, &mut s);
+    let h_time = snapshot(&ctx).expect("PanelState stored after time-history paint");
+
+    s.bottom_tab = Some(BottomTab::CommandLine);
+    paint(&ctx, &mut s);
+    paint(&ctx, &mut s);
+    let h_cmdline2 = snapshot(&ctx).expect("PanelState stored after switch-back paint");
+
+    // 0.5 px tolerance for egui's `round_ui()` snap; the actual
+    // bug-reported drift was tens of px, the residual after the
+    // initial `allocate_ui_with_layout` fix was 3 px per paint
+    // (the missing `item_spacing.y` accounting fixed it to 0).
+    let tol = 0.5;
+    assert!(
+        (h_cmdline - h_scripting).abs() < tol,
+        "VB-007: panel drifted on CommandLine→Scripting switch: \
+         {h_cmdline} px vs {h_scripting} px"
+    );
+    assert!(
+        (h_scripting - h_time).abs() < tol,
+        "VB-007: panel drifted on Scripting→TimeHistory switch: \
+         {h_scripting} px vs {h_time} px"
+    );
+    assert!(
+        (h_cmdline - h_cmdline2).abs() < tol,
+        "VB-007: panel drifted on round-trip to CommandLine: \
+         {h_cmdline} px vs {h_cmdline2} px"
+    );
+}
+
+/// Wireframe §"Tweaks" *Show bottom tabs* regression: flipping
+/// `ShellState::show_bottom_tabs = false` removes the whole tabs panel
+/// — both the 22 px tab strip and the body — so no `PanelState` is
+/// stored under the `tabs` id. The default-`ShellState` path keeps the
+/// tweak on, so the composite gate (`bug-tracker.md` VB-001) is
+/// byte-stable.
+#[test]
+fn show_bottom_tabs_false_suppresses_the_panel() {
+    let ctx = egui::Context::default();
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1000.0, 700.0),
+        )),
+        ..Default::default()
+    };
+    let paint = |ctx: &egui::Context, s: &mut ShellState| {
+        let _ = ctx.run_ui(raw(), |ui| {
+            let _ = build_shell_ui(ui, s);
+        });
+    };
+
+    // Default is L1 with the tabs panel — its PanelState is stored
+    // (the 22 px strip occupies space even with `bottom_tab = None`).
+    assert!(
+        ShellState::default().show_bottom_tabs,
+        "default must keep the tab strip — VB-001 byte-stable composite gate"
+    );
+    let mut on = ShellState::default();
+    paint(&ctx, &mut on);
+    paint(&ctx, &mut on);
+    assert!(
+        egui::PanelState::load(&ctx, egui::Id::new("tabs")).is_some(),
+        "tabs panel must be present when show_bottom_tabs == true"
+    );
+
+    // Flip the tweak off on a fresh context — the panel is gone (no
+    // PanelState written), so dock + AI rail + viewport are the only
+    // chrome left.
+    let ctx_off = egui::Context::default();
+    let mut off = ShellState {
+        show_bottom_tabs: false,
+        ..ShellState::default()
+    };
+    let paint_off = |ctx: &egui::Context, s: &mut ShellState| {
+        let _ = ctx.run_ui(raw(), |ui| {
+            let _ = build_shell_ui(ui, s);
+        });
+    };
+    paint_off(&ctx_off, &mut off);
+    paint_off(&ctx_off, &mut off);
+    assert!(
+        egui::PanelState::load(&ctx_off, egui::Id::new("tabs")).is_none(),
+        "tabs panel must be absent when show_bottom_tabs == false"
+    );
+}
+
+/// `ShellState::set_show_bottom_tabs` mutates the field and emits the
+/// `SetShowBottomTabs` `UiAction` so the windowed app can persist it
+/// (via `is_persisted_action`).
+#[test]
+fn set_show_bottom_tabs_returns_persisted_action() {
+    let mut s = ShellState::default();
+    let a = s.set_show_bottom_tabs(false);
+    assert_eq!(a, UiAction::SetShowBottomTabs(false));
+    assert!(!s.show_bottom_tabs);
+    let a = s.set_show_bottom_tabs(true);
+    assert_eq!(a, UiAction::SetShowBottomTabs(true));
+    assert!(s.show_bottom_tabs);
 }
 
 #[tokio::test]

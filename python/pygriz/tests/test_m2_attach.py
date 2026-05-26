@@ -37,22 +37,32 @@ FIXTURE = (
 )
 
 
-def _write_session(d: pathlib.Path, sid: str, *, pid=None, port=50051, mtime=None):
+def _write_session(
+    d: pathlib.Path,
+    sid: str,
+    *,
+    pid=None,
+    port=50051,
+    mtime=None,
+    transport: str = "",
+    socket_path: str = "",
+):
     pid = os.getpid() if pid is None else pid
     p = d / f"{sid}.json"
-    p.write_text(
-        json.dumps(
-            {
-                "id": sid,
-                "pid": pid,
-                "host": "127.0.0.1",
-                "port": port,
-                "token": f"tok-{sid}",
-                "protocol_version": "1.0.0",
-                "db": "",
-            }
-        )
-    )
+    payload = {
+        "id": sid,
+        "pid": pid,
+        "host": "127.0.0.1",
+        "port": port,
+        "token": f"tok-{sid}",
+        "protocol_version": "1.0.0",
+        "db": "",
+    }
+    if transport:
+        payload["transport"] = transport
+    if socket_path:
+        payload["socket_path"] = socket_path
+    p.write_text(json.dumps(payload))
     if mtime is not None:
         os.utime(p, (mtime, mtime))
     return p
@@ -129,6 +139,109 @@ def test_attach_skips_dead_pid_for_newest(sessions_dir, monkeypatch):
     )
     griz.attach()
     assert captured[-1] == ("127.0.0.1", 7, "tok-alive"), "dead-pid skipped"
+
+
+# --------------------------------------------------------------------
+# wireframe-parity-5 Decisions 109–111 — in-process discriminator
+# --------------------------------------------------------------------
+
+
+def test_session_info_carries_transport_and_socket_path(sessions_dir):
+    """The new discriminator + socket_path fields parse off the
+    session JSON; legacy (pre-Decision-109) files still parse with
+    empty defaults so `attach()` falls through to TCP."""
+    import griz
+
+    _write_session(
+        sessions_dir,
+        "ip",
+        port=0,
+        transport="in-process",
+        socket_path="/tmp/griz-ip.sock",
+    )
+    _write_session(sessions_dir, "tcp", port=50051)  # legacy shape
+    by_id = {s.id: s for s in griz.list_sessions()}
+    assert by_id["ip"].transport == "in-process"
+    assert by_id["ip"].socket_path == "/tmp/griz-ip.sock"
+    assert by_id["tcp"].transport == ""
+    assert by_id["tcp"].socket_path == ""
+
+
+def test_attach_in_process_routes_through_uds_path(sessions_dir, monkeypatch):
+    """`attach()` on a session file with `transport: "in-process"`
+    must call the unix-channel dispatcher with the file's
+    `socket_path`, not the TCP `connect(host, port, ...)`."""
+    import griz
+
+    _write_session(
+        sessions_dir,
+        "ip",
+        port=0,
+        transport="in-process",
+        socket_path="/tmp/griz-attach-ip.sock",
+    )
+
+    tcp_calls: list = []
+    uds_calls: list = []
+    monkeypatch.setattr(
+        griz, "connect", lambda h, p, t="", **k: tcp_calls.append((h, p, t))
+    )
+    monkeypatch.setattr(
+        griz,
+        "_connect_uds",
+        lambda sock, t="", **k: uds_calls.append((sock, t)) or "UDS",
+    )
+
+    assert griz.attach(id="ip") == "UDS"
+    assert uds_calls == [("/tmp/griz-attach-ip.sock", "tok-ip")]
+    assert tcp_calls == [], "in-process arm must not fall back to TCP"
+
+
+def test_attach_in_process_without_socket_path_raises(sessions_dir):
+    """A malformed in-process file (discriminator without socket_path)
+    must raise rather than silently falling back to host/port — the
+    sentinel `host: 127.0.0.1 / port: 0` would otherwise misdial."""
+    import griz
+
+    _write_session(
+        sessions_dir,
+        "broken",
+        port=0,
+        transport="in-process",
+        socket_path="",
+    )
+    with pytest.raises(RuntimeError, match="declares transport=in-process"):
+        griz.attach(id="broken")
+
+
+def test_attach_explicit_host_port_overrides_in_process(sessions_dir, monkeypatch):
+    """The explicit `host=`/`port=` escape hatch always wins (Decision
+    57 precedence) — used when forwarding the GUI's UDS over SSH
+    `-L unix:...` or similar."""
+    import griz
+
+    _write_session(
+        sessions_dir,
+        "ip",
+        port=0,
+        transport="in-process",
+        socket_path="/tmp/griz-explicit-override.sock",
+    )
+
+    tcp_calls: list = []
+    uds_calls: list = []
+    monkeypatch.setattr(
+        griz,
+        "connect",
+        lambda h, p, t="", **k: tcp_calls.append((h, p, t)) or "TCP",
+    )
+    monkeypatch.setattr(
+        griz, "_connect_uds", lambda *a, **k: uds_calls.append(a) or "UDS"
+    )
+
+    assert griz.attach(host="h", port=99, token="t") == "TCP"
+    assert tcp_calls == [("h", 99, "t")]
+    assert uds_calls == []
 
 
 # --------------------------------------------------------------------

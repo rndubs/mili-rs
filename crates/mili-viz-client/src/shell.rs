@@ -301,7 +301,13 @@ impl Theme {
             Theme::Light => "light",
         }
     }
-    fn visuals(self) -> egui::Visuals {
+    /// The egui visuals this theme maps to. `pub(crate)` because
+    /// [`crate::render_shell_to_image`] pre-applies them on the
+    /// [`crate::egui_layer::EguiPaint`] context before the headless
+    /// `run_ui` (`bug-tracker.md` VB-006 — single-frame headless renders
+    /// can't pick up an in-`run_ui` `set_visuals` queued for the next
+    /// frame).
+    pub(crate) fn visuals(self) -> egui::Visuals {
         match self {
             Theme::Dark => egui::Visuals::dark(),
             Theme::Light => egui::Visuals::light(),
@@ -351,6 +357,34 @@ pub struct TimeSample {
     pub t: f64,
     pub min: f64,
     pub max: f64,
+}
+
+/// One sample of a per-element [`ElementSeries`]
+/// (`wireframe-parity.md` "What's still left" #4): the value the
+/// `Query` RPC returned for this `(class_name, label_id, svar)` at
+/// the given state. `t` is `LoadedInfo::state_times` joined in so the
+/// plot can render against simulation time without a second lookup.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ElementSeriesSample {
+    pub state: u32,
+    pub t: f64,
+    pub value: f64,
+}
+
+/// One per-element time-history series sourced from the `Query` RPC
+/// (`wireframe-parity.md` "What's still left" #4 — client UX side of
+/// the now-real server arm). The label is the user-visible legend
+/// entry; the `(class_name, label_id, svar, component)` quadruple is
+/// the identity the +series input row submitted, kept verbatim so a
+/// later refresh can re-query without re-parsing the label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ElementSeries {
+    pub label: String,
+    pub class_name: String,
+    pub label_id: i64,
+    pub svar: String,
+    pub component: String,
+    pub samples: Vec<ElementSeriesSample>,
 }
 
 /// A client-side intent emitted by the shell. The windowed app lowers
@@ -430,6 +464,11 @@ pub enum UiAction {
     /// full dock. Returned for observability/persistence. No proto
     /// command.
     SetDockCollapsed(bool),
+    /// Pure-client bottom-tabs visibility (wireframes §"Tweaks": *Show
+    /// bottom tabs*). Already applied to [`ShellState`]; when `false`
+    /// the whole `tabs` panel is suppressed (strip + body). Cross-
+    /// session-persisted via `tweaks.json`. No proto command.
+    SetShowBottomTabs(bool),
     /// Pure-client L3 focus-mode toggle (wireframes §"L3 — Focus
     /// mode"; `Ctrl+\`). Already applied to [`ShellState`]
     /// (`set_focus_mode` also collapses the dock); the shell hides the
@@ -507,6 +546,22 @@ pub enum UiAction {
     AgentRevert {
         turn_id: String,
     },
+    /// `wireframe-parity.md` "What's still left" #4 — request a per-
+    /// element time-history series for `(class_name, label_id, svar,
+    /// component)` over **all** states. The windowed app lowers this
+    /// to the frozen `Query` RPC and pushes the inline values back via
+    /// [`ShellState::push_element_series`]. Pure-client request shape:
+    /// the input row appended a placeholder series so the user sees
+    /// "(loading)" until the RPC returns; the action carries the same
+    /// `label` so the lowering arm can replace it on success or drop it
+    /// on failure.
+    QueryElementSeries {
+        label: String,
+        class_name: String,
+        label_id: i64,
+        svar: String,
+        component: String,
+    },
 }
 
 /// Static fallback derived-result names, shown only until a real
@@ -561,6 +616,26 @@ pub fn control_menu_items() -> Vec<(&'static str, UiAction)> {
         ("⏹ stop animate", UiAction::StopAnimate),
         ("⟲ view reset", UiAction::ViewReset),
         ("⊞ fit", UiAction::Fit),
+    ]
+}
+
+/// The `Time` menu rows: transport + animate verbs that match the
+/// legacy griz `Time` pulldown (`reference/griz/Src/gui.c::create_menu_bar`
+/// — Next/Prev/First/Last State + Animate/Stop Animate; the legacy
+/// "Continue Animate" is the same verb as our toggle re-entry, so it
+/// is not a separate row). Sub-set of [`control_menu_items`] — the
+/// griz idiom is that menus duplicate the toolbar / sibling menus, so
+/// the same `UiAction`s the toolbar already lowers fire here. No
+/// proto change, no new `UiAction`.
+#[must_use]
+pub fn time_menu_items() -> Vec<(&'static str, UiAction)> {
+    vec![
+        ("⏮ first state", UiAction::First),
+        ("◀ prev state", UiAction::Prev),
+        ("▶ next state", UiAction::Next),
+        ("⏭ last state", UiAction::Last),
+        ("▶/⏸ animate", UiAction::ToggleAnimate),
+        ("⏹ stop animate", UiAction::StopAnimate),
     ]
 }
 
@@ -643,6 +718,33 @@ pub struct ShellState {
     /// Time-history series accumulated from `ResultState`
     /// (Decision 50).
     pub time_history: Vec<TimeSample>,
+    /// Per-element time-history series sourced from the `Query` RPC
+    /// (`wireframe-parity.md` "What's still left" #4). Each entry is
+    /// one line in the Plot tab body. Appended (with an empty
+    /// `samples`) when the user clicks `+series`; the windowed app's
+    /// lowering arm fills the samples in-place once the inline
+    /// `QueryReply` lands.
+    pub element_series: Vec<ElementSeries>,
+    /// Plot-tab input buffers: the `class.label_id.svar` fields the
+    /// `+series` button consumes. Kept on [`ShellState`] for the same
+    /// reason `cmdline_input` lives here — the `egui::TextEdit` needs
+    /// a `&mut String` anchored across frames.
+    pub plot_class_input: String,
+    pub plot_label_input: String,
+    pub plot_svar_input: String,
+    pub plot_component_input: String,
+    /// Picked-element identity `(class_name, label_id)` last resolved
+    /// through the catalog (`wireframe-parity-6.md` Decisions 104–106).
+    /// Populated by [`ShellState::apply_pick`] when the hit's
+    /// `member_id` resolves; cleared on a miss / when the catalog
+    /// can't resolve it / when picking is toggled off, so the
+    /// "+ pick" button on the Plot tab is greyed out whenever the
+    /// status-bar readout falls back to the `tri T · node N` form.
+    /// `None` (the default, and the headless composite path) keeps
+    /// the M3 composite gate byte-stable (`bug-tracker.md` VB-001 —
+    /// the button only renders when this and [`ShellState::result`]
+    /// are both populated).
+    pub picked_element: Option<(String, i32)>,
     /// Active colormap name (`phase-5-m4.md` Decision 66); one of
     /// [`crate::colormap::NAMES`], default `cool`.
     pub colormap: String,
@@ -670,6 +772,16 @@ pub struct ShellState {
     /// §"Tweaks": *Left dock collapsed*). Default `false` keeps the L1
     /// full dock, so `scene_frac` / the composite gate are unchanged.
     pub dock_collapsed: bool,
+    /// Whether the bottom-tabs region is visible at all (wireframes
+    /// §"Tweaks": *Show bottom tabs* — "the whole bottom-tabs region is
+    /// hideable via tweak"). Default `true` keeps the 22 px tab strip
+    /// visible (the L1 chrome), so the headless composite gate stays
+    /// byte-stable (`bug-tracker.md` VB-001). Distinct from the per-tab
+    /// `▾ hide` (which sets `bottom_tab = None` but leaves the strip):
+    /// flipping this off removes the strip *and* the body, freeing the
+    /// pixels for clean screenshots. Cross-session-persisted via
+    /// `tweaks.json` (Preferences → Show bottom tabs).
+    pub show_bottom_tabs: bool,
     /// L3 focus mode (wireframes §"L3 — Focus mode"): stripped to the
     /// viewport — the AI rail + bottom tabs are hidden and the dock is
     /// the icon rail. Toggled with `Ctrl+\`. Default `false` keeps the
@@ -755,6 +867,12 @@ impl Default for ShellState {
             script_running: false,
             script_status: "venv: — · attach: —".to_string(),
             time_history: Vec::new(),
+            element_series: Vec::new(),
+            plot_class_input: String::new(),
+            plot_label_input: String::new(),
+            plot_svar_input: String::new(),
+            plot_component_input: String::new(),
+            picked_element: None,
             colormap: "cool".to_string(),
             legend_min: None,
             legend_max: None,
@@ -762,6 +880,7 @@ impl Default for ShellState {
             interior_on: false,
             theme: Theme::default(),
             dock_collapsed: false,
+            show_bottom_tabs: true,
             focus_mode: false,
             scene_frac: None,
             camera: None,
@@ -826,6 +945,14 @@ impl ShellState {
         UiAction::SetDockCollapsed(collapsed)
     }
 
+    /// Show/hide the entire bottom-tabs region (wireframes §"Tweaks":
+    /// *Show bottom tabs*). Pure client state; observability/persistence-
+    /// only (no proto command).
+    pub fn set_show_bottom_tabs(&mut self, show: bool) -> UiAction {
+        self.show_bottom_tabs = show;
+        UiAction::SetShowBottomTabs(show)
+    }
+
     /// Toggle L3 focus mode (wireframes §"L3 — Focus mode"; `Ctrl+\`).
     /// Entering also collapses the dock so the rail shows; exiting
     /// restores it — so a single key round-trips the full L1 ↔ L3
@@ -845,25 +972,49 @@ impl ShellState {
         if !self.picking {
             self.pick = "—".to_string();
             self.pick_point = None;
+            // Also drop the resolved-element identity so the Plot tab's
+            // "+ pick" button greys out — the user just turned picking
+            // off, no stale pick should keep the button live.
+            self.picked_element = None;
         }
         UiAction::TogglePicking
     }
 
-    /// Fold a ray-cast result into the status-bar readout. The frozen
-    /// proto has no label catalog, so a hit shows the node/triangle
-    /// indices the cached hull actually carries (plus the `MVG2`
-    /// scalar when present); a miss reads `(no hit)`.
+    /// Fold a ray-cast result into the status-bar readout. When the
+    /// catalog side-channel carried per-class membership rows
+    /// (wireframe-parity #6 path (a)) AND the hit triangle's
+    /// `tri_member_id` resolves, the readout is the legacy griz
+    /// `<class> <label>` form (`brick 42 · v=…`); otherwise it falls
+    /// back to the `tri T · node N` form. A miss reads `(no hit)`.
     pub fn apply_pick(&mut self, hit: Option<&crate::mesh::Pick>) {
+        // Resolve the picked tri's owning element once, up-front: both
+        // the status-bar readout and the Plot tab's "+ pick" button
+        // need the same `(class_name, label_id)`. A miss / a tri with
+        // no `member_id` / a class outside the catalog all drop to
+        // `None`, which the readout falls back to `tri T · node N` on
+        // and the "+ pick" button greys out from.
+        let resolved: Option<(String, i32)> = hit.and_then(|p| {
+            let id = p.member_id?;
+            let cat = self.catalog.as_ref()?;
+            cat.resolve_member(id).map(|(n, l)| (n.to_string(), l))
+        });
         self.pick = match hit {
             None => "(no hit)".to_string(),
-            Some(p) => match p.scalar {
-                Some(v) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
-                None => format!("node {} · tri {}", p.node, p.tri),
+            Some(p) => match (resolved.as_ref(), p.scalar) {
+                (Some((name, label)), Some(v)) => format!("{name} {label} · v={v:.3e}"),
+                (Some((name, label)), None) => format!("{name} {label}"),
+                (None, Some(v)) => format!("node {} · tri {} · v={v:.3e}", p.node, p.tri),
+                (None, None) => format!("node {} · tri {}", p.node, p.tri),
             },
         };
         // Remember the hit point for the viewport highlight glyph; a
         // miss clears it so a stale marker never lingers (MVP-cut 4).
         self.pick_point = hit.map(|p| p.point);
+        // The resolved-element identity drives the Plot tab's "+ pick"
+        // button (`wireframe-parity.md` #4 — picking-driven variant).
+        // A miss / cap-tri / catalog-less server all surface `None`,
+        // which the button greys out from.
+        self.picked_element = resolved;
     }
 
     /// Whether a class's materials are currently shown.
@@ -1058,6 +1209,136 @@ impl ShellState {
         }
     }
 
+    /// `wireframe-parity.md` #4 — submit the Plot tab's
+    /// `class.label_id.svar` row as a [`UiAction::QueryElementSeries`]
+    /// the windowed app lowers to the frozen `Query` RPC. `None`
+    /// when the inputs are missing the three mandatory fields or
+    /// `label_id` does not parse. On success the inputs are cleared
+    /// and a placeholder [`ElementSeries`] is appended so the user
+    /// immediately sees the legend entry (the app fills the samples
+    /// in-place once the reply lands). Idempotent: re-submitting the
+    /// same `(class, id, svar, component)` replaces the existing
+    /// series in place instead of stacking duplicates.
+    pub fn submit_element_query(&mut self) -> Option<UiAction> {
+        let class_name = self.plot_class_input.trim().to_string();
+        let svar = self.plot_svar_input.trim().to_string();
+        let label_id_text = self.plot_label_input.trim();
+        if class_name.is_empty() || svar.is_empty() || label_id_text.is_empty() {
+            return None;
+        }
+        let label_id: i64 = label_id_text.parse().ok()?;
+        let component = self.plot_component_input.trim().to_string();
+        let label = if component.is_empty() {
+            format!("{svar} [{class_name} {label_id}]")
+        } else {
+            format!("{svar}[{component}] [{class_name} {label_id}]")
+        };
+        let placeholder = ElementSeries {
+            label: label.clone(),
+            class_name: class_name.clone(),
+            label_id,
+            svar: svar.clone(),
+            component: component.clone(),
+            samples: Vec::new(),
+        };
+        if let Some(existing) = self
+            .element_series
+            .iter_mut()
+            .find(|s| s.label == placeholder.label)
+        {
+            existing.samples.clear();
+        } else {
+            self.element_series.push(placeholder);
+        }
+        self.plot_class_input.clear();
+        self.plot_label_input.clear();
+        self.plot_svar_input.clear();
+        self.plot_component_input.clear();
+        Some(UiAction::QueryElementSeries {
+            label,
+            class_name,
+            label_id,
+            svar,
+            component,
+        })
+    }
+
+    /// `wireframe-parity.md` #4 (picking-driven variant) — emit a
+    /// [`UiAction::QueryElementSeries`] for the last-picked element on
+    /// the **currently-shown** svar and component (so a single button
+    /// captures whatever the user just clicked on while looking at
+    /// the loaded result). `None` when:
+    ///
+    ///  * `picked_element` is unset (no resolved pick — caller greys
+    ///    the button out so the human-visible behavior matches);
+    ///  * `result.name` is empty (no svar shown — nothing to plot;
+    ///    the button is also greyed out in that case);
+    ///  * the placeholder is identical to an existing series and
+    ///    contains samples — re-clicking is a refresh (samples are
+    ///    cleared in place) but never duplicates the legend row.
+    ///
+    /// Idempotency / placeholder / failure semantics match the
+    /// text-input sibling [`ShellState::submit_element_query`].
+    pub fn submit_picked_element_query(&mut self) -> Option<UiAction> {
+        let (class_name, label_id_i32) = self.picked_element.clone()?;
+        let result = self.result.as_ref()?;
+        let svar = result.name.clone();
+        if svar.is_empty() {
+            return None;
+        }
+        // `ResultInfo::component` is "" for scalar svars and e.g. "1"
+        // for a multi-component primal — exactly the form the
+        // `Query` RPC's `component` field already accepts.
+        let component = result.component.clone();
+        let label_id: i64 = i64::from(label_id_i32);
+        let label = if component.is_empty() {
+            format!("{svar} [{class_name} {label_id}]")
+        } else {
+            format!("{svar}[{component}] [{class_name} {label_id}]")
+        };
+        let placeholder = ElementSeries {
+            label: label.clone(),
+            class_name: class_name.clone(),
+            label_id,
+            svar: svar.clone(),
+            component: component.clone(),
+            samples: Vec::new(),
+        };
+        if let Some(existing) = self
+            .element_series
+            .iter_mut()
+            .find(|s| s.label == placeholder.label)
+        {
+            existing.samples.clear();
+        } else {
+            self.element_series.push(placeholder);
+        }
+        Some(UiAction::QueryElementSeries {
+            label,
+            class_name,
+            label_id,
+            svar,
+            component,
+        })
+    }
+
+    /// Replace the samples on the [`ElementSeries`] with `label`. No-op
+    /// when no matching placeholder exists — the windowed app's
+    /// lowering arm dropped the entry on a `QueryReply.ok == false`,
+    /// so we don't want to re-create it under the user.
+    pub fn push_element_series(&mut self, label: &str, samples: Vec<ElementSeriesSample>) {
+        if let Some(s) = self.element_series.iter_mut().find(|s| s.label == label) {
+            s.samples = samples;
+        }
+    }
+
+    /// Drop the [`ElementSeries`] matching `label`. Used by the
+    /// lowering arm to clean up the placeholder when the RPC fails so
+    /// the legend doesn't accumulate empty entries.
+    pub fn drop_element_series(&mut self, label: &str) {
+        self.element_series.retain(|s| s.label != label);
+    }
+
     /// The colour-mapping range the renderer and legend use
     /// (`phase-5-m4.md` Decision 66): a `LegendLimits` bound overrides
     /// that end, an unset bound autoscales from the broadcast
@@ -1221,6 +1502,15 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                     if ui.checkbox(&mut collapsed, "Left dock collapsed").clicked() {
                         actions.push(state.set_dock_collapsed(collapsed));
                     }
+                    // Preferences → Show bottom tabs (wireframes
+                    // §"Tweaks"): persisted region-level hide so the
+                    // 22 px strip and body both disappear for clean
+                    // screenshots. Per-tab `▾ hide` remains the runtime
+                    // body-only collapse.
+                    let mut show_tabs = state.show_bottom_tabs;
+                    if ui.checkbox(&mut show_tabs, "Show bottom tabs").clicked() {
+                        actions.push(state.set_show_bottom_tabs(show_tabs));
+                    }
                     ui.separator();
                     // Preferences → Interactive clip (Phase 5 M8
                     // Decision 86; persisted via tweaks.json). When off,
@@ -1231,9 +1521,95 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
                         actions.push(state.set_interactive_clip(live));
                     }
                 });
-                for m in ["Results", "Time", "Plot", "Help"] {
-                    let _ = ui.menu_button(m, |_| {});
-                }
+                // Results menu: mirrors the left-dock Results section —
+                // wireframes §"Menu bar" defers menu contents to "the
+                // legacy griz Motif menus", and the griz Results menu
+                // (`reference/griz/Src/gui.c::create_derived_res_menu`,
+                // `create_primal_res_menu`) is the same DB-filtered
+                // derived + primal catalog rendered as menu rows. Each
+                // row emits the same `Show` action the dock click does.
+                ui.menu_button("Results", |ui| {
+                    let primal: Vec<String> = state
+                        .catalog
+                        .as_ref()
+                        .map(|c| c.primal.clone())
+                        .unwrap_or_default();
+                    let derived: Vec<String> = state
+                        .catalog
+                        .as_ref()
+                        .map(|c| c.derived.clone())
+                        .unwrap_or_else(|| {
+                            DERIVED_RESULTS.iter().map(|s| (*s).to_string()).collect()
+                        });
+                    ui.menu_button("derived", |ui| {
+                        for r in &derived {
+                            if ui.button(r).clicked() {
+                                actions.push(state.select_result(r));
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.menu_button("primal", |ui| {
+                        if primal.is_empty() {
+                            ui.weak("(catalog: M4+)");
+                        } else {
+                            for r in &primal {
+                                if ui.button(r).clicked() {
+                                    actions.push(state.select_result(r));
+                                    ui.close();
+                                }
+                            }
+                        }
+                    });
+                    ui.menu_button("time-indep", |ui| {
+                        // Same blocker as the left dock: no mili-rs TI
+                        // accessor yet (`phase-5-m4.md` Decision 69).
+                        ui.weak("(time-indep: no catalog path yet)");
+                    });
+                });
+                // Time menu: legacy griz transport pulldown
+                // (`reference/griz/Src/gui.c` — Next/Prev/First/Last
+                // State + Animate/Stop Animate). Duplicates the
+                // toolbar / Control menu by design — the griz idiom is
+                // "the menu bar names the same verbs the toolbar
+                // surfaces", so a user looking for `next state` finds
+                // it under both Time and Control.
+                ui.menu_button("Time", |ui| {
+                    for (label, action) in time_menu_items() {
+                        if ui.button(label).clicked() {
+                            actions.push(action);
+                            ui.close();
+                        }
+                    }
+                });
+                // Plot menu: legacy griz `Time Hist Plot` (one verb —
+                // opens the time-history plot). Lowers to selecting the
+                // `TimeHistory` bottom tab so the egui_plot host is
+                // visible (and the panel un-collapsed if it was).
+                ui.menu_button("Plot", |ui| {
+                    if ui.button("Time Hist Plot").clicked() {
+                        state.bottom_tab = Some(BottomTab::TimeHistory);
+                        actions.push(UiAction::SelectBottomTab(BottomTab::TimeHistory));
+                        ui.close();
+                    }
+                });
+                // Help menu: legacy griz `Display Griz Manual` — there
+                // is no Rust-port manual yet, so this is the honest
+                // substitute: an `About mili-viz` submenu listing the
+                // crate version, the frozen-proto major (the same
+                // source-of-truth the status bar uses), and the
+                // L3-focus shortcut. Static text, no actions.
+                ui.menu_button("Help", |ui| {
+                    ui.menu_button("About mili-viz", |ui| {
+                        ui.label(format!("mili-viz-client v{}", env!("CARGO_PKG_VERSION")));
+                        ui.label(format!(
+                            "frozen proto: {}",
+                            mili_viz_proto::v1::PROTOCOL_VERSION
+                        ));
+                        ui.separator();
+                        ui.weak("Ctrl+\\ — toggle L3 focus mode");
+                    });
+                });
             });
         });
 
@@ -1249,8 +1625,10 @@ pub fn build_shell_ui(ui: &mut Ui, state: &mut ShellState) -> Vec<UiAction> {
             status_bar(ui, state);
         });
 
-    // Bottom tabs are hidden in L3 focus mode (wireframes §"L3").
-    if !state.focus_mode {
+    // Bottom tabs are hidden in L3 focus mode (wireframes §"L3") and
+    // when the Preferences → Show bottom tabs tweak is off (wireframes
+    // §"Tweaks" — region-level hide).
+    if !state.focus_mode && state.show_bottom_tabs {
         bottom_tabs(ui, state, &mut actions);
     }
 
@@ -1618,13 +1996,69 @@ fn bottom_tabs(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
         });
         if let Some(tab) = state.bottom_tab {
             ui.separator();
-            match tab {
-                BottomTab::CommandLine => cmdline_tab(ui, state, actions),
-                BottomTab::Scripting => scripting_tab(ui, state, actions),
-                BottomTab::TimeHistory => time_history_tab(ui, state),
-            }
+            tab_body(ui, state, actions, tab);
         }
     });
+}
+
+/// Unified tab body shape (VB-007 fix): every tab is a fixed-height
+/// **body** chunk that fills `available_height - INPUT_ROW_H`, plus a
+/// fixed 22 px **input row** at the bottom. Both chunks are allocated
+/// via [`egui::Ui::allocate_ui_with_layout`] so the inner layout
+/// **cannot push the panel rect** — switching tabs no longer drifts
+/// the panel top edge up/down because every tab presents the same
+/// inherent vertical demand to the resizable panel's
+/// `set_min_height(max_rect().height())` invariant (egui-0.34.2
+/// `containers/panel.rs:680`). The previous per-tab shapes diverged
+/// (`cmdline` ≈ 22 px min, `scripting` ≈ 158 px min, `time_history`
+/// ≈ Plot min) which let egui's stored `PanelState` rect ratchet up
+/// or down on switch.
+const INPUT_ROW_H: f32 = 22.0;
+
+fn tab_body(
+    ui: &mut egui::Ui,
+    state: &mut ShellState,
+    actions: &mut Vec<UiAction>,
+    tab: BottomTab,
+) {
+    let avail = ui.available_size();
+    // VB-007: the parent placer inserts `item_spacing.y` between the
+    // body and the input-row chunks. If we don't subtract it from
+    // `body_h`, the cumulative claimed height is `body + spacing +
+    // row = avail + spacing`, which overshoots the panel's
+    // `set_min_height(max_rect.height())` invariant and the inner
+    // response rect grows by `spacing` per paint. Since the next
+    // frame reads the inflated `PanelState.rect.height` as the new
+    // panel size, this ratchets the panel by ~3 px per paint —
+    // visible as the cross-tab drift the bug report describes.
+    let gap_y = ui.spacing().item_spacing.y;
+    let row_h = INPUT_ROW_H.min(avail.y);
+    let body_h = (avail.y - row_h - gap_y).max(0.0);
+    let body_size = egui::vec2(avail.x, body_h);
+    let row_size = egui::vec2(avail.x, row_h);
+
+    ui.allocate_ui_with_layout(body_size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_min_size(body_size);
+        ui.set_max_size(body_size);
+        match tab {
+            BottomTab::CommandLine => cmdline_body(ui, state),
+            BottomTab::Scripting => scripting_body(ui, state),
+            BottomTab::TimeHistory => time_history_body(ui, state),
+        }
+    });
+    ui.allocate_ui_with_layout(
+        row_size,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(row_size);
+            ui.set_max_size(row_size);
+            match tab {
+                BottomTab::CommandLine => cmdline_input(ui, state, actions),
+                BottomTab::Scripting => scripting_input(ui, state, actions),
+                BottomTab::TimeHistory => time_history_input(ui, state, actions),
+            }
+        },
+    );
 }
 
 fn tab_button(
@@ -1640,21 +2074,20 @@ fn tab_button(
     }
 }
 
-/// Layer-0 command line (`phase-5-m3.5.md` Decision 48): green
-/// `griz>` prompt, echoed commands, dim responses. The input lowers
-/// verbatim to `Command{ raw }`; nothing is re-parsed client-side.
-fn cmdline_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+/// Layer-0 command-line body (`phase-5-m3.5.md` Decision 48): green
+/// `griz>` prompt, echoed commands, dim responses. The body is the
+/// transcript [`egui::ScrollArea`]; the input row hosts the
+/// `griz>` prompt + `TextEdit::singleline`. Both live inside the
+/// unified [`tab_body`] allocation so the panel cannot drift on
+/// switch (VB-007).
+fn cmdline_body(ui: &mut egui::Ui, state: &ShellState) {
     let green = egui::Color32::from_rgb(120, 200, 120);
     let dim = egui::Color32::from_gray(150);
     let danger = egui::Color32::from_rgb(220, 110, 100);
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
-
-    let row_h = 22.0;
-    let scroll_h = (ui.available_height() - row_h).max(0.0);
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .max_height(scroll_h)
         .show(ui, |ui| {
             for line in &state.transcript {
                 let (txt, col) = match line.kind {
@@ -1665,100 +2098,199 @@ fn cmdline_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAc
                 ui.label(egui::RichText::new(txt).color(col).font(mono.clone()));
             }
         });
-
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("griz>").color(green).font(mono.clone()));
-        let resp = ui.add(
-            egui::TextEdit::singleline(&mut state.cmdline_input)
-                .font(mono.clone())
-                .desired_width(f32::INFINITY)
-                .hint_text("raw griz / grizinit line"),
-        );
-        let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if submit {
-            if let Some(a) = state.submit_command() {
-                actions.push(a);
-            }
-            resp.request_focus();
-        }
-    });
 }
 
-/// Scripting runner (`client.md` decision 3, `phase-6-m2.md`): a
-/// monospace editor, a Run button, a streamed output pane, and the
-/// `venv: … · attach: …` indicator. Run emits [`UiAction::RunScript`];
-/// the windowed app spawns a managed `pygriz` subprocess and streams
-/// its output back. The subprocess path is windowed-only — the
-/// gating test exercises the pure [`ShellState`] logic, not the child
-/// (not headlessly verifiable in CI).
-fn scripting_tab(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+fn cmdline_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let green = egui::Color32::from_rgb(120, 200, 120);
     let mono = egui::TextStyle::Monospace.resolve(ui.style());
-
-    ui.add(
-        egui::TextEdit::multiline(&mut state.script)
-            .code_editor()
+    ui.label(egui::RichText::new("griz>").color(green).font(mono.clone()));
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut state.cmdline_input)
             .font(mono.clone())
-            .desired_rows(4)
-            .desired_width(f32::INFINITY),
+            .desired_width(f32::INFINITY)
+            .hint_text("raw griz / grizinit line"),
     );
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!state.script_running, egui::Button::new("▶ Run"))
-            .clicked()
-        {
-            if let Some(a) = state.run_script() {
-                actions.push(a);
-            }
+    let submit = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if submit {
+        if let Some(a) = state.submit_command() {
+            actions.push(a);
         }
-        if state.script_running {
-            ui.spinner();
-            ui.weak("running…");
-        }
-    });
+        resp.request_focus();
+    }
+}
 
-    let foot = 20.0;
-    let scroll_h = (ui.available_height() - foot).max(40.0);
+/// Scripting runner (`client.md` decision 3, `phase-6-m2.md`).
+/// Under the unified [`tab_body`] shape (VB-007 fix), the body is a
+/// single [`egui::ScrollArea`] hosting **editor → separator →
+/// output**, and the input row at the bottom carries the `Run`
+/// button, spinner, and `venv: … · attach: …` status. The fix
+/// sketch in `bug-tracker.md` VB-007 calls out moving the
+/// `desired_rows(4)` `TextEdit` into the body's ScrollArea — that
+/// is what removes the ~158 px inherent vertical demand that used
+/// to dominate over the `command line` tab's ~22 px demand and let
+/// egui's panel rect drift on switch. The subprocess path is
+/// windowed-only — the gating test exercises the pure
+/// [`ShellState`] logic, not the child (not headlessly verifiable
+/// in CI).
+fn scripting_body(ui: &mut egui::Ui, state: &mut ShellState) {
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
     egui::ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .max_height(scroll_h)
         .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut state.script)
+                    .code_editor()
+                    .font(mono.clone())
+                    .desired_rows(4)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.separator();
             if state.script_output.is_empty() {
                 ui.weak("(no output)");
             } else {
                 ui.label(egui::RichText::new(&state.script_output).font(mono.clone()));
             }
         });
-    ui.weak(&state.script_status);
+}
+
+fn scripting_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    if ui
+        .add_enabled(!state.script_running, egui::Button::new("▶ Run"))
+        .clicked()
+    {
+        if let Some(a) = state.run_script() {
+            actions.push(a);
+        }
+    }
+    if state.script_running {
+        ui.spinner();
+    }
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.weak(&state.script_status);
+    });
 }
 
 /// Time-history plot (`phase-5-m3.5.md` Decision 50): an `egui_plot`
 /// host of the active result's data-range envelope vs. simulation
 /// time, accumulated from the broadcast `Subscribe`/`ResultState`
-/// stream. The `Query`-fed per-element series is the forward path.
-fn time_history_tab(ui: &mut egui::Ui, state: &ShellState) {
-    if state.time_history.is_empty() {
-        ui.weak("no series yet — select a result and step through states");
+/// stream, plus the per-element series the Plot tab's input row
+/// loaded over the frozen `Query` RPC (`wireframe-parity.md` "What's
+/// still left" #4). The body fills the unified [`tab_body`]
+/// allocation; the input row hosts the `+series` form (post-#4 the
+/// row is no longer empty — both tabs already had real rows, so the
+/// inherent-vertical-demand argument that motivated the VB-007 empty
+/// stub no longer holds; the unified shape pins panel height
+/// regardless).
+fn time_history_body(ui: &mut egui::Ui, state: &ShellState) {
+    if state.time_history.is_empty() && state.element_series.iter().all(|s| s.samples.is_empty()) {
+        ui.weak(
+            "no series yet — select a result and step through states, \
+             or add a per-element series below",
+        );
         return;
     }
-    let mins: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.min]).collect();
-    let maxs: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.max]).collect();
-    let label = state
+    let envelope_label = state
         .result
         .as_ref()
         .map_or_else(|| "result".to_string(), |r| r.name.clone());
     egui_plot::Plot::new("time_history")
         .legend(egui_plot::Legend::default())
         .show(ui, |p| {
-            p.line(
-                egui_plot::Line::new(format!("{label} max"), maxs)
-                    .color(egui::Color32::from_rgb(220, 110, 100)),
-            );
-            p.line(
-                egui_plot::Line::new(format!("{label} min"), mins)
-                    .color(egui::Color32::from_rgb(110, 160, 220)),
-            );
+            if !state.time_history.is_empty() {
+                let mins: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.min]).collect();
+                let maxs: Vec<[f64; 2]> = state.time_history.iter().map(|s| [s.t, s.max]).collect();
+                p.line(
+                    egui_plot::Line::new(format!("{envelope_label} max"), maxs)
+                        .color(egui::Color32::from_rgb(220, 110, 100)),
+                );
+                p.line(
+                    egui_plot::Line::new(format!("{envelope_label} min"), mins)
+                        .color(egui::Color32::from_rgb(110, 160, 220)),
+                );
+            }
+            for (idx, series) in state.element_series.iter().enumerate() {
+                if series.samples.is_empty() {
+                    continue;
+                }
+                let pts: Vec<[f64; 2]> = series.samples.iter().map(|s| [s.t, s.value]).collect();
+                p.line(
+                    egui_plot::Line::new(series.label.clone(), pts)
+                        .color(ELEMENT_SERIES_PALETTE[idx % ELEMENT_SERIES_PALETTE.len()]),
+                );
+            }
         });
+}
+
+/// Round-robin palette for the per-element [`ElementSeries`] lines.
+/// Deliberately disjoint from the min/max envelope colours so the
+/// envelope stays visually distinct from a query result.
+const ELEMENT_SERIES_PALETTE: [egui::Color32; 6] = [
+    egui::Color32::from_rgb(150, 200, 110),
+    egui::Color32::from_rgb(200, 160, 90),
+    egui::Color32::from_rgb(170, 130, 220),
+    egui::Color32::from_rgb(110, 200, 200),
+    egui::Color32::from_rgb(220, 150, 200),
+    egui::Color32::from_rgb(190, 190, 110),
+];
+
+/// Plot-tab input row: small `class · id · svar · component`
+/// text-edits + a `+series` button that lowers to
+/// [`UiAction::QueryElementSeries`] (`wireframe-parity.md` #4 — the
+/// text-input entry point variant the punch list called out as the
+/// non-design-first path). The fields are deliberately tiny so the
+/// row stays within the 22 px [`INPUT_ROW_H`] shared with the other
+/// tabs' inputs (VB-007 panel-height invariant).
+fn time_history_input(ui: &mut egui::Ui, state: &mut ShellState, actions: &mut Vec<UiAction>) {
+    let mono = egui::TextStyle::Monospace.resolve(ui.style());
+    let field = |ui: &mut egui::Ui, buf: &mut String, hint: &str, width: f32| {
+        ui.add(
+            egui::TextEdit::singleline(buf)
+                .font(mono.clone())
+                .desired_width(width)
+                .hint_text(hint),
+        )
+    };
+    field(ui, &mut state.plot_class_input, "class", 80.0);
+    field(ui, &mut state.plot_label_input, "id", 60.0);
+    field(ui, &mut state.plot_svar_input, "svar", 100.0);
+    field(ui, &mut state.plot_component_input, "comp", 60.0);
+    let click = ui.button("+series").clicked();
+    if click {
+        if let Some(a) = state.submit_element_query() {
+            actions.push(a);
+        }
+    }
+    // Picking-driven sibling (`wireframe-parity.md` #4 picking-driven
+    // variant; #6 lit up the catalog resolve that backs it). Enabled
+    // only when both halves of the contract are present: a resolved
+    // picked element AND a currently-shown svar (`result.name`). On
+    // hover the disabled button explains which half is missing so the
+    // greyed-out state is self-diagnosing.
+    let picked = state
+        .picked_element
+        .as_ref()
+        .map(|(c, l)| format!("{c} {l}"));
+    let svar = state
+        .result
+        .as_ref()
+        .map(|r| r.name.clone())
+        .filter(|n| !n.is_empty());
+    let enabled = picked.is_some() && svar.is_some();
+    let hover = match (&picked, &svar) {
+        (Some(p), Some(s)) => format!("Plot {s} for picked {p}"),
+        (None, _) => "Pick an element first".to_string(),
+        (_, None) => "No result shown — `show <svar>` first".to_string(),
+    };
+    let resp = ui
+        .add_enabled(enabled, egui::Button::new("+ pick"))
+        .on_hover_text(hover.clone())
+        .on_disabled_hover_text(hover);
+    if resp.clicked() {
+        if let Some(a) = state.submit_picked_element_query() {
+            actions.push(a);
+        }
+    }
 }
 
 /// Spec status-bar protocol cell. The frozen contract's identity is

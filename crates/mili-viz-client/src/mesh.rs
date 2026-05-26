@@ -36,7 +36,20 @@ pub struct Mesh {
     /// boundary from cell-cell shared faces (`phase-4-m7.md`
     /// Decision 74).
     pub tri_flags: Option<Vec<u32>>,
+    /// Optional per-triangle packed `(class_idx, elem_row)` member id
+    /// (wireframe-parity #6 path (a)): high 8 bits = class index in
+    /// catalog `M`-tag order, low 24 bits = element row within that
+    /// class. Sentinel [`TRI_MEMBER_NONE`] for cut/slice cap tris.
+    /// `None` for an older server that doesn't ship the column
+    /// (`flags_mask & 16 == 0`); pick readout falls back to the
+    /// legacy `tri T  node N` form.
+    pub tri_member_id: Option<Vec<u32>>,
 }
+
+/// Sentinel `tri_member_id` value: this triangle has no single owning
+/// element (cut/slice cap tri). Must match the server's
+/// `crate::geometry::TRI_MEMBER_NONE`.
+pub const TRI_MEMBER_NONE: u32 = u32::MAX;
 
 /// A client-side pick hit against the cached hull. The frozen proto's
 /// `GeometryRef` carries no node/element label catalog (only
@@ -56,6 +69,13 @@ pub struct Pick {
     pub point: [f32; 3],
     /// Result scalar at `node` for an `MVG2` hull, else `None`.
     pub scalar: Option<f32>,
+    /// Packed `(class_idx, elem_row)` for the picked triangle's owning
+    /// element (wireframe-parity #6 path (a)). `None` if the server
+    /// didn't ship the column or the hit is a cap tri (see
+    /// [`TRI_MEMBER_NONE`]). Resolved against
+    /// [`crate::catalog::ResultCatalog::resolve_member`] to render
+    /// `class · label` in the status bar.
+    pub member_id: Option<u32>,
 }
 
 /// Error decoding a geometry blob.
@@ -171,6 +191,7 @@ fn decode_mvg_legacy(blob: &[u8]) -> Result<Mesh, DecodeError> {
         scalars,
         element_edges: None,
         tri_flags: None,
+        tri_member_id: None,
     })
 }
 
@@ -208,6 +229,7 @@ fn decode_mvg3(blob: &[u8]) -> Result<Mesh, DecodeError> {
     let has_scalar = flags_mask & 1 != 0;
     let has_tri_flags = flags_mask & 2 != 0;
     let has_edges = flags_mask & 4 != 0;
+    let has_member = flags_mask & 16 != 0;
 
     let n_tri = n_idx / 3;
     let verts_bytes = n_verts * 3 * 4;
@@ -216,13 +238,15 @@ fn decode_mvg3(blob: &[u8]) -> Result<Mesh, DecodeError> {
     let triflag_bytes = if has_tri_flags { n_tri * 4 } else { 0 };
     let edges_bytes = if has_edges { n_edges * 4 } else { 0 };
     let scalar_bytes = if has_scalar { n_verts * 4 } else { 0 };
+    let member_bytes = if has_member { n_tri * 4 } else { 0 };
     let need = HEADER
         + verts_bytes
         + idx_bytes
         + trimat_bytes
         + triflag_bytes
         + edges_bytes
-        + scalar_bytes;
+        + scalar_bytes
+        + member_bytes;
     if blob.len() < need {
         return Err(DecodeError(format!(
             "MVG3 blob is {} bytes, layout needs {need}",
@@ -271,7 +295,17 @@ fn decode_mvg3(blob: &[u8]) -> Result<Mesh, DecodeError> {
         for v in 0..n_verts {
             s.push(le_f32(blob, off + v * 4));
         }
+        off += scalar_bytes;
         Some(s)
+    } else {
+        None
+    };
+    let tri_member_id = if has_member {
+        let mut m = Vec::with_capacity(n_tri);
+        for t in 0..n_tri {
+            m.push(le_u32(blob, off + t * 4));
+        }
+        Some(m)
     } else {
         None
     };
@@ -284,6 +318,7 @@ fn decode_mvg3(blob: &[u8]) -> Result<Mesh, DecodeError> {
         scalars,
         element_edges,
         tri_flags,
+        tri_member_id,
     })
 }
 
@@ -321,6 +356,7 @@ impl Mesh {
             scalars: None,
             element_edges: None,
             tri_flags: None,
+            tri_member_id: None,
         }
     }
 
@@ -464,6 +500,11 @@ impl Mesh {
                     distance: t,
                     point: hit.to_array(),
                     scalar: self.scalars.as_ref().map(|s| s[node]),
+                    member_id: self
+                        .tri_member_id
+                        .as_ref()
+                        .and_then(|m| m.get(t_i).copied())
+                        .filter(|id| *id != TRI_MEMBER_NONE),
                 });
             }
         }
