@@ -213,6 +213,24 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Single-call action: when the response returns ok:true, the command ran — "
         "reply with one short confirmation and STOP."
     ),
+    # Agent-local lookup tool (m7-bench-live-parity.md Delta 5). The
+    # bench dispatcher and the runtime agent both intercept this name
+    # before the typed Cmd dispatcher; there is no proto Cmd variant.
+    "list_results": (
+        "List queriable result names available in the currently loaded "
+        "database, with common natural-language aliases.\n"
+        "\n"
+        "Call this when the user refers to a result by descriptive "
+        "language (\"first principal stress\", \"x velocity\") instead "
+        "of by canonical name, or as a recovery step after a `show` "
+        "fails with `nonexistent_result`.\n"
+        "\n"
+        "Takes no arguments. Returns "
+        "{ok:true, results:[{name, type, description, aliases}, ...]}. "
+        "After receiving the list, immediately call `show` with the "
+        "matching canonical `name` — do not call `list_results` twice "
+        "in a row, and do not echo the list back to the user."
+    ),
 }
 
 # Output schemas — the W1 projection table from baseline.md. The W4a
@@ -401,6 +419,35 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "ok": {"type": "boolean"},
             "output": {"type": "string"},
+            "error": {"type": "string"},
+        },
+        "required": ["ok"],
+        "additionalProperties": False,
+    },
+    # m7 Delta 5 — agent-local lookup tool. Returned shape mirrors the
+    # Rust agent's `list_results_response` helper in
+    # `crates/mili-viz-server/src/llamacpp_agent_v1.rs`.
+    "list_results": {
+        "type": "object",
+        "properties": {
+            "ok": {"type": "boolean"},
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "type": {"type": "string", "enum": ["primal", "derived"]},
+                        "description": {"type": "string"},
+                        "aliases": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["name", "type"],
+                    "additionalProperties": False,
+                },
+            },
             "error": {"type": "string"},
         },
         "required": ["ok"],
@@ -791,6 +838,27 @@ def derive_tools(proto_path: Path | None = None) -> list[dict[str, Any]]:
                 "additionalProperties": False,
             },
             "output_schema": OUTPUT_SCHEMAS["griz_raw"],
+        }
+    )
+
+    # m7 Delta 5 — agent-local lookup tool (`list_results`). No proto
+    # Cmd variant; both the bench dispatcher and the runtime agent
+    # intercept this name before the typed-Cmd path and synthesize the
+    # response from the loaded database's catalog merged with
+    # `data/posttraining/grammar/result_aliases.json`. The tool is
+    # nonetheless declared here so the model sees it in its tool
+    # inventory and the bench can grade its calls under the same
+    # schema as every other tool.
+    tools.append(
+        {
+            "name": "list_results",
+            "description": TOOL_DESCRIPTIONS["list_results"],
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            "output_schema": OUTPUT_SCHEMAS["list_results"],
         }
     )
 

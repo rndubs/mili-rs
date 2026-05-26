@@ -279,6 +279,62 @@
     }
   },
   {
+    "name": "list_results",
+    "description": "List queriable result names available in the currently loaded database, with common natural-language aliases.\n\nCall this when the user refers to a result by descriptive language (\"first principal stress\", \"x velocity\") instead of by canonical name, or as a recovery step after a `show` fails with `nonexistent_result`.\n\nTakes no arguments. Returns {ok:true, results:[{name, type, description, aliases}, ...]}. After receiving the list, immediately call `show` with the matching canonical `name` \u2014 do not call `list_results` twice in a row, and do not echo the list back to the user.",
+    "input_schema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_schema": {
+      "type": "object",
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "primal",
+                  "derived"
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "aliases": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "name",
+              "type"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
     "name": "load",
     "description": "Load a Mili database by root path (e.g. 'd3samp6'). Single-call action: when the response returns ok:true (with num_states), the database is loaded \u2014 reply with one short confirmation and STOP. Do not call load again to verify.",
     "input_schema": {

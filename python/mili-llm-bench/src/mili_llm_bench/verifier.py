@@ -68,6 +68,12 @@ FAILURE_MODES: tuple[str, ...] = (
     "wrong_result",
     "wrong_range",
     "wrong_materials",
+    # Termination (L2 max even when the postcondition holds) —
+    # m7-bench-live-parity.md Delta 2. A rollout that satisfies the
+    # postcondition but never emits a content-only assistant
+    # message is downgraded so the bench number reflects live-UX
+    # behavior rather than oracle-truncated tool-call sequences.
+    "wrong_termination",
     # Driver-level
     "step_cap_hit",
     "token_cap_hit",
@@ -201,6 +207,28 @@ def _detect_driver_stop(messages: list[dict[str, Any]]) -> str | None:
         if reason in DRIVER_LEVEL_STOPS:
             return reason
     return None
+
+
+def _terminates_cleanly(messages: list[dict[str, Any]]) -> bool:
+    """m7 Delta 2 — the rollout's last message must be a content-only
+    ``assistant`` (no tool_calls, non-empty content). The driver's
+    synthetic ``stop:<reason>`` system markers, if any, are stripped
+    from the end so a clean rollout that the driver then capped is not
+    misread."""
+    i = len(messages) - 1
+    while i >= 0:
+        m = messages[i]
+        if m.get("role") == "system" and isinstance(m.get("content"), str) \
+                and m["content"].startswith("stop:"):
+            i -= 1
+            continue
+        return (
+            m.get("role") == "assistant"
+            and isinstance(m.get("content"), str)
+            and bool(m["content"].strip())
+            and not m.get("tool_calls")
+        )
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -541,6 +569,16 @@ def verify(
         pc_ok, pc_fail = handler(expect, calls)
 
     if pc_ok and driver_stop is None:
+        if not _terminates_cleanly(messages):
+            # m7 Delta 2 — postcondition holds but the rollout never
+            # closed with a content-only assistant message. The bench
+            # used to call this L3 (and the auto-terminate oracle hid
+            # the wider problem); honest grading caps this at L2.
+            return VerifierResult(
+                max_tier=2,
+                reward=2.0 / 3.0,
+                failure_mode="wrong_termination",
+            )
         return VerifierResult(max_tier=3, reward=1.0, failure_mode=None)
 
     # Did not reach L3.

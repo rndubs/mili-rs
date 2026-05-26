@@ -140,6 +140,41 @@ def _strip_driver_stop_markers(
     ]
 
 
+# M7 Delta 1 — every SFT record terminates on a content-only assistant
+# message so the trained model has a positive example of "after the
+# last tool response, emit short text and stop." See
+# planning/mili-viz/mili-agent/m7-bench-live-parity.md §"Delta 1".
+DEFAULT_TERMINATING_TEXT = "Done."
+
+
+def _append_terminating_assistant_text(
+    messages: list[dict[str, Any]],
+    text: str = DEFAULT_TERMINATING_TEXT,
+) -> list[dict[str, Any]]:
+    """Append a content-only ``{"role": "assistant", "content": text}``
+    after the final tool response so the rollout terminates with a
+    loss-bearing model-turn span the trainer can reward.
+
+    Idempotent: if the rollout already ends on a content-only assistant
+    message, return unchanged. If the rollout doesn't end on a ``tool``
+    message (malformed — Stage 5 should have caught this), also return
+    unchanged so the caller surfaces the shape problem downstream.
+    """
+    if not messages:
+        return messages
+    last = messages[-1]
+    if (
+        last.get("role") == "assistant"
+        and isinstance(last.get("content"), str)
+        and last["content"].strip()
+        and not last.get("tool_calls")
+    ):
+        return messages
+    if last.get("role") != "tool":
+        return messages
+    return [*messages, {"role": "assistant", "content": text}]
+
+
 def _normalize_tool_call_arguments(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -416,6 +451,7 @@ def project_sft_record(
 
     messages = _strip_driver_stop_markers(rec.get("messages") or [])
     messages = _normalize_tool_call_arguments(messages)
+    messages = _append_terminating_assistant_text(messages)
 
     verifier = rec.get("verifier") or {}
     postcondition = verifier.get("postcondition") or {}

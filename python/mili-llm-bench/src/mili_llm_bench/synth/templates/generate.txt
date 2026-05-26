@@ -1,0 +1,117 @@
+You are generating one SFT training scenario for a small (270M-parameter) FunctionGemma student that drives the Mili / griz post-processor through a small typed-tool inventory.
+
+Produce ONE JSON object matching the schema below. Output ONLY the JSON object — no preamble, no markdown code fence, no trailing prose. The object will be parsed verbatim by `json.loads`; an extra byte is a parse failure.
+
+# Inputs
+
+You will be conditioned on the following inputs filled in below by the generator:
+
+- `tier`: one of `easy` | `intermediate` | `hard` — see the tier rubric for what each means.
+- `intent_class`: which tool family the scenario should exercise (e.g. `show`, `set_state`, `compound-material-then-show`). Pick a tool sequence that matches this class.
+- `fixture`: the database name + a precomputed availability summary (number of states, sample of available result names). The instruction and tool sequence must be valid for this fixture — do not invent state indices beyond `num_states`, do not invent result names that are not in the catalog.
+- `tool_inventory`: the JSON tool list the student will see. Your generated assistant must only call tools from this list, with arguments that match their input schemas.
+- `result_aliases`: the relevant subset of `result_aliases.json` — canonical svar names with their natural-language aliases. Use these to vary phrasing in the user instruction.
+
+# Output schema
+
+```json
+{
+  "scenario_id": "synth-<tier>-<unique 5-digit suffix>",
+  "tier": "<easy | intermediate | hard>",
+  "fixture": "<fixture name>",
+  "intent_id": "<intent_class>",
+  "instruction": "<user instruction — natural English, one sentence>",
+  "instruction_source": "gemma-4-31B-distill",
+  "messages": [
+    {"role": "developer", "content": "<the bench system prompt verbatim — provided in inputs>"},
+    {"role": "user", "content": "<same as instruction>"},
+    {"role": "assistant", "tool_calls": [{"id": "call_0_0", "type": "function", "function": {"name": "<tool>", "arguments": "{\"k\": \"v\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_0_0", "name": "<tool>", "content": "<tool response JSON as a string>"},
+    {"role": "assistant", "content": "<short final ack — one short sentence, e.g. 'Done.' or 'Set state to 81.'>"}
+  ],
+  "postcondition": {"kind": "<one of state_index | selection_set | active_result | result_range | materials_visible | camera_named_view | query_value>", "expect": {...}}
+}
+```
+
+# Hard rules — failure to follow any of these causes the scenario to be rejected at validation
+
+1. **Tool inventory respect.** Every tool name in `messages[*].tool_calls[*].function.name` must appear verbatim in `tool_inventory`. No invented tools, no spelling drift.
+2. **Argument schema respect.** Every `tool_calls[*].function.arguments` (after JSON-decoding the string) must conform to that tool's `input_schema`. Types must be exact — `state` is an integer, not a string; `enable` is a boolean.
+3. **Fixture grounding.** State indices are 1-based and `<= fixture.num_states`. Result names referenced in the instruction must either be the canonical name (from `fixture.sample_results`) or a known alias from `result_aliases`. The assistant's `show` call must use the canonical name, not the alias.
+4. **Clean termination.** The final message MUST be `{"role": "assistant", "content": "<short text>"}` with non-empty content and no `tool_calls`. The bench verifier downgrades any rollout that doesn't terminate cleanly to L2 (`wrong_termination`) — m7 Delta 2.
+5. **Postcondition matches the rollout.** Whatever the assistant did, the postcondition must be satisfiable by it. `verifier.verify(messages, postcondition).max_tier == 3` against this exact rollout — otherwise the scenario is junk.
+6. **Single-purpose.** Solve the user's request, then stop. Do not add extra "verify" or "snapshot" calls after the postcondition is met. The student is being trained to terminate, not to over-call.
+7. **Aliases ≠ canonical.** When `tier` is `intermediate` or `hard` and the user instruction uses an alias, the assistant SHOULD call `list_results` first to look up the canonical name, then call `show` with it. When the user already uses the canonical name, do NOT call `list_results` — it would waste tokens.
+
+# Exemplars
+
+## EASY example — direct canonical name, single call, immediate termination
+
+```json
+{
+  "scenario_id": "synth-easy-00001",
+  "tier": "easy",
+  "fixture": "d3samp6",
+  "intent_id": "set_state",
+  "instruction": "set the state to 50",
+  "instruction_source": "gemma-4-31B-distill",
+  "messages": [
+    {"role": "developer", "content": "<SYSTEM_PROMPT>"},
+    {"role": "user", "content": "set the state to 50"},
+    {"role": "assistant", "tool_calls": [{"id": "call_0_0", "type": "function", "function": {"name": "set_state", "arguments": "{\"state\": 50}"}}]},
+    {"role": "tool", "tool_call_id": "call_0_0", "name": "set_state", "content": "{\"ok\": true, \"action_complete\": true, \"state\": 50, \"requested_state\": 50}"},
+    {"role": "assistant", "content": "State 50."}
+  ],
+  "postcondition": {"kind": "state_index", "expect": {"state": 50}}
+}
+```
+
+## INTERMEDIATE example — natural-language reference resolved via list_results
+
+```json
+{
+  "scenario_id": "synth-intermediate-00007",
+  "tier": "intermediate",
+  "fixture": "d3samp6",
+  "intent_id": "show",
+  "instruction": "color the mesh by the first principal stress",
+  "instruction_source": "gemma-4-31B-distill",
+  "messages": [
+    {"role": "developer", "content": "<SYSTEM_PROMPT>"},
+    {"role": "user", "content": "color the mesh by the first principal stress"},
+    {"role": "assistant", "tool_calls": [{"id": "call_0_0", "type": "function", "function": {"name": "list_results", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "call_0_0", "name": "list_results", "content": "{\"ok\": true, \"results\": [{\"name\": \"prin_stress1\", \"type\": \"derived\", \"description\": \"First principal stress\", \"aliases\": [\"first principal stress\", \"principal stress 1\"]}]}"},
+    {"role": "assistant", "tool_calls": [{"id": "call_1_0", "type": "function", "function": {"name": "show", "arguments": "{\"result\": \"prin_stress1\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1_0", "name": "show", "content": "{\"ok\": true, \"action_complete\": true, \"result\": \"prin_stress1\", \"range\": [0.0, 1.2]}"},
+    {"role": "assistant", "content": "Showing first principal stress."}
+  ],
+  "postcondition": {"kind": "active_result", "expect": {"result": "prin_stress1"}}
+}
+```
+
+## HARD example — recovery after a failed show
+
+```json
+{
+  "scenario_id": "synth-hard-00003",
+  "tier": "hard",
+  "fixture": "d3samp6",
+  "intent_id": "show",
+  "instruction": "show eff_stres",
+  "instruction_source": "gemma-4-31B-distill",
+  "messages": [
+    {"role": "developer", "content": "<SYSTEM_PROMPT>"},
+    {"role": "user", "content": "show eff_stres"},
+    {"role": "assistant", "tool_calls": [{"id": "call_0_0", "type": "function", "function": {"name": "show", "arguments": "{\"result\": \"eff_stres\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_0_0", "name": "show", "content": "{\"ok\": false, \"error\": \"'eff_stres' is not a recognized result on this database\", \"error_kind\": \"nonexistent_result\"}"},
+    {"role": "assistant", "tool_calls": [{"id": "call_1_0", "type": "function", "function": {"name": "list_results", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "call_1_0", "name": "list_results", "content": "{\"ok\": true, \"results\": [{\"name\": \"eff_stress\", \"type\": \"derived\", \"description\": \"Effective stress\", \"aliases\": [\"effective stress\", \"von mises stress\"]}]}"},
+    {"role": "assistant", "tool_calls": [{"id": "call_2_0", "type": "function", "function": {"name": "show", "arguments": "{\"result\": \"eff_stress\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_2_0", "name": "show", "content": "{\"ok\": true, \"action_complete\": true, \"result\": \"eff_stress\", \"range\": [0.0, 2.4]}"},
+    {"role": "assistant", "content": "Showing eff_stress (matched effective stress)."}
+  ],
+  "postcondition": {"kind": "active_result", "expect": {"result": "eff_stress"}}
+}
+```
+
+# Now produce one scenario for the inputs above. Output ONLY the JSON object.

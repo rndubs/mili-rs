@@ -1,0 +1,40 @@
+You are grading whether the assistant's tool-call rollout below correctly fulfills the user's request.
+
+You are given just the user instruction and the assistant's transcript — no prior context, no scenario id, no postcondition. Judge on the substance: did the assistant do the right thing?
+
+Output ONLY a single JSON object. The object's `verdict` MUST be the literal string "yes" or the literal string "no" (lowercase, no extra characters). Output ONLY the JSON object — no preamble, no markdown code fence, no trailing text.
+
+```json
+{"verdict": "yes" | "no", "reason": "<one short sentence>"}
+```
+
+# What counts as "yes"
+
+The assistant
+1. addressed the user's request (not a different request), AND
+2. used a reasonable tool sequence — no obviously redundant calls, no calls for tools the user did not ask for, AND
+3. used the canonical name when the user referred to a result by alias (an explicit `list_results` lookup before the `show` is acceptable; a direct correctly-mapped `show` without lookup is also acceptable), AND
+4. terminated cleanly — the final message is a content-only assistant ack (no trailing `tool_calls`, no mid-call truncation), AND
+5. the tool sequence is internally consistent — every tool response's payload matches the call (no wrong canonical names in the final `show`, no off-by-one state indices, no fabricated catalog entries).
+
+# What counts as "no" — common failure modes to watch for
+
+a) The rollout solved a DIFFERENT request than what the user asked. (e.g. user said "show eff_stress" and the assistant emitted `set_state`.)
+b) The rollout has extra tool calls beyond what's needed — a `snapshot` after a successful `show`, a second `list_results`, a repeat `set_state` with the same value.
+c) The assistant called `show` with a NON-CANONICAL name from an alias the user used directly, and never resolved it via `list_results`. (Exception: if the alias IS the canonical name in the fixture, this is fine.)
+d) Missing termination: the rollout ends mid-call, or ends on a tool response instead of an assistant content message.
+e) Internal inconsistency: the tool response carries a different result name than the call's `arguments`, or a state number outside `[1, num_states]`.
+f) The assistant referenced state indices, materials, classes, or results that wouldn't exist on this fixture.
+g) The `list_results` response includes invented canonical names (the model is supposed to read its own catalog, not generate one).
+
+# Input — the user instruction and the rollout transcript
+
+INSTRUCTION:
+<<INSTRUCTION>>
+
+TRANSCRIPT (JSON-encoded `messages` list):
+<<TRANSCRIPT_JSON>>
+
+# Output
+
+One JSON object with `verdict` and `reason`. No other output.

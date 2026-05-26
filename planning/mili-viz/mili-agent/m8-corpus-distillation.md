@@ -1,6 +1,213 @@
 # M8 — corpus distillation (teacher-model SFT data campaign)
 
-**Status (2026-05-25):** Plan only. Sequenced after M7
+**Status (2026-05-25):** **Stage A1–A5 landed (M7 code-only deltas);
+Stage B2/B3/B4 drafted; Stage A6 + B1 + C + E + F gated on H100
+access.** This doc is the single "go" pointer — read the
+§"Runbook" below top-to-bottom on day-of-cluster-access and follow
+the numbered steps. The rest of the document is the design rationale
+the runbook links into.
+
+| Stage | What | State |
+| --- | --- | --- |
+| A1–A5 | M7 Deltas 1–5 (terminating text, `wrong_termination`, no-oracle driver, `show` no-clobber, `list_results`) | ✅ landed on `setup-posttraining-m7` |
+| A6 | M7 Gate 7 honest baseline measurement | ⛔ blocked on H100 |
+| B1 | `result_aliases.json` content (~155 entries, human-reviewed) | ⛔ blocked on cluster (corpus enumeration) + 31B teacher draft |
+| B2 | `synth/templates/generate.txt` few-shot prompt | ✅ drafted |
+| B3 | `synth/templates/critic.txt` self-critique prompt | ✅ drafted |
+| B4 | [`m8-tier-rubric.md`](m8-tier-rubric.md) per-intent_class exemplar table | ✅ drafted |
+| C | Teacher infra (pull model, install vLLM, write `providers/gemma_teacher.py`) | ⛔ blocked on H100 |
+| D | Synth pipeline scaffolding (`synth/generate.py`, `validate.py`, `critic.py`, `diversity.py`) | 🟡 not started — **pure code, can land off-cluster** |
+| E | Pilot (90 scenarios, full validation, manual review) | ⛔ blocked on Stage C + D |
+| F | Production go/no-go | ⛔ blocked on Stage E |
+
+---
+
+## Runbook — turn-key sequence to v2 student
+
+Goal: take the codebase from "M7 deltas merged" to "v2 student trained
+on the distilled corpus and bench-passed". Numbered phases below
+distinguish off-cluster from on-cluster work so the H100 budget is
+spent only on what needs the GPU.
+
+### Phase 0 — pre-merge (now, off-cluster, ~hours)
+
+Lands the remaining code so the cluster sequence below is pure-data /
+pure-bench, no in-flight refactoring.
+
+1. **Merge `setup-posttraining-m7` to `main`.** Carries M7 Deltas 1, 2,
+   3, 5 + the M8 Stage B templates + tier rubric + empty alias-table
+   stub. Gate: `cargo test -p mili-viz-server` (52/52) and
+   `pytest python/mili-llm-bench/tests/` (252/252) both green;
+   `cargo fmt --check` clean; `cargo clippy --workspace --no-deps -D
+   warnings` clean.
+2. **Land Stage D — synth pipeline scaffolding.** Pure Python, no GPU
+   needed. Implement under `python/mili-llm-bench/src/mili_llm_bench/synth/`:
+   - `generate.py` — orchestrate teacher inference for a batch of
+     `(tier, intent_class, fixture)` tuples; write raw candidates to
+     `data/posttraining/runs/synth-vN/candidates.jsonl`. Read the
+     templates from `synth/templates/generate.txt`.
+   - `validate.py` — three-layer validator (programmatic via
+     `verifier.verify`, semantic via `critic.py`, diversity via
+     `diversity.py`). Cheap-first order; rejected scenarios written
+     with reason to `rejected.jsonl`.
+   - `critic.py` — Layer 2; same vLLM-loaded teacher, fresh-context
+     critique prompt from `synth/templates/critic.txt`.
+   - `diversity.py` — Layer 3; sentence-transformers `all-MiniLM-L6-v2`
+     embedding + cosine > 0.92 reject.
+   - `pipeline.py` (or `synth/__main__.py` subcommand) — end-to-end
+     runner: `python -m mili_llm_bench.synth pipeline --tier easy
+     --n 30 --fixture d3samp6 --out data/posttraining/runs/synth-pilot-v1`.
+   - Mock-provider unit tests so the pipeline is testable without the
+     teacher loaded.
+3. **Decision: provider abstraction for the teacher.** Add
+   `providers/gemma_teacher.py` as a *stub* that conforms to the
+   `LlmProvider` protocol but raises on `generate()`. Stage C below
+   fills in the real vLLM impl. Lets the rest of the synth code be
+   typed against the real interface without standing up the teacher.
+
+**Gate to Phase 1:** the synth pipeline scaffolding lands, passes its
+mock-provider tests, and `python -m mili_llm_bench.synth pipeline
+--provider mock --n 10` produces 10 candidates + a non-empty
+`validated.jsonl` against a hand-fabricated mock teacher.
+
+### Phase 1 — H100 day-0 setup (~1 hour)
+
+First contact with the GPU. Everything below requires
+`source scripts/setup-gpu-env.sh` and cluster filesystem access.
+
+4. **Confirm the canonical Gemma id.** From the cluster:
+   ```bash
+   huggingface-cli search google/gemma
+   ```
+   Pin the exact id (`google/gemma-4-31B`, `google/gemma-4-31b`,
+   `google/gemma-4-31B-it`, etc.) and write it into `gemma_teacher.py`
+   and this doc. Prefer the **-it** (instruction-tuned) variant —
+   §"Teacher model" item 2.
+5. **Pull the model.** Cache size ~62GB at BF16:
+   ```bash
+   huggingface-cli download <pinned-id> \
+     --local-dir /p/vast1/whitmore/cadsat/models/gemma-4-31B
+   ```
+   Verify checksums; this is a one-time download.
+6. **Install vLLM and smoke it.** From the M5 env on the cluster:
+   ```bash
+   uv pip install --directory python vllm
+   python -c "from vllm import LLM; llm = LLM(model='/p/vast1/whitmore/cadsat/models/gemma-4-31B'); print(llm.generate(['hello'])[0].outputs[0].text)"
+   ```
+   Expected memory: ~70–80 GB on a single H100 80GB at BF16 (see
+   chat-history memory table). If OOM, drop
+   `--gpu-memory-utilization=0.80`.
+7. **Fill in `gemma_teacher.py`.** Replace the Phase 0 stub with the
+   real vLLM-backed `generate()` — see §"Teacher model" item 4.
+   Smoke: `python -m mili_llm_bench.synth pipeline --provider
+   gemma_teacher --n 10 --fixture d3samp6` produces 10 real
+   teacher-generated candidates.
+
+**Gate to Phase 2:** `gemma_teacher.generate()` round-trips a
+fabricated prompt and returns sensible output. Single-call latency +
+throughput measured and recorded in
+`planning/mili-viz/mili-agent/m8-corpus-distillation.md` § "Teacher
+model" item 5.
+
+### Phase 2 — H100 day-1: M7 Gate 7 + B1 alias enumeration (~half-day)
+
+8. **M7 Gate 7 honest baseline.** Retrain the v1 corpus through the
+   landed `assemble.py` (terminating text appended) on the SFT
+   cluster — see [`m5-sft-pipeline.md`](m5-sft-pipeline.md) §"Stage 6".
+   ~5–10 min wall clock. Then re-run the bench against the heldout:
+   ```bash
+   uv run --directory python/mili-llm-bench mili-llm-bench run \
+     --provider llamacpp \
+     --scenarios data/posttraining/sft/eval/heldout.jsonl \
+     --out data/posttraining/runs/v2-llamacpp-baseline \
+     --step-cap 8 --per-turn-timeout-s 120 --max-new-tokens 256
+   ```
+   Record: L3 % under the new verifier, `failure_mode` histogram with
+   `wrong_termination` and `step_cap_hit` bucketed separately, mean
+   turns to completion. **Expected drop from rev-22's 95.06% L3** —
+   30%–80% is plausible per the M7 plan. Whatever number lands IS the
+   M8 baseline.
+
+9. **B1 alias-table content.** Two steps:
+   - **Enumerate** the canonical svar set across every test fixture.
+     Walk `db.queriable_svars(false, false)` and
+     `db.derived_variables_of_class` per mesh class, union and dedup.
+     Target: ~155 entries. Write a one-shot script (or inline in
+     `synth/catalog.py`) — output goes to a scratch file.
+   - **Draft aliases** via Gemma-4-31B: feed the canonical names in
+     batches of ~20 with the prompt "give 5 plausible
+     natural-language phrasings each". Capture into
+     `data/posttraining/grammar/result_aliases.json` matching the
+     schema in `result_aliases.README.md`.
+   - **Human review.** Mili / griz domain knowledge required. Bad
+     aliases poison every M8 scenario that uses them, so do not skip.
+     Unit test: every key unique; every name present in the catalog
+     enumeration above (no orphans).
+
+**Gate to Phase 3:** baseline number recorded; `result_aliases.json`
+populated and human-reviewed; `cargo test -p mili-viz-server` still
+green (the alias table parses at compile time — a malformed file
+panics at first use).
+
+### Phase 3 — H100 day-2: pilot run (~few hours)
+
+10. **Run the 90-scenario pilot.** Per the M8 plan Stage E:
+    ```bash
+    python -m mili_llm_bench.synth pipeline \
+      --provider gemma_teacher \
+      --tiers easy=30,intermediate=30,hard=30 \
+      --out data/posttraining/runs/synth-pilot-v1
+    ```
+    Records per-layer acceptance rates. Target: ≥30% overall
+    acceptance. If <10%, **stop** — return to the templates
+    (`synth/templates/generate.txt` + `critic.txt`) and tune the
+    prompts; do **not** scale up under low acceptance.
+
+11. **Manual review.** Eyeball ~15 accepted + ~15 rejected scenarios.
+    Pass criteria: ≥90% of accepteds look natural and correct;
+    rejections are reasonable (not over-strict).
+
+12. **Regression sanity.** Run the existing 82-record v1 corpus
+    through the same validator pipeline. The human-written records
+    should mostly pass; if many false-reject, the validator is too
+    strict — tune Layer 2/3 thresholds.
+
+**Gate to Phase 4 (F1–F4 from §"Production go/no-go"):** pilot
+acceptance ≥30%, accepted-scenario quality ≥90%, loss-mask probe
+healthy on the new shape, wall-clock projection acceptable.
+
+### Phase 4 — H100 day-3+: production + retrain (~half-day to overnight)
+
+13. **Production run.** Default 5000 scenarios, 40/40/20 tier split,
+    intent split overweighting `show` and `set_state`. Wall-clock
+    projection ~28 hours on a single H100 BF16 at 30 t/s output; cut
+    via tensor-parallel = 2 on two H100s for ~14 hours. Output:
+    `data/posttraining/runs/synth-prod-v1/{accepted,rejected}.jsonl`.
+
+14. **Retrain student on the production corpus.** Reuses Stage 6/7 of
+    [`m5-sft-pipeline.md`](m5-sft-pipeline.md) verbatim. ~5–10 min
+    wall clock on `matrix41`. Output: `functiongemma-v2.bf16.gguf`.
+
+15. **Bench + live smoke.** Validation gates G1–G4 from §"Validation
+    plan":
+    - G1: pilot quality (already passed in Phase 3)
+    - G2: pipeline rerun reproducibility (same seeds → byte-identical
+      output)
+    - G3: bench L3 on heldout ≥ Phase 2 baseline + 15pp (absolute)
+    - G4: live griz smoke on the compound prompts that failed in M6
+      ("show the prin_stress1 values for the last time step", "show
+      the von Mises stress at the deformed configuration", etc.)
+
+**Done when:** all four §"Success criteria" hold: bench L3 ≥
+baseline+15pp, `wrong_termination` < 5%, live smoke passes ≥ 8/11
+per-intent prompts, `list_results` lookup rate on intermediate-tier
+≥ 60% of natural-language references.
+
+---
+
+## Original sequencing context (pre-runbook)
+
+Sequenced after M7
 ([`m7-bench-live-parity.md`](m7-bench-live-parity.md)) Gate 7 — the
 honest baseline run on the re-rendered 82-record corpus. M8 only
 starts if that baseline confirms the existing corpus has hit a
@@ -352,43 +559,60 @@ instruction + rollout transcript. Output: `{"verdict": "yes"|"no",
 
 ### Stage A — M7 must be complete
 
-- [ ] **A1.** M7 Delta 1 (`assemble.py` terminating-text) landed and
-  re-rendered 82-record corpus validated.
-- [ ] **A2.** M7 Delta 2 (`verifier.wrong_termination`) landed and
-  unit-tested.
-- [ ] **A3.** M7 Delta 3 (driver no-oracle) landed.
-- [ ] **A4.** M7 Delta 4 (server `show` no-clobber) landed ✅ (commit
-  679bd48).
-- [ ] **A5.** M7 Delta 5 (`list_results` tool registered in
-  `tools.json`, agent handler implemented in
-  `llamacpp_agent_v1.rs`, `AgentTurnCtx.catalog_provider` plumbed,
-  system_prompt.txt updated, Rust unit tests added) landed.
+- [x] **A1.** M7 Delta 1 (`assemble.py` terminating-text) landed
+  (`setup-posttraining-m7`); re-rendered 82-record corpus validated
+  via the §A audit test in `test_assemble.py`. Cluster retrain is
+  Phase 2 / step 8 of the §"Runbook".
+- [x] **A2.** M7 Delta 2 (`verifier.wrong_termination`) landed and
+  unit-tested (3 new tests + 10 happy-path tests updated).
+- [x] **A3.** M7 Delta 3 (driver no-oracle) landed; legacy behavior
+  preserved behind `EvalConfig.allow_oracle_early_exit=False` +
+  `--allow-oracle-early-exit` CLI flag.
+- [x] **A4.** M7 Delta 4 (server `show` no-clobber) landed ✅ (commit
+  679bd48 on `main`).
+- [x] **A5.** M7 Delta 5 (`list_results` tool registered in
+  `tools.json`, agent handler in `llamacpp_agent_v1.rs`,
+  `AgentTurnCtx.catalog` closure plumbed via
+  `crate::agent::CatalogProvider` + `Session::list_results_catalog`,
+  `system_prompt.txt` updated to sha256[:16] `34cc473118246dfb` /
+  2415 bytes, 4 new Rust unit tests). Schemas regenerated to 19
+  entries.
 - [ ] **A6.** M7 Gate 7 baseline measurement taken — bench L3 +
-  failure-mode histogram recorded under the new verifier/driver. This
-  is the *honest* baseline M8 is measured against.
+  failure-mode histogram recorded under the new verifier/driver.
+  **Cluster-gated (Phase 2 / step 8 of the §"Runbook").** This is the
+  *honest* baseline M8 is measured against.
 
 ### Stage B — Content artifacts
 
 - [ ] **B1.** `data/posttraining/grammar/result_aliases.json` exists,
-  covers every queriable svar in test corpora, human-reviewed.
-- [ ] **B2.** `synth/templates/generate.txt` drafted, with ≥3 exemplars
-  per tier.
-- [ ] **B3.** `synth/templates/critic.txt` drafted.
-- [ ] **B4.** Tier rubric written down with concrete examples per
-  intent_class.
+  covers every queriable svar in test corpora, human-reviewed. Stub
+  (`[]`) + schema doc (`result_aliases.README.md`) landed; content
+  blocked on Phase 2 / step 9 of the §"Runbook" (corpus enumeration
+  + teacher draft + human review).
+- [x] **B2.** `synth/templates/generate.txt` drafted with one exemplar
+  per tier (easy / intermediate / hard).
+- [x] **B3.** `synth/templates/critic.txt` drafted with the
+  failure-mode rubric.
+- [x] **B4.** Tier rubric written: [`m8-tier-rubric.md`](m8-tier-rubric.md)
+  pins the `tier × intent_class` exemplar table.
 
 ### Stage C — Teacher infrastructure
 
 - [ ] **C1.** `google/gemma-4-31B` (or its canonical name) pulled to
-  the cluster at a known path.
+  the cluster at a known path. **Phase 1 / step 5.**
 - [ ] **C2.** vLLM installed and smoke-tested with the teacher model
-  (one inference call returns sensible output).
+  (one inference call returns sensible output). **Phase 1 / step 6.**
 - [ ] **C3.** `providers/gemma_teacher.py` implemented as a clean
-  `LlmProvider`.
+  `LlmProvider`. **Phase 0 / step 3 (stub) → Phase 1 / step 7 (real
+  vLLM-backed impl).**
 - [ ] **C4.** Single-call latency + throughput measured. Project the
-  wall-clock budget for the target corpus size.
+  wall-clock budget for the target corpus size. **Phase 1 / Gate to
+  Phase 2.**
 
 ### Stage D — Pipeline implementation
+
+Pure code, **no GPU needed.** Lands in Phase 0 / step 2 of the
+§"Runbook" so the cluster sequence is data/bench-only.
 
 - [ ] **D1.** `synth/generate.py` — orchestrates teacher inference for
   a batch of (tier, intent, fixture) tuples, writes raw candidates to
@@ -402,7 +626,8 @@ instruction + rollout transcript. Output: `{"verdict": "yes"|"no",
 - [ ] **D4.** `synth/diversity.py` — Layer 3 implementation.
 - [ ] **D5.** End-to-end pipeline script
   (`python -m mili_llm_bench.synth pipeline --tier easy --n 30 ...`)
-  exists and runs without errors on a 10-scenario smoke.
+  exists and runs without errors on a 10-scenario smoke against the
+  `mock` provider (so the pipeline is testable before C3 is real).
 
 ### Stage E — Pilot
 
@@ -522,19 +747,26 @@ corpus + retrain:
 
 ## Path forward
 
-1. **Hold until M7 Gate 7.** No M8 work begins before the honest
-   baseline is recorded.
-2. **Stage B in parallel with the tail of M7.** Content artifacts
-   (`result_aliases.json`, prompt templates) can be drafted while
-   Deltas 1–3 land.
-3. **Stage C as M7 winds down.** Pull the teacher model, install
-   vLLM, validate single inference.
-4. **Stage D — pipeline implementation.** All Python; no model spend.
-5. **Stage E — pilot.** 90 scenarios, full validation. Gate F1–F4.
-6. **Stage F — production.** 5000 scenarios. Wall-clock budget
-   permitting.
-7. **Retrain student on the production corpus.**
-8. **Gates G1–G4.** Bench + live smoke + manual review.
+See the top-of-doc §"Runbook — turn-key sequence to v2 student" for
+the operational sequence. The runbook is the GO doc; the design
+rationale above (§"Validation pipeline", §"Static content artifacts",
+§"Detailed prerequisite checklist") is what the runbook steps link
+into.
 
-Each stage's deliverables are reviewable in isolation; nothing
-commits to the next stage's scope until the prior one's gates pass.
+Phase summary:
+
+- **Phase 0 — off-cluster.** Merge `setup-posttraining-m7`; land
+  Stage D (synth pipeline scaffolding, pure Python); stub
+  `gemma_teacher.py`.
+- **Phase 1 — H100 day-0.** Confirm Gemma id; pull model; vLLM smoke;
+  fill in `gemma_teacher.py`.
+- **Phase 2 — H100 day-1.** M7 Gate 7 baseline (retrain v1 corpus on
+  the new `assemble.py`, bench under the new verifier/driver);
+  populate B1 alias content + human review.
+- **Phase 3 — H100 day-2.** 90-scenario pilot; layer acceptance
+  measurement; manual review; regression sanity on the v1 corpus.
+- **Phase 4 — H100 day-3+.** Production run (5000 scenarios); retrain
+  student; gates G1–G4.
+
+Each phase's gate is concrete and falsifiable; nothing commits to the
+next phase's scope until the prior gate passes.

@@ -108,8 +108,11 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
             ProviderOutput(
                 tool_calls=[{"name": "load", "arguments": {"root": scenario.fixture}}]
             ),
-            # The final_text slot is intentionally never consumed — the
-            # driver auto-terminates as soon as the postcondition is met.
+            # m7 Delta 3 — the loop no longer auto-terminates on the
+            # postcondition oracle, so the model must emit final_text
+            # to close the rollout. The bench mirrors live-UX
+            # behavior: one productive tool call, then a short
+            # acknowledgment.
             ProviderOutput(final_text="loaded."),
         ]
     )
@@ -126,11 +129,9 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
     assert result.verifier_result.max_tier == 3
     assert result.verifier_result.failure_mode is None
     assert result.verifier_result.reward == 1.0
-    # One productive tool_calls turn satisfies the postcondition; the
-    # driver auto-terminates without waiting for a final_text turn.
     kinds = [t.kind for t in result.turns]
-    assert kinds == ["tool_calls"]
-    assert provider.calls_made == 1
+    assert kinds == ["tool_calls", "final_text"]
+    assert provider.calls_made == 2
     assert result.wall_ms_total >= 0
     # No driver-level stop on a clean run.
     assert not any(
@@ -146,6 +147,9 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
         "role": "user",
         "content": scenario.instruction,
     }
+    # m7 Delta 1/2 — clean termination is now a load-bearing
+    # signal: the last message is the model's content-only ack.
+    assert result.messages[-1] == {"role": "assistant", "content": "loaded."}
 
 
 # ---------------------------------------------------------------------------
@@ -155,14 +159,16 @@ def test_run_one_scenario_happy_path_bs_001() -> None:
 
 
 def test_run_one_scenario_auto_terminates_when_postcondition_met() -> None:
-    """Weak open-weight models often emit repeat-the-call trajectories
-    and never produce final_text. The driver auto-terminates the loop
-    when the verifier grades the rollout L3 mid-loop, so a correct
-    first call is not converted into a ``step_cap_hit``."""
+    """Legacy oracle-early-exit behavior preserved behind
+    ``EvalConfig.allow_oracle_early_exit=True`` (m7 Delta 3).
+
+    Weak open-weight models often emit repeat-the-call trajectories
+    and never produce final_text; opting into the oracle keeps the
+    harness from converting a correct first call into a
+    ``step_cap_hit`` and is useful for reproducing pre-M7 bench
+    numbers. The honest default (off) is exercised by the
+    happy-path test above."""
     scenario = _scenario_by_id("bs-001")
-    # Script repeats the (postcondition-satisfying) `load` call forever
-    # and never emits final_text — exactly the FunctionGemma loop
-    # pathology, but with a productive first call.
     provider = MockLlmProvider(
         [
             ProviderOutput(
@@ -171,7 +177,7 @@ def test_run_one_scenario_auto_terminates_when_postcondition_met() -> None:
             for _ in range(8)
         ]
     )
-    config = EvalConfig(step_cap=8)
+    config = EvalConfig(step_cap=8, allow_oracle_early_exit=True)
     result = run_one_scenario(
         provider=provider,
         dispatcher_factory=_loader_dispatcher,
@@ -180,11 +186,15 @@ def test_run_one_scenario_auto_terminates_when_postcondition_met() -> None:
         config=config,
         registry=_REGISTRY,
     )
-    assert result.verifier_result.max_tier == 3
-    assert result.verifier_result.failure_mode is None
-    # Exactly one tool_calls turn — the second iteration's L3 check
-    # would have caught it too, but the first turn already satisfies
-    # the postcondition.
+    # m7 Delta 2 — the rollout still scores L3 under the oracle
+    # because the wrong_termination check only fires when the
+    # postcondition itself is the L3 gate; the oracle-driven break
+    # leaves the rollout terminating on a tool message, which the
+    # honest grader would now flag.
+    assert result.verifier_result.max_tier == 2
+    assert result.verifier_result.failure_mode == "wrong_termination"
+    # Exactly one tool_calls turn — the first turn satisfies the
+    # postcondition and the oracle breaks the loop.
     assert len(result.turns) == 1
     # No driver-level stop on the clean auto-terminate path.
     assert not any(
@@ -192,6 +202,36 @@ def test_run_one_scenario_auto_terminates_when_postcondition_met() -> None:
         for m in result.messages
     )
     assert provider.calls_made == 1
+
+
+def test_run_one_scenario_runs_to_step_cap_without_final_text() -> None:
+    """m7 Delta 3 default — without ``allow_oracle_early_exit``, a
+    looping model that satisfies the postcondition but never emits
+    final_text now reports ``step_cap_hit``, matching live-UX
+    behavior. This is the honest measurement the M7 plan asks for;
+    pre-M7 bench numbers that auto-terminated on the oracle no
+    longer apply."""
+    scenario = _scenario_by_id("bs-001")
+    provider = MockLlmProvider(
+        [
+            ProviderOutput(
+                tool_calls=[{"name": "load", "arguments": {"root": scenario.fixture}}]
+            )
+            for _ in range(8)
+        ]
+    )
+    config = EvalConfig(step_cap=3)
+    result = run_one_scenario(
+        provider=provider,
+        dispatcher_factory=_loader_dispatcher,
+        scenario=scenario,
+        tools=_TOOLS_LIST,
+        config=config,
+        registry=_REGISTRY,
+    )
+    assert result.verifier_result.failure_mode == "step_cap_hit"
+    # The provider was invoked once per turn until step_cap.
+    assert provider.calls_made == 3
 
 
 # ---------------------------------------------------------------------------
@@ -700,5 +740,7 @@ def test_eval_config_is_frozen_and_pins_baseline_defaults() -> None:
     assert cfg.temperature == 0.0
     assert cfg.seed == 0
     assert cfg.per_turn_timeout_s == 60.0
+    # m7 Delta 3 — bench loop runs to natural termination by default.
+    assert cfg.allow_oracle_early_exit is False
     with pytest.raises(Exception):
         cfg.step_cap = 99  # type: ignore[misc]

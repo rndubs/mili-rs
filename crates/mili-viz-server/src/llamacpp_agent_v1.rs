@@ -6,8 +6,10 @@
 //!   prompt distribution the v1 SFT trained against.
 //! - System prompt is read from
 //!   `data/posttraining/grammar/system_prompt.txt`, which the Python bench
-//!   driver also points at — single source of truth, sha256 prefix
-//!   `9f36d0deb5e98a89`.
+//!   driver also points at — single source of truth. After m7 Delta 5
+//!   the pinned sha256[:16] is `34cc473118246dfb`; the prior pin
+//!   (`9f36d0deb5e98a89`) covered the v1 SFT prompt before the
+//!   `list_results` mapping landed.
 //! - Parser tries (1) the OpenAI-shape `message.tool_calls` field (no-op on
 //!   FG GGUFs where `supports_tool_calls=false`), (2) free-floating
 //!   `{"name":…,"arguments":…}` JSON in `message.content` (v1's instructed
@@ -30,6 +32,38 @@ const MAX_STEPS: usize = 4;
 
 const TOOLS_JSON: &str = include_str!("../../../data/posttraining/grammar/tools.json");
 const SYSTEM_PROMPT: &str = include_str!("../../../data/posttraining/grammar/system_prompt.txt");
+
+/// Name of the agent-local `list_results` tool (m7 Delta 5). The
+/// tool has no proto `Cmd` variant — when the model emits it the
+/// agent intercepts in [`AgentBackend::run_turn`] and replies from
+/// [`AgentTurnCtx::catalog`] directly.
+const LIST_RESULTS_TOOL: &str = "list_results";
+
+/// Build the tool response the agent returns for a `list_results`
+/// emit. Reads the live catalog through `ctx.catalog()` — the
+/// snapshot reflects the session at the moment the tool fires, so a
+/// `load` earlier in the same turn is visible without restarting the
+/// turn. Shape: `{ok: true, results: [{name, type, description,
+/// aliases}, ...]}`. Empty `results` when no database is loaded; the
+/// model is expected to prompt the user.
+fn list_results_response(ctx: &AgentTurnCtx) -> Value {
+    let entries = ctx.catalog();
+    let results: Vec<Value> = entries
+        .into_iter()
+        .map(|e| {
+            json!({
+                "name": e.name,
+                "type": e.kind,
+                "description": e.description,
+                "aliases": e.aliases,
+            })
+        })
+        .collect();
+    json!({
+        "ok": true,
+        "results": results,
+    })
+}
 
 pub struct LlamaCppAgent {
     pub server_url: String,
@@ -151,10 +185,22 @@ impl AgentBackend for LlamaCppAgent {
                         let call_id = format!("{}-step{}-call-{}", ctx.turn_id, step, i);
                         ctx.emit_tool_begin(&call_id, ran_summary(&tc.name), "");
 
-                        let cmd = tool_to_cmd(&tc.name, &tc.arguments);
-                        let cmd_known = cmd.is_some();
+                        // m7 Delta 5 — `list_results` is agent-local
+                        // (no proto Cmd variant). Intercept before the
+                        // typed dispatcher so the model receives the
+                        // loaded database's catalog merged with the
+                        // curated alias table.
+                        let is_agent_local = tc.name == LIST_RESULTS_TOOL;
+                        let typed_cmd = if is_agent_local {
+                            None
+                        } else {
+                            tool_to_cmd(&tc.name, &tc.arguments)
+                        };
+                        let tool_known = is_agent_local || typed_cmd.is_some();
 
-                        let (seq, result_json) = if let Some(c) = cmd {
+                        let (seq, result_json) = if is_agent_local {
+                            (0, list_results_response(&ctx))
+                        } else if let Some(c) = typed_cmd {
                             let outcome = ctx.dispatch(c);
                             let response = outcome_to_response(&tc.name, &tc.arguments, &outcome);
                             (outcome.seq, response)
@@ -175,7 +221,7 @@ impl AgentBackend for LlamaCppAgent {
                             .unwrap_or(false);
                         let result_summary = if tool_ok {
                             "ok"
-                        } else if cmd_known {
+                        } else if tool_known {
                             "failed"
                         } else {
                             "tool not implemented"
@@ -761,14 +807,118 @@ fn outcome_to_response(name: &str, args: &Value, outcome: &DispatchOutcome) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::ResultEntry;
+    use std::sync::atomic::AtomicBool;
+
+    fn make_test_ctx(catalog_entries: Vec<ResultEntry>) -> AgentTurnCtx {
+        // A minimal AgentTurnCtx for in-process unit tests of the
+        // agent-local tool handlers. The broadcast bus is dropped on
+        // the floor; the dispatcher and recorder are no-ops; only the
+        // catalog closure matters for the list_results path.
+        let (tx, _rx) = tokio::sync::broadcast::channel::<pb::StateDelta>(1);
+        let next_seq: crate::agent::SeqAllocator = std::sync::Arc::new(|| 0);
+        let dispatcher: crate::agent::Dispatcher =
+            std::sync::Arc::new(|_cmd, _origin| DispatchOutcome {
+                seq: 0,
+                payload: pb::state_delta::Payload::Agent(pb::AgentEvent::default()),
+            });
+        let recorder: crate::agent::EventRecorder = std::sync::Arc::new(|_id, _ev| {});
+        let catalog: crate::agent::CatalogProvider = {
+            let entries = catalog_entries;
+            std::sync::Arc::new(move || entries.clone())
+        };
+        AgentTurnCtx {
+            turn_id: "test-turn".to_string(),
+            request: pb::AgentChatRequest::default(),
+            origin_client_id: "agent:test".to_string(),
+            tx,
+            next_seq,
+            dispatcher,
+            recorder,
+            catalog,
+            cancel: std::sync::Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn list_results_response_serializes_entries_to_json() {
+        // m7 Delta 5 — happy path: a non-empty catalog produces an
+        // `ok:true` response with each entry's canonical name, kind,
+        // description, and alias list verbatim.
+        let entries = vec![
+            ResultEntry {
+                name: "prin_stress1".to_string(),
+                kind: "derived".to_string(),
+                description: "First principal stress eigenvalue".to_string(),
+                aliases: vec![
+                    "first principal stress".to_string(),
+                    "principal stress 1".to_string(),
+                ],
+            },
+            ResultEntry {
+                name: "vel_x".to_string(),
+                kind: "primal".to_string(),
+                description: "Velocity x component".to_string(),
+                aliases: vec!["x velocity".to_string()],
+            },
+        ];
+        let ctx = make_test_ctx(entries);
+        let resp = list_results_response(&ctx);
+        assert_eq!(resp["ok"], true);
+        let results = resp["results"].as_array().expect("results array");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["name"], "prin_stress1");
+        assert_eq!(results[0]["type"], "derived");
+        assert_eq!(results[0]["aliases"][0], "first principal stress");
+        assert_eq!(results[1]["name"], "vel_x");
+        assert_eq!(results[1]["type"], "primal");
+    }
+
+    #[test]
+    fn list_results_response_is_empty_when_no_database_loaded() {
+        // Per the m7 Delta 5 design, the catalog closure returns an
+        // empty vec when no database is loaded. The agent surfaces
+        // this to the model as `ok:true` with `results: []` — the
+        // model is expected to prompt the user to load a database.
+        let ctx = make_test_ctx(vec![]);
+        let resp = list_results_response(&ctx);
+        assert_eq!(resp["ok"], true);
+        assert!(resp["results"]
+            .as_array()
+            .expect("results array")
+            .is_empty());
+    }
+
+    #[test]
+    fn list_results_tool_name_is_not_in_typed_cmd_map() {
+        // The agent intercepts `list_results` before tool_to_cmd; the
+        // typed mapper itself must return None for it so a future
+        // refactor can't accidentally route the call through the
+        // proto dispatcher.
+        assert!(tool_to_cmd(LIST_RESULTS_TOOL, &json!({})).is_none());
+    }
+
+    #[test]
+    fn tools_json_registers_list_results() {
+        // The tool inventory the model sees must include the
+        // agent-local lookup tool — otherwise the model has no signal
+        // that `list_results` is an option and the m8 corpus's
+        // intermediate-tier scenarios can't train against it.
+        let tools = parse_tools_json(TOOLS_JSON).expect("tools.json parses");
+        assert!(
+            tools.iter().any(|t| t.name == LIST_RESULTS_TOOL),
+            "tools.json must declare `list_results`"
+        );
+    }
 
     #[test]
     fn system_prompt_byte_length_matches_bench_pin() {
-        // The bench-pinned prompt is sha256[:16] = 9f36d0deb5e98a89 and
-        // exactly 2044 bytes. Any change here means the prompt drifted
-        // away from the shared `data/posttraining/grammar/system_prompt.txt`
-        // — re-verify with the Python driver and update both ends.
-        assert_eq!(SYSTEM_PROMPT.len(), 2044);
+        // After m7 Delta 5 the prompt is sha256[:16] = 34cc473118246dfb
+        // and 2415 bytes (was 2044 / 9f36d0deb5e98a89 pre-Delta-5).
+        // Any drift here means the served prompt diverged from the
+        // shared `data/posttraining/grammar/system_prompt.txt` — fix
+        // the divergence rather than bumping this assertion blindly.
+        assert_eq!(SYSTEM_PROMPT.len(), 2415);
     }
 
     #[test]

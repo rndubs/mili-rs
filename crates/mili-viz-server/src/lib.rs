@@ -78,6 +78,101 @@ pub const CLIENT_ID_HEADER: &str = "x-client-id";
 
 const BROADCAST_CAP: usize = 256;
 
+/// Curated natural-language alias table merged into the agent-local
+/// `list_results` response (m7 Delta 5,
+/// `planning/mili-viz/mili-agent/m7-bench-live-parity.md` §"Delta 5";
+/// content design lives in `m8-corpus-distillation.md` §"Artifact 1").
+/// Bundled at compile-time so the agent can answer without a file-read
+/// per turn; empty entries are well-formed (the agent surfaces them as
+/// `aliases: []`, `description: ""`).
+const RESULT_ALIASES_JSON: &str =
+    include_str!("../../../data/posttraining/grammar/result_aliases.json");
+
+/// One alias entry as loaded from `result_aliases.json`. `aliases` is
+/// the curated list of natural-language phrasings; `description` is
+/// the short human-readable summary. Empty defaults are returned for
+/// any canonical name that has no entry in the table.
+struct AliasEntry {
+    description: String,
+    aliases: Vec<String>,
+}
+
+impl AliasEntry {
+    fn empty() -> Self {
+        Self {
+            description: String::new(),
+            aliases: Vec::new(),
+        }
+    }
+}
+
+/// Lookup view over the parsed alias table. `lookup` clones (the
+/// agent serializes the result as JSON immediately, so the copy is
+/// cheap and avoids tying the agent's response lifetime to the
+/// static).
+struct AliasTable {
+    by_name: BTreeMap<String, AliasEntry>,
+}
+
+impl AliasTable {
+    fn lookup(&self, name: &str) -> AliasEntry {
+        match self.by_name.get(name) {
+            Some(e) => AliasEntry {
+                description: e.description.clone(),
+                aliases: e.aliases.clone(),
+            },
+            None => AliasEntry::empty(),
+        }
+    }
+}
+
+fn result_alias_table() -> &'static AliasTable {
+    static TABLE: std::sync::LazyLock<AliasTable> = std::sync::LazyLock::new(|| {
+        // Schema (m8 plan §"Artifact 1"):
+        // [{ "name": str, "type": "primal"|"derived",
+        //    "description": str, "aliases": [str, ...] }, ...]
+        // A malformed file is loud at startup — the agent surface is
+        // load-bearing and silently degrading to an empty table would
+        // hide regressions.
+        let raw: serde_json::Value = serde_json::from_str(RESULT_ALIASES_JSON)
+            .expect("result_aliases.json must parse as JSON");
+        let arr = raw
+            .as_array()
+            .expect("result_aliases.json must be a JSON array at top level");
+        let mut by_name: BTreeMap<String, AliasEntry> = BTreeMap::new();
+        for entry in arr {
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .expect("each alias entry must have a string `name`")
+                .to_string();
+            let description = entry
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let aliases: Vec<String> = entry
+                .get("aliases")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            by_name.insert(
+                name,
+                AliasEntry {
+                    description,
+                    aliases,
+                },
+            );
+        }
+        AliasTable { by_name }
+    });
+    &TABLE
+}
+
 fn default_camera() -> pb::CameraState {
     pb::CameraState {
         azimuth: 0.0,
@@ -318,6 +413,57 @@ impl Session {
             camera: default_camera(),
             ..Session::default()
         }
+    }
+
+    /// Project the loaded database's queriable-result catalog into the
+    /// agent-facing `ResultEntry` shape consumed by the `list_results`
+    /// agent-local tool (m7 Delta 5). Returns an empty list when no
+    /// database is loaded; the agent surfaces this back to the model
+    /// as `ok: true` with an empty `results` array so the model can
+    /// prompt the user to load a database before further lookups.
+    ///
+    /// Aliases / descriptions are merged from
+    /// `data/posttraining/grammar/result_aliases.json` (M8 Stage B1);
+    /// canonical names without an alias entry surface with empty
+    /// `aliases` and `description`.
+    fn list_results_catalog(&self) -> Vec<crate::agent::ResultEntry> {
+        let Some(db) = self.db.as_ref() else {
+            return Vec::new();
+        };
+        let alias_table = result_alias_table();
+        let mut out: Vec<crate::agent::ResultEntry> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for name in db.queriable_svars(false, false) {
+            if seen.iter().any(|s| s == &name) {
+                continue;
+            }
+            let entry = alias_table.lookup(&name);
+            out.push(crate::agent::ResultEntry {
+                name: name.clone(),
+                kind: "primal".to_string(),
+                description: entry.description,
+                aliases: entry.aliases,
+            });
+            seen.push(name);
+        }
+        if let Some(mesh_id) = self.topo.as_ref().map(MeshTopology::mesh_id) {
+            for class in db.class_names(mesh_id) {
+                for d in db.derived_variables_of_class(mesh_id, &class) {
+                    if seen.iter().any(|s| s == &d) {
+                        continue;
+                    }
+                    let entry = alias_table.lookup(&d);
+                    out.push(crate::agent::ResultEntry {
+                        name: d.clone(),
+                        kind: "derived".to_string(),
+                        description: entry.description,
+                        aliases: entry.aliases,
+                    });
+                    seen.push(d);
+                }
+            }
+        }
+        out
     }
 
     fn snapshot(&self) -> pb::Snapshot {
@@ -1403,6 +1549,16 @@ impl MiliViz for VizService {
             let svc = svc.clone();
             Arc::new(move |id: &str, ev: &pb::agent_event::Ev| svc.record_turn_event(id, ev))
         };
+        // m7 Delta 5 — agent-local list_results catalog. The closure
+        // re-reads the session at call time so a load that lands
+        // mid-turn is visible to a subsequent list_results emit.
+        let catalog: agent::CatalogProvider = {
+            let svc = svc.clone();
+            Arc::new(move || {
+                let s = svc.inner.session.lock().unwrap();
+                s.list_results_catalog()
+            })
+        };
         let ctx = AgentTurnCtx {
             turn_id: turn_id.clone(),
             request: req,
@@ -1411,6 +1567,7 @@ impl MiliViz for VizService {
             next_seq,
             dispatcher,
             recorder,
+            catalog,
             cancel: cancel.clone(),
         };
         let turn_id_for_task = turn_id.clone();
