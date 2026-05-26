@@ -232,7 +232,10 @@ async fn derived_surfstrain_and_nodal_time() {
         let Some(pb::state_delta::Payload::Result(r)) = d.payload else {
             panic!("show must broadcast a ResultState");
         };
-        assert!(r.geometry.is_none(), "M7 Delta 4: unresolved → geometry None");
+        assert!(
+            r.geometry.is_none(),
+            "M7 Delta 4: unresolved → geometry None"
+        );
     }
 
     // Step to a stressed/deformed state — state 1 is undeformed (all

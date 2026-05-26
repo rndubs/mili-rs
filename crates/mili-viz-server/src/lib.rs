@@ -823,9 +823,7 @@ fn apply(s: &mut Session, cmd: pb::command::Cmd) -> (pb::DeltaKind, pb::state_de
                 || s.topo
                     .as_ref()
                     .zip(s.db.as_ref())
-                    .is_some_and(|(topo, db)| {
-                        topo.vertex_scalar(db, &svar, s.state).is_some()
-                    });
+                    .is_some_and(|(topo, db)| topo.vertex_scalar(db, &svar, s.state).is_some());
             if resolves {
                 let (geometry, min, max) = match s.geometry_ref(&svar) {
                     Some((g, lo, hi)) => (Some(g), lo, hi),

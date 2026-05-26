@@ -612,7 +612,10 @@ fn tool_to_cmd(name: &str, args: &Value) -> Option<pb::command::Cmd> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string(),
-            material: args.get("material").and_then(|v| v.as_u64()).map(|m| m as u32),
+            material: args
+                .get("material")
+                .and_then(|v| v.as_u64())
+                .map(|m| m as u32),
         })),
         "select" => Some(pb::command::Cmd::Select(pb::Select {
             class_name: args
@@ -765,7 +768,7 @@ mod tests {
         // exactly 2044 bytes. Any change here means the prompt drifted
         // away from the shared `data/posttraining/grammar/system_prompt.txt`
         // — re-verify with the Python driver and update both ends.
-        assert_eq!(SYSTEM_PROMPT.as_bytes().len(), 2044);
+        assert_eq!(SYSTEM_PROMPT.len(), 2044);
     }
 
     #[test]
@@ -794,7 +797,8 @@ mod tests {
     #[test]
     fn parses_fg_envelope_escape_body() {
         // Stock FG fallback shape — preserved for compat.
-        let text = "<start_function_call>call:set_state{state:<escape>5<escape>}<end_function_call>";
+        let text =
+            "<start_function_call>call:set_state{state:<escape>5<escape>}<end_function_call>";
         let calls = parse_fg_envelopes(text).expect("one call");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "set_state");

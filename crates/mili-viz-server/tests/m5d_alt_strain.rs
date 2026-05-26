@@ -218,7 +218,10 @@ async fn derived_alt_principal_strain() {
         let Some(pb::state_delta::Payload::Result(r)) = d.payload else {
             panic!("show must broadcast a ResultState");
         };
-        assert!(r.geometry.is_none(), "M7 Delta 4: unresolved → geometry None");
+        assert!(
+            r.geometry.is_none(),
+            "M7 Delta 4: unresolved → geometry None"
+        );
     }
 
     // Step to a deformed/stressed state — state 1 is undeformed (strains

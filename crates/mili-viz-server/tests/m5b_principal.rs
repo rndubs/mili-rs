@@ -255,7 +255,10 @@ async fn derived_principal_families() {
         let Some(pb::state_delta::Payload::Result(r)) = d.payload else {
             panic!("show must broadcast a ResultState");
         };
-        assert!(r.geometry.is_none(), "M7 Delta 4: unresolved → geometry None");
+        assert!(
+            r.geometry.is_none(),
+            "M7 Delta 4: unresolved → geometry None"
+        );
     }
 
     // Step to a stressed state — state 1 is the undeformed initial
