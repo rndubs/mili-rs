@@ -61,3 +61,7 @@ logs/
 # and `scheduled_tasks.lock` is harness runtime state.
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+
+# MacOS
+*.DS_Store
