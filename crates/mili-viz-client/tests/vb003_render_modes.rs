@@ -180,28 +180,34 @@ fn wireframe_is_visible_on_dark_background() {
 /// blacking the model out. The original pass drew every edge at full
 /// opaque black — a dense hull rendered as a black mass.
 #[test]
+#[allow(clippy::cast_precision_loss)]
+// The casts are grid coordinates (≤ 65) and pixel-count sums bounded
+// by `160·160·255` — orders of magnitude below the f32/f64 mantissa,
+// so the precision-loss warning is theoretical here (the
+// `common/mod.rs` pattern).
 fn dense_edge_overlay_keeps_the_fill_visible() {
     // A 64×64-cell unit grid: at 160×160 the framed cells are ~2 px —
     // far below the fade-in threshold.
-    let n = 64usize;
+    let cells = 64usize;
     let mut positions = Vec::new();
-    for j in 0..=n {
-        for i in 0..=n {
+    for row in 0..=cells {
+        for col in 0..=cells {
             positions.push([
-                i as f32 / n as f32 * 2.0 - 1.0,
-                j as f32 / n as f32 * 2.0 - 1.0,
+                col as f32 / cells as f32 * 2.0 - 1.0,
+                row as f32 / cells as f32 * 2.0 - 1.0,
                 0.0,
             ]);
         }
     }
     let mut indices = Vec::new();
-    for j in 0..n {
-        for i in 0..n {
-            let a = (j * (n + 1) + i) as u32;
-            let b = a + 1;
-            let c = a + (n + 1) as u32;
-            let d = c + 1;
-            indices.extend_from_slice(&[a, b, d, a, d, c]);
+    let stride = (cells + 1) as u32;
+    for row in 0..cells {
+        for col in 0..cells {
+            let v00 = (row * (cells + 1) + col) as u32;
+            let v10 = v00 + 1;
+            let v01 = v00 + stride;
+            let v11 = v01 + 1;
+            indices.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
         }
     }
     let count = positions.len();
@@ -232,11 +238,11 @@ fn dense_edge_overlay_keeps_the_fill_visible() {
             .sum();
         sum as f64 / (px.len() / 4) as f64
     };
-    let ls = mean_luma(&shaded);
-    let le = mean_luma(&edges);
+    let shaded_luma = mean_luma(&shaded);
+    let edges_luma = mean_luma(&edges);
     assert!(
-        le > 0.5 * ls,
+        edges_luma > 0.5 * shaded_luma,
         "dense edges must not black out the fill: Edges mean luminance \
-         {le:.1} vs Shaded {ls:.1}"
+         {edges_luma:.1} vs Shaded {shaded_luma:.1}"
     );
 }

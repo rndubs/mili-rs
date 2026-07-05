@@ -719,7 +719,11 @@ impl Renderer {
                 proj_w as f32,
                 proj_h as f32,
                 LINE_WIDTH_PX,
-                if self.target_format.is_srgb() { 1.0 } else { 0.0 },
+                if self.target_format.is_srgb() {
+                    1.0
+                } else {
+                    0.0
+                },
             ],
             light_dir: [light.x, light.y, light.z, edge_strength],
             view_dir: [view_dir.x, view_dir.y, view_dir.z, 0.0],

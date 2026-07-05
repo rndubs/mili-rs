@@ -118,7 +118,7 @@ async fn main() {
         ("d3samp4", vec!["serial", "d3samp4", "d3samp4.pltA"], ""),
         ("tet", vec!["serial", "tet", "tet.pltA"], ""),
     ] {
-        let path = corpus_path(&rel.iter().map(|s| *s).collect::<Vec<_>>());
+        let path = corpus_path(&rel);
         if !path.exists() {
             eprintln!("skip {name}: fixture absent");
             continue;
