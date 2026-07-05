@@ -131,3 +131,112 @@ fn render_modes_differ() {
     assert_ne!(wire, shaded, "the wireframe must change pixels");
     assert_ne!(wire, edges, "wireframe (no fill) ≠ filled+edges");
 }
+
+/// Rendering-quality regression: the wireframe must be *visible* over
+/// the dark clear colour. The original pass drew hard-coded opaque
+/// black lines (`edges.wgsl`), which over the near-black background
+/// rendered an invisible model; the fill-less modes now use a light
+/// edge colour.
+#[test]
+fn wireframe_is_visible_on_dark_background() {
+    let mesh = Mesh {
+        positions: vec![
+            [-1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
+        normals: vec![[0.0, 0.0, 1.0]; 4],
+        indices: vec![0, 1, 2, 0, 2, 3],
+        scalars: None,
+        element_edges: None,
+        tri_flags: None,
+        tri_member_id: None,
+    };
+    let (center, radius) = mesh.bounds();
+    let camera = Camera::looking_at(center, radius);
+    let (w, h) = (160u32, 160u32);
+    let Some(px) = render_mesh_to_image_with_mode(w, h, &camera, &mesh, RenderMode::Wireframe)
+    else {
+        eprintln!("skip: no wgpu adapter (skip-on-absent per CLAUDE.md)");
+        return;
+    };
+    // The clear colour maxes out at ~20/255; light edge pixels clear
+    // 100 comfortably. Black edges (the regression) leave zero.
+    let bright = px
+        .chunks_exact(4)
+        .filter(|c| c[0].max(c[1]).max(c[2]) > 100)
+        .count();
+    assert!(
+        bright > 50,
+        "wireframe edges must be light over the dark background, got \
+         {bright} bright pixels — black-on-near-black regression?"
+    );
+}
+
+/// Rendering-quality regression: on a mesh whose elements are only a
+/// few pixels on screen, the `Edges` overlay must dissolve into the
+/// fill (projected-length density fade + sub-1 strength) instead of
+/// blacking the model out. The original pass drew every edge at full
+/// opaque black — a dense hull rendered as a black mass.
+#[test]
+fn dense_edge_overlay_keeps_the_fill_visible() {
+    // A 64×64-cell unit grid: at 160×160 the framed cells are ~2 px —
+    // far below the fade-in threshold.
+    let n = 64usize;
+    let mut positions = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            positions.push([
+                i as f32 / n as f32 * 2.0 - 1.0,
+                j as f32 / n as f32 * 2.0 - 1.0,
+                0.0,
+            ]);
+        }
+    }
+    let mut indices = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            let a = (j * (n + 1) + i) as u32;
+            let b = a + 1;
+            let c = a + (n + 1) as u32;
+            let d = c + 1;
+            indices.extend_from_slice(&[a, b, d, a, d, c]);
+        }
+    }
+    let count = positions.len();
+    let mesh = Mesh {
+        positions,
+        normals: vec![[0.0, 0.0, 1.0]; count],
+        indices,
+        scalars: None,
+        element_edges: None,
+        tri_flags: None,
+        tri_member_id: None,
+    };
+    let (center, radius) = mesh.bounds();
+    let camera = Camera::looking_at(center, radius);
+    let (w, h) = (160u32, 160u32);
+    let Some(shaded) = render_mesh_to_image_with_mode(w, h, &camera, &mesh, RenderMode::Shaded)
+    else {
+        eprintln!("skip: no wgpu adapter (skip-on-absent per CLAUDE.md)");
+        return;
+    };
+    let edges = render_mesh_to_image_with_mode(w, h, &camera, &mesh, RenderMode::Edges)
+        .expect("adapter already proven");
+
+    let mean_luma = |px: &[u8]| {
+        let sum: u64 = px
+            .chunks_exact(4)
+            .map(|c| u64::from(c[0].max(c[1]).max(c[2])))
+            .sum();
+        sum as f64 / (px.len() / 4) as f64
+    };
+    let ls = mean_luma(&shaded);
+    let le = mean_luma(&edges);
+    assert!(
+        le > 0.5 * ls,
+        "dense edges must not black out the fill: Edges mean luminance \
+         {le:.1} vs Shaded {ls:.1}"
+    );
+}

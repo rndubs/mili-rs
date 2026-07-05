@@ -235,13 +235,41 @@ See [`status.md`](status.md) and the per-milestone
      const in `renderer.rs` (1.5 px today); promote to a
      `tweaks.rs`-persisted slider if and when "Preferences →
      Wireframe thickness" is asked for. The pipeline is alpha-blended
-     with depth-test `LessEqual` + depth-write on, preserving the
-     overlay / self-occluding semantics of the original pass. The
-     shared `Uniforms` gained a `viewport_and_width: vec4<f32>` field
-     (mesh shader also declares it for binding compatibility but
-     reads only `view_proj`). VB-004's zero-bias rule no longer
-     applies (TriangleList), though the bias stays at default to keep
-     z-fight behaviour identical to before.
+     with depth-test `LessEqual`. The shared `Uniforms` gained a
+     `viewport_and_width: vec4<f32>` field (mesh shader also declares
+     it for binding compatibility).
+  3. **Rendering-quality pass (2026-07)** — four fixes on top of the
+     quad pass, after headless lavapipe renders showed the edges were
+     still dirty in practice:
+     * the **fill** is depth-biased back (`constant 2, slope 1.0` on
+       the mesh pipeline) so the coplanar edge quads reliably win the
+       depth test — the expanded quad keeps its endpoints' exact
+       depth, so on obliquely-viewed faces the face itself used to
+       occlude stretches of its own edges (stippled lines);
+     * the edge pass **no longer writes depth** — a blended pass
+       writing depth meant the ~zero-alpha AA feather of one quad
+       occluded later overlapping quads, speckling every shared
+       vertex (Wireframe was always documented as see-through; now it
+       actually is);
+     * the edge colour is a **per-mode uniform** (`edge_params`) —
+       light steel for the fill-less modes (opaque black over the
+       near-black clear colour rendered Wireframe invisible), dark
+       charcoal for the overlay modes;
+     * **density fade + strength** — alpha scales with the projected
+       edge length (`smoothstep(2, 8, len_px)`, floor per mode) and a
+       per-mode global strength < 1 for overlays, so a mesh whose
+       cells are a few pixels on screen dissolves into the lit fill
+       instead of blacking the model out.
+     The same pass moved shading to a camera-relative headlight +
+     Blinn-Phong specular computed in linear RGB (colors linearized
+     at upload, re-encoded per the target's sRGB-ness — windowed
+     surfaces now explicitly prefer an sRGB format so window and
+     snapshot agree), with |cos| two-sided terms (a hard
+     normal-flip speckles grazing faces) and a screen-derivative
+     crease fix that keeps 90° FEA corners crisp without splitting
+     vertices. Regression gates:
+     `vb003_render_modes::wireframe_is_visible_on_dark_background`,
+     `vb003_render_modes::dense_edge_overlay_keeps_the_fill_visible`.
 
   Alternative considered and **not** taken: a **barycentric
   wireframe** rendered inside the mesh fragment shader (cheapest GPU

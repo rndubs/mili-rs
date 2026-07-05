@@ -142,6 +142,8 @@ async fn main() {
             (RenderMode::Edges, "edges"),
             (RenderMode::FeatureEdges, "featureedges"),
             (RenderMode::Wireframe, "wireframe"),
+            (RenderMode::Translucent, "translucent"),
+            (RenderMode::Xray, "xray"),
         ] {
             for samples in [1u32, 4] {
                 let px = render_with_samples(&mesh, range, mode, samples, w, h, &camera);
