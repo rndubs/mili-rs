@@ -10,23 +10,45 @@
 // shader uses to taper alpha analytically. See
 // `planning/mili-viz/README.md` § "Edge rendering" for the rationale.
 //
+// Rendering-quality pass (2026-07):
+//  * The edge colour is a per-mode uniform (`edge_params.rgb`, linear)
+//    instead of hard-coded opaque black — black lines were invisible
+//    over the near-black clear colour in Wireframe mode and swamped
+//    the fill on dense meshes.
+//  * Density fade: `fade` scales alpha by the projected edge length,
+//    so a mesh whose elements are a few pixels on screen dissolves
+//    into the fill instead of blacking it out. `edge_params.w` is the
+//    fade floor — 1.0 disables the fade (Wireframe, where there is no
+//    fill to fall back on), 0.0 lets dense overlay edges vanish
+//    entirely.
+//  * Depth-test `LessEqual`, depth-write **off**: the opaque fill owns
+//    the depth buffer (and is depth-biased back so coplanar edges
+//    win); writing depth from a blended pass made the ~zero-alpha AA
+//    feathers of one edge occlude the next, speckling every shared
+//    vertex.
+//
 // Per-vertex layout:
 //   @location(0) corner: vec2<f32>  // x ∈ {0,1} picks endpoint; y ∈ {-1,+1} picks side
 // Per-instance layout:
 //   @location(1) endpoint_a: vec3<f32>
 //   @location(2) endpoint_b: vec3<f32>
-//
-// Depth-tested `LessEqual` + depth-write on so back edges are occluded
-// by the filled hull in overlay mode and a bare wireframe still
-// self-occludes (the original VB-003 semantics).
 
 struct Uniforms {
     view_proj: mat4x4<f32>,
-    // (viewport_px.x, viewport_px.y, line_width_px, _pad). The viewport
-    // is the **scene** rect the host calls `set_viewport` with, not the
-    // framebuffer, so the projected pixel widths land on the right
-    // axis when the egui panels squeeze the scene off-centre.
+    // (viewport_px.x, viewport_px.y, line_width_px, srgb_target_flag).
+    // The viewport is the **scene** rect the host calls `set_viewport`
+    // with, not the framebuffer, so the projected pixel widths land on
+    // the right axis when the egui panels squeeze the scene off-centre.
     viewport_and_width: vec4<f32>,
+    // Lighting params (layout shared with `mesh.wgsl`); this pass
+    // reads only `light_dir.w` = the per-mode global edge alpha
+    // strength. Overlay modes keep it < 1 so a strongly foreshortened
+    // face — edges longer than the fade threshold but packed tighter
+    // than a pixel — never fully blacks out the fill beneath.
+    light_dir: vec4<f32>,
+    view_dir: vec4<f32>,
+    // rgb = edge colour (linear); w = density-fade floor in [0,1].
+    edge_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -35,9 +57,11 @@ var<uniform> u: Uniforms;
 struct VsOut {
     @builtin(position) clip_position: vec4<f32>,
     // Signed pixel distance from the line centre, ±(half_width + 1)
-    // at the quad's outer edge. Fragment alpha is a smoothstep on
+    // at the quad's outer edge. Fragment alpha is a taper on
     // `|dist_px|` so the line edge antialiases without needing MSAA.
     @location(0) dist_px: f32,
+    // Density-fade alpha scale, constant per instance.
+    @location(1) fade: f32,
 };
 
 @vertex
@@ -64,8 +88,14 @@ fn vs_main(
     let a_ndc = a_clip.xy / a_clip.w;
     let b_ndc = b_clip.xy / b_clip.w;
     let dir_px = (b_ndc - a_ndc) * viewport * 0.5;
-    let dir = dir_px / max(length(dir_px), 1e-6);
+    let len_px = length(dir_px);
+    let dir = dir_px / max(len_px, 1e-6);
     let normal = vec2<f32>(-dir.y, dir.x);
+
+    // Density fade: edges shorter than ~2 px on screen contribute the
+    // floor only; ≥ ~8 px draw at full strength. Smooth in between so
+    // zooming never pops.
+    let fade = smoothstep(2.0, 8.0, len_px);
 
     // Pixel-space offset → NDC (×2/viewport) → clip (×w).
     let offset_px = normal * corner.y * extend_px;
@@ -75,7 +105,16 @@ fn vs_main(
     var out: VsOut;
     out.clip_position = vec4<f32>(p_clip.xy + offset_clip, p_clip.z, p_clip.w);
     out.dist_px = corner.y * extend_px;
+    out.fade = mix(u.edge_params.w, 1.0, fade);
     return out;
+}
+
+// Piecewise sRGB encode — same as `mesh.wgsl`, so the edge colour is
+// display-correct on the non-sRGB headless target too.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
 }
 
 @fragment
@@ -84,6 +123,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // alpha = 1 inside the core, linear taper across the 1-px feather.
     // At |dist| = half_px - 0.5 alpha is 1; at |dist| = half_px + 0.5
     // alpha is 0.
-    let alpha = clamp(half_px + 0.5 - abs(in.dist_px), 0.0, 1.0);
-    return vec4<f32>(0.0, 0.0, 0.0, alpha);
+    let aa = clamp(half_px + 0.5 - abs(in.dist_px), 0.0, 1.0);
+    var rgb = u.edge_params.rgb;
+    if (u.viewport_and_width.w < 0.5) {
+        rgb = linear_to_srgb(rgb);
+    }
+    return vec4<f32>(rgb, aa * in.fade * u.light_dir.w);
 }

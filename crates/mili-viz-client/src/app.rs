@@ -955,7 +955,18 @@ impl ApplicationHandler for App {
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
+        // Prefer an sRGB surface explicitly (rather than whatever the
+        // platform lists first) so the lighting math in `mesh.wgsl`
+        // — done in linear RGB — is gamma-encoded on present the same
+        // way everywhere, and the window matches the headless snapshot
+        // path (which encodes manually; see `Uniforms::
+        // viewport_and_width.w`).
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .unwrap_or(caps.formats[0]);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,

@@ -1,6 +1,7 @@
 //! Minimal `wgpu` renderer: an indexed triangle mesh viewed through
-//! the orbit [`Camera`], with a depth buffer and a single fixed
-//! directional light (`phase-5-m2.md` Decision 42). Structured
+//! the orbit [`Camera`], with a depth buffer and a camera-relative
+//! headlight (originally a fixed directional light, `phase-5-m2.md`
+//! Decision 42; see the rendering-quality paragraph below). Structured
 //! render-to-texture-first (`phase-5-m1.md` Decision 39) — the
 //! windowed path in `app.rs` is a thin wrapper that points the same
 //! [`Renderer`] at a surface texture, and the gating test points it
@@ -20,6 +21,16 @@
 //! on the filled hull (front edges only — hidden-line overlay);
 //! [`RenderMode::Wireframe`] draws only the edges over the cleared
 //! background (see-through wireframe).
+//!
+//! Rendering-quality pass (2026-07): the fill is depth-biased back so
+//! coplanar edge quads win the depth test (no more stippled lines);
+//! the blended edge pass no longer writes depth (no more speckle at
+//! shared vertices); edge colour is per-mode (light in the fill-less
+//! modes, dark charcoal over the fill) with a projected-length density
+//! fade so dense meshes dissolve into the fill instead of blacking it
+//! out; and shading moved to a camera-relative headlight + specular in
+//! linear RGB with explicit sRGB handling on both the windowed and
+//! headless targets (see `mesh.wgsl` / `edges.wgsl`).
 //!
 //! [`Mesh::edge_indices`]: crate::mesh::Mesh::edge_indices
 
@@ -66,17 +77,79 @@ const BASE_COLOR: [f32; 3] = [0.62, 0.68, 0.80];
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
-    /// `(viewport_px.x, viewport_px.y, line_width_px, _pad)`. Consumed
-    /// by the screen-space line-quad edge pass (`edges.wgsl`) for
-    /// pixel-correct line widths; the mesh shader sees the same struct
-    /// (binding compatibility) but reads only `view_proj`.
+    /// `(viewport_px.x, viewport_px.y, line_width_px, srgb_flag)`.
+    /// The first three are consumed by the screen-space line-quad edge
+    /// pass (`edges.wgsl`) for pixel-correct line widths; `srgb_flag`
+    /// is `1.0` when the color target is an sRGB format (hardware
+    /// encodes, shaders output linear) and `0.0` when it is not (the
+    /// headless RGBA8 path — shaders encode manually so both targets
+    /// display identically).
     viewport_and_width: [f32; 4],
+    /// World-space unit vector surface→light. A camera-relative
+    /// headlight tilted up/right, recomputed per frame from the orbit
+    /// camera so the model is always lit no matter its orientation.
+    /// `.w` carries the edge-pass global alpha strength (see
+    /// [`edge_params_for`]) — the mesh shader ignores it.
+    light_dir: [f32; 4],
+    /// World-space unit vector surface→eye (the headlight's specular
+    /// partner).
+    view_dir: [f32; 4],
+    /// Edge-pass parameters: `rgb` = per-mode edge colour (linear),
+    /// `w` = density-fade floor (`1.0` disables the projected-length
+    /// fade — Wireframe; `0.0` lets dense overlay edges vanish).
+    edge_params: [f32; 4],
+}
+
+/// Piecewise sRGB → linear decode. The base colour, colormap stops and
+/// edge colours are authored as display (sRGB) values — the legend UI
+/// shows them verbatim — so they are linearized before lighting math
+/// and re-encoded at display time (`mesh.wgsl`/`edges.wgsl`).
+fn srgb_to_linear(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    })
 }
 
 /// Pixel width of the screen-space line-quad edge pass. 1.5 px reads as
 /// a crisp ~2-px line after the analytical 1-px AA feather and 4×
 /// MSAA — tweak here if you want chunkier or thinner edges.
 const LINE_WIDTH_PX: f32 = 1.5;
+
+/// Edge colour (sRGB) for the overlay modes (`Edges`/`FeatureEdges`) —
+/// dark charcoal over the lit fill, replacing the hard-coded opaque
+/// black that swamped dense meshes.
+const EDGE_COLOR_DARK: [f32; 3] = [0.08, 0.09, 0.11];
+
+/// Edge colour (sRGB) for the fill-less / translucent modes
+/// (`Wireframe`/`Xray`) — light steel that reads over the dark clear
+/// colour (black-on-near-black was invisible).
+const EDGE_COLOR_LIGHT: [f32; 3] = [0.75, 0.78, 0.88];
+
+/// Per-mode `(edge_color_srgb, fade_floor, strength)`.
+///
+/// The fade floor is the minimum of the projected-edge-length alpha
+/// fade (`edges.wgsl`): `1.0` disables the fade entirely (Wireframe —
+/// with no fill beneath, fading dense edges would leave nothing),
+/// `0.0` lets a dense overlay dissolve into the fill, and the
+/// in-between floors keep sparse structural edges from ever fully
+/// vanishing.
+///
+/// `strength` is a global alpha multiplier. Overlay edges stay < 1 so
+/// even where projected edges pack tighter than a pixel (a strongly
+/// foreshortened face — the length-based fade can't catch that) the
+/// lit fill still shows through instead of blacking out.
+fn edge_params_for(mode: RenderMode) -> ([f32; 3], f32, f32) {
+    match mode {
+        RenderMode::Wireframe => (EDGE_COLOR_LIGHT, 1.0, 1.0),
+        RenderMode::Xray => (EDGE_COLOR_LIGHT, 0.3, 0.8),
+        RenderMode::FeatureEdges => (EDGE_COLOR_DARK, 0.6, 0.9),
+        _ => (EDGE_COLOR_DARK, 0.0, 0.55),
+    }
+}
 
 /// Dihedral-angle threshold for [`RenderMode::FeatureEdges`]
 /// (`planning/mili-viz/feature-edges.md` Decision 101). Triangle pairs
@@ -285,7 +358,19 @@ impl Renderer {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // Push the fill slightly *back* (polygon-offset style)
+                // so the coplanar edge quads reliably win the depth
+                // test. The edge quads keep their endpoints' exact
+                // depth but are expanded sideways in screen space, so
+                // without this bias an obliquely-viewed face occludes
+                // parts of its own edges — the broken/stippled line
+                // look. Slope scaling handles steep faces; the small
+                // constant covers face-on ones.
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
             }),
             multisample,
             multiview_mask: None,
@@ -303,13 +388,14 @@ impl Renderer {
         //            into `MeshBuffers.edge_endpoint_buffer` by
         //            `upload_mesh`.
         // Alpha-blended over the filled hull so the AA feather
-        // composites cleanly; depth-test `LessEqual` + depth-write on
-        // keeps the original overlay / self-occluding semantics
-        // (front edges on top of the fill; back edges hidden in the
-        // wireframe mode). The VB-004 `LineList`-only zero-bias rule
-        // no longer applies (we are TriangleList now); leaving bias at
-        // default keeps behaviour identical for the common "line and
-        // face share verts" case.
+        // composites cleanly; depth-test `LessEqual`, depth-write
+        // **off** — the opaque fill owns the depth buffer (and is
+        // depth-biased back so coplanar edges win). Writing depth from
+        // this blended pass made the ~zero-alpha AA feather of one
+        // edge quad occlude later overlapping quads, speckling every
+        // shared vertex; and in Wireframe mode it only ever
+        // implemented a see-through wireframe anyway (all edges of a
+        // bare hull are drawn — that is the documented semantics).
         let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mili-viz edge shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("edges.wgsl").into()),
@@ -353,7 +439,7 @@ impl Renderer {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
-                depth_write_enabled: Some(true),
+                depth_write_enabled: Some(false),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -473,14 +559,18 @@ impl Renderer {
     /// M2 uniform [`BASE_COLOR`] (so a bare hull renders exactly as in
     /// M2).
     pub fn upload_mesh(&mut self, mesh: &Mesh, range: Option<(f32, f32)>, colormap: &str) {
+        // Colormap stops and BASE_COLOR are authored as display (sRGB)
+        // values — the legend swatches show them verbatim — so they are
+        // linearized here; lighting runs in linear and the shader
+        // re-encodes at display time.
         let color_of = |i: usize| -> [f32; 3] {
-            match (&mesh.scalars, range) {
+            srgb_to_linear(match (&mesh.scalars, range) {
                 (Some(s), Some((lo, hi))) => {
                     let t = crate::colormap::normalize(s[i], lo, hi);
                     crate::colormap::sample_named(colormap, t)
                 }
                 _ => BASE_COLOR,
-            }
+            })
         };
         let verts: Vec<Vertex> = mesh
             .positions
@@ -609,13 +699,35 @@ impl Renderer {
             None => (width, height),
         };
         let vp: Mat4 = camera.view_projection(proj_w, proj_h);
+        // Camera-relative headlight: from over the viewer's upper-right
+        // shoulder, recomputed per frame so the model is lit in every
+        // orbit orientation (`basis()` forward points eye→focus).
+        let (right, up, forward) = camera.basis();
+        let light = (-forward + up * 0.5 + right * 0.3).normalize();
+        let view_dir = -forward;
+        let (edge_srgb, fade_floor, edge_strength) = edge_params_for(self.mode);
+        let edge_lin = srgb_to_linear(edge_srgb);
         let uniforms = Uniforms {
             view_proj: vp.to_cols_array_2d(),
             // The edge pass needs the **scene** viewport size in pixels
             // (not the framebuffer) — that's what `set_viewport` shrinks
             // the rasterisation to, and the screen-space line-quad math
-            // is in pixel units of that rect.
-            viewport_and_width: [proj_w as f32, proj_h as f32, LINE_WIDTH_PX, 0.0],
+            // is in pixel units of that rect. `.w` tells the shaders
+            // whether the target encodes sRGB in hardware or they must
+            // encode manually (the headless RGBA8 path).
+            viewport_and_width: [
+                proj_w as f32,
+                proj_h as f32,
+                LINE_WIDTH_PX,
+                if self.target_format.is_srgb() {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
+            light_dir: [light.x, light.y, light.z, edge_strength],
+            view_dir: [view_dir.x, view_dir.y, view_dir.z, 0.0],
+            edge_params: [edge_lin[0], edge_lin[1], edge_lin[2], fade_floor],
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
