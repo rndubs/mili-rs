@@ -1,6 +1,7 @@
 [submodule "reference/mili"]
 	path = reference/mili
 	url = https://github.com/mdg-graphics/mili.git
+	update = none
 [submodule "reference/mili-python"]
 	path = reference/mili-python
 	url = https://github.com/mdg-graphics/mili-python.git

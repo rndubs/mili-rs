@@ -1,6 +1,6 @@
 [package]
 name = "mili-rs"
-version = "0.0.0"
+version = "0.1.0"
 description = "Pure-Rust reader and writer for LLNL MDG mili databases."
 edition.workspace = true
 rust-version.workspace = true
